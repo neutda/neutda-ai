@@ -1,29 +1,36 @@
-import { config } from "./config.js";
+import { allBackendSpecs, config } from "./config.js";
 import { chatCompletion, chatCompletionStream, checkHealth, fetchModel } from "./llamaClient.js";
 import { logger } from "./logger.js";
 
+const CHAT_TIERS = new Set(["small", "medium", "large"]);
+
 /**
  * 여러 llama-server 백엔드를 관리하는 풀.
- * - 주기적 헬스체크
- * - least-connections(최소 in-flight) 라우팅
- * - 장애 시 다른 백엔드로 failover
- * - 백엔드별 통계 수집(모니터링용)
+ * 백엔드마다 채팅·라우터 역할을 독립적으로 켜고 끌 수 있다.
  */
 class Backend {
   constructor(url, tier = "large", device = null) {
     this.url = url;
     this.tier = tier;
-    this.device = device; // "gpu" | "cpu" | null(미지정)
+    this.device = device;
+    this.chatEnabled = true;
+    this.routerEnabled = false;
     this.healthy = false;
     this.model = null;
     this.inFlight = 0;
     this.totalRequests = 0;
+    this.routerRequests = 0;
+    this.chatRequests = 0;
     this.totalErrors = 0;
     this.totalLatencyMs = 0;
     this.lastLatencyMs = null;
     this.healthLatencyMs = null;
     this.lastError = null;
     this.lastCheck = null;
+  }
+
+  get canChat() {
+    return this.chatEnabled && CHAT_TIERS.has(this.tier);
   }
 
   get avgLatencyMs() {
@@ -36,10 +43,15 @@ class Backend {
       url: this.url,
       tier: this.tier,
       device: this.device,
+      roles: { chat: this.chatEnabled, router: this.routerEnabled },
+      chatEnabled: this.chatEnabled,
+      routerEnabled: this.routerEnabled,
       healthy: this.healthy,
       model: this.model,
       inFlight: this.inFlight,
       totalRequests: this.totalRequests,
+      routerRequests: this.routerRequests,
+      chatRequests: this.chatRequests,
       totalErrors: this.totalErrors,
       avgLatencyMs: this.avgLatencyMs,
       lastLatencyMs: this.lastLatencyMs,
@@ -53,12 +65,12 @@ class Backend {
 class Pool {
   constructor(specs) {
     this.backends = specs.map((s) => new Backend(s.url, s.tier, s.device));
+    this.applyDefaultRouterRoles();
     this.rrCursor = 0;
     this.healthTimer = null;
-    this.completed = []; // 최근 완료 시각(ms) — 처리량 계산용
+    this.completed = [];
   }
 
-  /** 헬스체크 1회 (모든 백엔드 병렬) */
   async checkAll() {
     await Promise.all(
       this.backends.map(async (b) => {
@@ -69,12 +81,11 @@ class Pool {
         b.lastCheck = new Date().toISOString();
         if (ok && !b.model) b.model = await fetchModel(b.url);
         if (!ok && !b.lastError) b.lastError = "health check failed";
-        // 상태 전이만 로깅(도배 방지)
         if (prev !== ok) {
           if (ok) logger.info(`백엔드 복구됨 ✅ ${b.tier}/${b.device ?? "-"} @ ${b.url} (${latencyMs}ms)`);
           else logger.warn(`백엔드 다운 ⚠️ ${b.tier}/${b.device ?? "-"} @ ${b.url}`);
         }
-      })
+      }),
     );
   }
 
@@ -90,21 +101,120 @@ class Pool {
     this.healthTimer = null;
   }
 
+  /** ROUTING_MODE=llm 일 때 시작 라우터 역할 부여 (모니터 토글로 이후 변경) */
+  applyDefaultRouterRoles() {
+    if (config.routingMode === "heuristic") return;
+
+    if (config.routerBackendUrl) {
+      const b = this.backends.find((x) => x.url === config.routerBackendUrl);
+      if (b) {
+        b.routerEnabled = true;
+        return;
+      }
+    }
+    const small = this.backends.find((b) => b.tier === "small");
+    if (small) small.routerEnabled = true;
+  }
+
+  setRoleEnabled(url, role, enabled) {
+    const b = this.backends.find((x) => x.url === url);
+    if (!b) return false;
+    if (role === "chat") b.chatEnabled = Boolean(enabled);
+    else if (role === "router") b.routerEnabled = Boolean(enabled);
+    else return false;
+    logger.info(
+      `백엔드 ${role} ${enabled ? "ON" : "OFF"} → ${b.tier} @ ${b.url}`,
+    );
+    return true;
+  }
+
+  hasActiveRouter() {
+    return this.backends.some((b) => b.routerEnabled);
+  }
+
+  getActiveRouterUrl() {
+    return this.pickRouter()?.url ?? null;
+  }
+
+  /** 라우터 역할 백엔드 선택 (least-connections) */
+  pickRouter(exclude = new Set()) {
+    let candidates = this.backends.filter(
+      (b) => b.routerEnabled && !exclude.has(b.url),
+    );
+    if (!candidates.length) return null;
+
+    const healthy = candidates.filter((b) => b.healthy);
+    if (healthy.length) candidates = healthy;
+
+    let min = Infinity;
+    for (const b of candidates) min = Math.min(min, b.inFlight);
+    const leastLoaded = candidates.filter((b) => b.inFlight === min);
+    this.rrCursor = (this.rrCursor + 1) % leastLoaded.length;
+    return leastLoaded[this.rrCursor];
+  }
+
   /**
-   * 건강한 백엔드 중 in-flight 가 가장 적은 것 선택 (동률이면 round-robin).
-   * preferredTier 의 후보를 우선하고, 없으면(allowOtherTiers) 다른 티어로 폴백.
+   * 라우터 역할 백엔드에 분류 요청을 먼저 보낸다 (채팅보다 선행).
+   * in-flight·요청 통계에 반영된다.
    */
+  async classify(params = {}) {
+    const tried = new Set();
+    const maxAttempts = Math.max(this.backends.filter((b) => b.routerEnabled).length, 1);
+    let lastErr = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const backend = this.pickRouter(tried);
+      if (!backend) break;
+      tried.add(backend.url);
+
+      backend.inFlight++;
+      backend.totalRequests++;
+      backend.chatRequests++;
+      backend.routerRequests++;
+      const started = Date.now();
+      try {
+        const result = await chatCompletion({ baseUrl: backend.url, ...params, enableThinking: false });
+        backend.lastLatencyMs = Date.now() - started;
+        backend.totalLatencyMs += backend.lastLatencyMs;
+        return { result, backendUrl: backend.url, tier: backend.tier, device: backend.device };
+      } catch (err) {
+        backend.totalErrors++;
+        backend.lastError = err.message;
+        lastErr = err;
+        if (!err.retryable) throw err;
+        backend.healthy = false;
+        logger.warn(`라우터 백엔드 실패 → 재시도 (${backend.url}): ${err.message}`);
+      } finally {
+        backend.inFlight--;
+        this.completed.push(Date.now());
+      }
+    }
+
+    if (lastErr) throw lastErr;
+    return null;
+  }
+
+  getRoutingSummary() {
+    const activeRouters = this.backends.filter((b) => b.routerEnabled);
+    return {
+      effectiveMode: this.hasActiveRouter() ? "llm" : "heuristic",
+      activeRouterCount: activeRouters.length,
+      activeRouterUrl: this.getActiveRouterUrl(),
+    };
+  }
+
   pick(exclude = new Set(), preferredTier = null, allowOtherTiers = true, preferredDevice = null) {
-    const healthy = this.backends.filter((b) => b.healthy && !exclude.has(b.url));
+    const healthy = this.backends.filter(
+      (b) => b.healthy && b.canChat && !exclude.has(b.url),
+    );
     if (healthy.length === 0) return null;
 
     let candidates = preferredTier ? healthy.filter((b) => b.tier === preferredTier) : healthy;
     if (candidates.length === 0) {
       if (!allowOtherTiers) return null;
-      candidates = healthy; // 에스컬레이션: 다른 티어 허용
+      candidates = healthy;
     }
 
-    // 같은 티어 내에서 선호 장치(gpu/cpu)가 있으면 우선, 없으면 티어 전체로 폴백
     if (preferredDevice) {
       const byDevice = candidates.filter((b) => b.device === preferredDevice);
       if (byDevice.length > 0) candidates = byDevice;
@@ -118,10 +228,6 @@ class Pool {
     return leastLoaded[this.rrCursor];
   }
 
-  /**
-   * 채팅 요청을 풀을 통해 실행한다. preferredTier 우선, 실패 시 failover/escalation.
-   * @returns {Promise<{result: object, backendUrl: string, tier: string}>}
-   */
   async chat(params = {}) {
     const { preferredTier = null, allowOtherTiers = config.escalateTier, preferredDevice = null, ...rest } = params;
     const tried = new Set();
@@ -135,6 +241,7 @@ class Pool {
 
       backend.inFlight++;
       backend.totalRequests++;
+      backend.chatRequests++;
       const started = Date.now();
       try {
         const result = await chatCompletion({ baseUrl: backend.url, ...rest });
@@ -154,17 +261,13 @@ class Pool {
       }
     }
 
-    const healthyCount = this.backends.filter((b) => b.healthy).length;
+    const healthyCount = this.backends.filter((b) => b.healthy && b.canChat).length;
     if (healthyCount === 0) {
-      throw new Error("사용 가능한 llama-server 백엔드가 없습니다(모두 비정상).");
+      throw new Error("사용 가능한 llama-server 백엔드가 없습니다(모두 비정상 또는 채팅 역할 비활성).");
     }
     throw lastErr ?? new Error("요청을 처리할 백엔드를 찾지 못했습니다.");
   }
 
-  /**
-   * 스트리밍 채팅. 토큰을 onToken 으로 흘려보낸다.
-   * 첫 토큰 전송 후에는 failover 불가(연결 초기 실패만 다른 백엔드로 재시도).
-   */
   async chatStream(params = {}) {
     const { preferredTier = null, allowOtherTiers = config.escalateTier, preferredDevice = null, onToken, onMeta, ...rest } = params;
     const tried = new Set();
@@ -178,6 +281,7 @@ class Pool {
 
       backend.inFlight++;
       backend.totalRequests++;
+      backend.chatRequests++;
       const started = Date.now();
       let gotToken = false;
       try {
@@ -206,7 +310,7 @@ class Pool {
         backend.totalErrors++;
         backend.lastError = err.message;
         lastErr = err;
-        if (gotToken || !err.retryable) throw err; // 이미 토큰을 보냈으면 재시도 불가
+        if (gotToken || !err.retryable) throw err;
         backend.healthy = false;
         logger.warn(`스트리밍 백엔드 실패 → 페일오버 시도 (${backend.url}): ${err.message}`);
       } finally {
@@ -222,23 +326,26 @@ class Pool {
     const backends = this.backends.map((b) => b.snapshot());
     const tiers = {};
     for (const b of backends) {
-      const t = (tiers[b.tier] ??= { total: 0, healthy: 0 });
+      if (!CHAT_TIERS.has(b.tier)) continue;
+      const t = (tiers[b.tier] ??= { total: 0, healthy: 0, active: 0 });
       t.total++;
       if (b.healthy) t.healthy++;
+      if (b.chatEnabled) t.active++;
     }
     const now = Date.now();
     this.completed = this.completed.filter((t) => now - t < 60000);
     return {
       totalBackends: backends.length,
-      healthyBackends: backends.filter((b) => b.healthy).length,
+      healthyBackends: backends.filter((b) => b.healthy && b.chatEnabled && CHAT_TIERS.has(b.tier)).length,
       totalInFlight: backends.reduce((s, b) => s + b.inFlight, 0),
       totalRequests: backends.reduce((s, b) => s + b.totalRequests, 0),
       totalErrors: backends.reduce((s, b) => s + b.totalErrors, 0),
       requestsLastMin: this.completed.length,
       tiers,
       backends,
+      routing: this.getRoutingSummary(),
     };
   }
 }
 
-export const pool = new Pool(config.backends);
+export const pool = new Pool(allBackendSpecs);

@@ -2,13 +2,16 @@
 // - 문서를 청크로 분할해 보관하고, BM25 점수로 질의에 관련된 청크를 검색한다.
 // - 추가 모델/외부 의존성 없이 동작하며, 한국어는 음절 bigram 토크나이징으로 매칭을 개선한다.
 // - 추후 임베딩 백엔드로 retrieve() 내부만 교체하면 의미검색으로 확장 가능.
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data", "rag");
 const INDEX_FILE = path.join(DATA_DIR, "index.json");
+const IMAGES_DIR = path.join(DATA_DIR, "images");
+
+export const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 
 const CHUNK_CHARS = 600; // 청크 목표 길이(문자)
 const CHUNK_OVERLAP = 100; // 청크 간 겹침(문맥 보존)
@@ -22,6 +25,26 @@ let loaded = false;
 
 async function ensureDir() {
     await mkdir(DATA_DIR, { recursive: true });
+    await mkdir(IMAGES_DIR, { recursive: true });
+}
+
+export function imagePath(imageFile) {
+    return path.join(IMAGES_DIR, imageFile);
+}
+
+export async function readImageDataUrl(imageFile) {
+    const ext = path.extname(imageFile).toLowerCase();
+    const mime =
+        {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".bmp": "image/bmp",
+        }[ext] || "image/jpeg";
+    const buf = await readFile(imagePath(imageFile));
+    return `data:${mime};base64,${buf.toString("base64")}`;
 }
 
 // ---- 토크나이징 ----------------------------------------------------------
@@ -111,6 +134,8 @@ async function persist() {
             docName: c.docName,
             idx: c.idx,
             text: c.text,
+            kind: c.kind || "text",
+            imageFile: c.imageFile || null,
         })),
     };
     await writeFile(INDEX_FILE, JSON.stringify(data), "utf-8");
@@ -148,7 +173,7 @@ export function stats() {
     };
 }
 
-export async function addDocument(name, text) {
+export async function addDocument(name, text, opts = {}) {
     await load();
     const body = String(text || "").trim();
     if (!body) throw new Error("문서 내용이 비어 있습니다.");
@@ -158,28 +183,54 @@ export async function addDocument(name, text) {
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
     const docName = (name && String(name).trim()) || `문서-${id}`;
     const createdAt = new Date().toISOString();
+    const kind = opts.kind === "image" ? "image" : "text";
+    const imageFile = opts.imageFile || null;
 
-    parts.forEach((text, idx) => {
+    parts.forEach((chunkText, idx) => {
         chunks.push({
             id: `${id}:${idx}`,
             docId: id,
             docName,
             idx,
-            text,
+            text: chunkText,
+            kind,
+            imageFile: idx === 0 ? imageFile : null,
         });
     });
-    docs.push({ id, name: docName, createdAt, chunkCount: parts.length });
+    docs.push({
+        id,
+        name: docName,
+        createdAt,
+        chunkCount: parts.length,
+        kind,
+        imageFile,
+    });
 
     rebuildStats();
     await persist();
-    return { id, name: docName, chunkCount: parts.length };
+    return { id, name: docName, chunkCount: parts.length, kind, imageFile };
+}
+
+/** 이미지 바이너리 저장 + 검색용 텍스트(비전 추출)로 문서 등록 */
+export async function addImageDocument(name, buffer, ext, description) {
+    await ensureDir();
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const docName = (name && String(name).trim()) || `이미지-${id}`;
+    const safeExt = IMAGE_EXT.has(ext.toLowerCase()) ? ext.toLowerCase() : ".png";
+    const imageFile = `${id}${safeExt}`;
+    await writeFile(imagePath(imageFile), buffer);
+    return addDocument(docName, description, { kind: "image", imageFile });
 }
 
 export async function deleteDocument(id) {
     await load();
+    const doc = docs.find((d) => d.id === id);
     const before = docs.length;
     docs = docs.filter((d) => d.id !== id);
     chunks = chunks.filter((c) => c.docId !== id);
+    if (doc?.imageFile) {
+        await unlink(imagePath(doc.imageFile)).catch(() => {});
+    }
     rebuildStats();
     await persist();
     return { removed: before - docs.length };
@@ -217,5 +268,7 @@ export function retrieve(query, k = 4) {
             idx: s.c.idx,
             text: s.c.text,
             score: Number(s.score.toFixed(4)),
+            kind: s.c.kind || "text",
+            imageFile: s.c.imageFile || null,
         }));
 }

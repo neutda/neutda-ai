@@ -1,4 +1,4 @@
-<#
+﻿<#
   llama.cpp 의 llama-server 를 Qwen 비전 모델 + mmproj 로 실행한다.
 
   사용 예:
@@ -23,6 +23,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot/init-console.ps1"
 
 # npm 등으로 실행 시 $PSScriptRoot 가 비어있는 경우가 있어 견고하게 스크립트 경로를 구한다.
 $scriptDir = $PSScriptRoot

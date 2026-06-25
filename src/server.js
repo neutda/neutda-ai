@@ -10,6 +10,7 @@ import { appendHistory, readHistory, clearHistory } from "./history.js";
 import { getMetrics } from "./metrics.js";
 import { logger, getLogs } from "./logger.js";
 import * as rag from "./rag.js";
+import { describeImageForRag } from "./ragVision.js";
 import { extractText } from "./extract.js";
 import multer from "multer";
 
@@ -125,7 +126,29 @@ app.get("/health", (_req, res) => {
 
 // 풀/백엔드 모니터링 상태
 app.get("/api/status", (_req, res) => {
-    res.json(pool.status());
+    res.json({
+        ...pool.status(),
+        routing: {
+            ...pool.getRoutingSummary(),
+            configMode: config.routingMode,
+        },
+    });
+});
+
+// 백엔드 역할(채팅 / 라우터) 개별 on·off
+app.post("/api/backends/role", (req, res) => {
+    const url = typeof req.body?.url === "string" ? req.body.url.trim() : "";
+    const role = String(req.body?.role ?? "").toLowerCase();
+    const enabled = req.body?.enabled;
+    if (!url || (role !== "chat" && role !== "router") || typeof enabled !== "boolean") {
+        return res.status(400).json({
+            error: '"url"(string), "role"("chat"|"router"), "enabled"(boolean) 이 필요합니다.',
+        });
+    }
+    if (!pool.setRoleEnabled(url, role, enabled)) {
+        return res.status(404).json({ error: "해당 URL 의 백엔드를 찾을 수 없습니다." });
+    }
+    res.json({ ok: true, ...pool.status() });
 });
 
 // 시스템 자원(GPU/CPU/RAM) 실시간 지표
@@ -201,8 +224,8 @@ async function induceError(backend, scenario) {
 
 // 오류 테스트: 무작위 모델을 골라 실제 오류를 강제 유발하고 원인/이유를 로그로 남긴다.
 app.post("/api/logs/test-error", async (req, res) => {
-    const healthy = pool.backends.filter((b) => b.healthy);
-    const pickFrom = healthy.length ? healthy : pool.backends;
+    const healthy = pool.backends.filter((b) => b.healthy && b.canChat);
+    const pickFrom = healthy.length ? healthy : pool.backends.filter((b) => b.canChat);
     if (!pickFrom.length) {
         logger.error("강제 오류 테스트 실패: 사용 가능한 백엔드가 없습니다.");
         return res
@@ -284,9 +307,9 @@ app.delete("/api/history", async (_req, res) => {
 async function processAsk(id, body, ref) {
     const started = Date.now();
     try {
-        const route = chooseRoute(body);
+        const route = await chooseRoute(body);
         logger.info(
-            `라우팅 [ask #${id}] → tier=${route.tier} device=${route.device} 난이도=${route.difficulty} (${route.reason})`,
+            `라우팅 [ask #${id}] → tier=${route.tier} device=${route.device} 난이도=${route.difficulty}${route.routerBackend ? ` router@${route.routerBackend}` : ""} (${route.reason})`,
         );
         const isLarge = route.tier === "large";
         const promptCharBudget = isLarge
@@ -428,7 +451,7 @@ app.post("/api/chat/stream", async (req, res) => {
             `요청 수신 [chat/stream] "${q.slice(0, 60)}" (len=${q.length}, memory=${Array.isArray(req.body?.HISTORY) ? req.body.HISTORY.length : 0}턴)`,
         );
 
-        const route = chooseRoute(req.body ?? {});
+        const route = await chooseRoute(req.body ?? {});
         const isLarge = route.tier === "large";
         const promptCharBudget = isLarge
             ? config.maxPromptCharsLarge
@@ -437,7 +460,7 @@ app.post("/api/chat/stream", async (req, res) => {
             ? config.defaultMaxTokens
             : config.maxTokensSmall;
         logger.info(
-            `라우팅 [chat/stream] → tier=${route.tier} device=${route.device} 난이도=${route.difficulty} (티어사유: ${route.reason} / 장치사유: ${route.deviceReason})`,
+            `라우팅 [chat/stream] → tier=${route.tier} device=${route.device} 난이도=${route.difficulty}${route.routerBackend ? ` router@${route.routerBackend}` : ""} (티어사유: ${route.reason} / 장치사유: ${route.deviceReason})`,
         );
 
         const messages = await buildMessages(req.body ?? {}, promptCharBudget);
@@ -554,11 +577,11 @@ app.post("/api/chat", async (req, res) => {
             `요청 수신 [chat] "${q.slice(0, 60)}" (len=${q.length}, memory=${Array.isArray(req.body?.HISTORY) ? req.body.HISTORY.length : 0}턴)`,
         );
 
-        const { tier, reason, device, difficulty, deviceReason } = chooseRoute(
+        const { tier, reason, device, difficulty, deviceReason, routerBackend } = await chooseRoute(
             req.body ?? {},
         );
         logger.info(
-            `라우팅 [chat] → tier=${tier} device=${device} 난이도=${difficulty} (티어사유: ${reason} / 장치사유: ${deviceReason})`,
+            `라우팅 [chat] → tier=${tier} device=${device} 난이도=${difficulty}${routerBackend ? ` router@${routerBackend}` : ""} (티어사유: ${reason} / 장치사유: ${deviceReason})`,
         );
 
         // 티어별 컨텍스트 예산/출력 토큰 (large 만 큰 ctx 가정)
@@ -673,6 +696,121 @@ app.post("/api/chat", async (req, res) => {
 
 // ===== RAG: 문서 기반 질의응답 =====================================
 
+const RAG_IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+};
+
+function isRagImageFile(filename) {
+    return rag.IMAGE_EXT.has(path.extname(String(filename)).toLowerCase());
+}
+
+function bufferToDataUrl(buffer, ext) {
+    const mime = RAG_IMAGE_MIME[ext.toLowerCase()] || "image/jpeg";
+    return `data:${mime};base64,${buffer.toString("base64")}`;
+}
+
+function ragSystemPrompt(strict, withVision) {
+    const vision =
+        withVision
+            ? " 참고 문서에 첨부된 이미지가 있으면 이미지 속 글자와 시각적 내용 모두를 근거로 사용하라."
+            : "";
+    if (strict) {
+        return (
+            "너는 제공된 '참고 문서'만 근거로 한국어로 답하는 어시스턴트다." +
+            vision +
+            " 문서에 없는 내용은 절대 추측하지 말고 정확히 '문서 내용에 없습니다.'라고만 답하라. " +
+            "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라."
+        );
+    }
+    return (
+        "너는 한국어로 답하는 어시스턴트다. '참고 문서'를 우선 근거로 사용하되," +
+        vision +
+        " 문서에 없으면 너의 일반 지식으로 보완해 답하라. " +
+        "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라."
+    );
+}
+
+async function buildRagUserContent(q, context, hits, questionContent) {
+    const text = context
+        ? `참고 문서:\n${context}\n\n질문: ${q}`
+        : q;
+
+    const imageFiles = new Set();
+    for (const h of hits || []) {
+        if (h.imageFile) imageFiles.add(h.imageFile);
+    }
+
+    const hasQuestionImage =
+        questionContent !== undefined &&
+        questionContent !== null &&
+        questionContent !== "";
+    const hasDocImages = imageFiles.size > 0;
+
+    if (!hasQuestionImage && !hasDocImages) return text;
+
+    const parts = [{ type: "text", text }];
+    for (const file of imageFiles) {
+        parts.push({
+            type: "image_url",
+            image_url: { url: await rag.readImageDataUrl(file) },
+        });
+    }
+    if (hasQuestionImage) {
+        const imgs = Array.isArray(questionContent)
+            ? questionContent
+            : [questionContent];
+        for (const img of imgs) {
+            parts.push({
+                type: "image_url",
+                image_url: { url: await toImageUrl(img) },
+            });
+        }
+    }
+    return parts;
+}
+
+async function ragChat({ q, hits, strict, questionContent, temperature = 0.3 }) {
+    const context =
+        hits?.length > 0
+            ? hits
+                  .map(
+                      (h, i) =>
+                          `[출처 ${i + 1}] (${h.docName} #${h.idx})\n${h.text}`,
+                  )
+                  .join("\n\n")
+            : "";
+
+    const hasVision =
+        (hits || []).some((h) => h.imageFile) ||
+        (questionContent !== undefined &&
+            questionContent !== null &&
+            questionContent !== "");
+
+    const userContent = await buildRagUserContent(
+        q,
+        context,
+        hits,
+        questionContent,
+    );
+
+    return pool.chat({
+        messages: [
+            { role: "system", content: ragSystemPrompt(strict, hasVision) },
+            { role: "user", content: userContent },
+        ],
+        temperature,
+        maxTokens: config.defaultMaxTokens,
+        enableThinking: config.enableThinking,
+        preferredTier: "large",
+        allowOtherTiers: false,
+    });
+}
+
 // 문서 목록 + 통계
 app.get("/api/rag/docs", async (_req, res) => {
     try {
@@ -683,25 +821,47 @@ app.get("/api/rag/docs", async (_req, res) => {
     }
 });
 
-// 파일 업로드로 문서 추가 (pdf/docx/hwpx/hwp/txt ...): multipart, field name="file"
+// 파일 업로드로 문서 추가 (pdf/docx/hwpx/hwp/txt/이미지 ...): multipart, field name="file"
 app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: "파일이 필요합니다." });
         }
-        // multer 는 한글 파일명을 latin1 로 디코딩하므로 utf8 로 복원한다.
         const original = Buffer.from(req.file.originalname, "latin1").toString(
             "utf8",
         );
-        const text = await extractText(original, req.file.buffer);
-        if (!text || !text.trim()) {
-            throw new Error(
-                "문서에서 텍스트를 추출하지 못했습니다. (스캔 이미지 PDF이거나 지원하지 않는 형식일 수 있습니다)",
-            );
-        }
         const name =
             (req.body?.name && String(req.body.name).trim()) ||
             original.replace(/\.[^.]+$/, "");
+
+        if (isRagImageFile(original)) {
+            const ext = path.extname(original).toLowerCase();
+            const dataUrl = bufferToDataUrl(req.file.buffer, ext);
+            logger.info(`RAG 이미지 분석 중: "${original}"`);
+            const description = await describeImageForRag(dataUrl);
+            const info = await rag.addImageDocument(
+                name,
+                req.file.buffer,
+                ext,
+                description,
+            );
+            logger.info(
+                `RAG 이미지 추가: "${info.name}" (${original}, 추출 ${description.length}자)`,
+            );
+            return res.json({
+                ok: true,
+                ...info,
+                chars: description.length,
+                stats: rag.stats(),
+            });
+        }
+
+        const text = await extractText(original, req.file.buffer);
+        if (!text || !text.trim()) {
+            throw new Error(
+                "문서에서 텍스트를 추출하지 못했습니다. (스캔 PDF는 이미지 파일로 업로드하세요)",
+            );
+        }
         const info = await rag.addDocument(name, text);
         logger.info(
             `RAG 업로드: "${info.name}" (${original}, ${text.length}자, 청크 ${info.chunkCount}개)`,
@@ -710,6 +870,23 @@ app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
     } catch (err) {
         logger.warn(`RAG 업로드 실패: ${err.message}`);
         res.status(400).json({ error: err.message });
+    }
+});
+
+// RAG 이미지 문서 미리보기
+app.get("/api/rag/images/:docId", async (req, res) => {
+    try {
+        await rag.load();
+        const doc = rag.listDocuments().find((d) => d.id === req.params.docId);
+        if (!doc?.imageFile) {
+            return res.status(404).json({ error: "이미지 문서를 찾을 수 없습니다." });
+        }
+        const filePath = rag.imagePath(doc.imageFile);
+        const ext = path.extname(doc.imageFile).toLowerCase();
+        res.type(RAG_IMAGE_MIME[ext] || "application/octet-stream");
+        res.sendFile(filePath);
+    } catch (err) {
+        res.status(404).json({ error: err.message });
     }
 });
 
@@ -758,6 +935,7 @@ app.post("/api/rag/ask", async (req, res) => {
             : 4;
         // strict=true(문서만 답변): 문서 밖 내용은 "문서 내용에 없습니다"로 답한다.
         const strict = req.body?.strict !== false;
+        const questionContent = req.body?.content;
 
         // RAG 대화도 새로고침 후 복원되도록 히스토리에 저장한다.
         const persist = (payload) =>
@@ -793,19 +971,12 @@ app.post("/api/rag/ask", async (req, res) => {
                 persist(payload);
                 return res.json(payload);
             }
-            // 보강 모드: 문서가 없으면 일반 지식으로 답변
-            const { result, backendUrl, tier, device } = await pool.chat({
-                messages: [
-                    {
-                        role: "system",
-                        content: "너는 한국어로 답하는 친절한 어시스턴트다.",
-                    },
-                    { role: "user", content: q },
-                ],
+            const { result, backendUrl, tier, device } = await ragChat({
+                q,
+                hits: [],
+                strict: false,
+                questionContent,
                 temperature: 0.4,
-                maxTokens: config.defaultMaxTokens,
-                enableThinking: config.enableThinking,
-                preferredTier: "large",
             });
             const payload = {
                 answer: result.content,
@@ -821,33 +992,12 @@ app.post("/api/rag/ask", async (req, res) => {
             return res.json(payload);
         }
 
-        const context = hits
-            .map(
-                (h, i) =>
-                    `[출처 ${i + 1}] (${h.docName} #${h.idx})\n${h.text}`,
-            )
-            .join("\n\n");
-
-        const system = strict
-            ? "너는 제공된 '참고 문서'만 근거로 한국어로 답하는 어시스턴트다. " +
-              "문서에 없는 내용은 절대 추측하지 말고 정확히 '문서 내용에 없습니다.'라고만 답하라. " +
-              "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라."
-            : "너는 한국어로 답하는 어시스턴트다. '참고 문서'를 우선 근거로 사용하되, " +
-              "문서에 없으면 너의 일반 지식으로 보완해 답하라. " +
-              "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라.";
-        const userMsg = `참고 문서:\n${context}\n\n질문: ${q}`;
-
-        const messages = [
-            { role: "system", content: system },
-            { role: "user", content: userMsg },
-        ];
-
-        const { result, backendUrl, tier, device } = await pool.chat({
-            messages,
+        const { result, backendUrl, tier, device } = await ragChat({
+            q,
+            hits,
+            strict,
+            questionContent,
             temperature: strict ? 0.2 : 0.4,
-            maxTokens: config.defaultMaxTokens,
-            enableThinking: config.enableThinking,
-            preferredTier: "large",
         });
 
         logger.info(
@@ -861,7 +1011,9 @@ app.post("/api/rag/ask", async (req, res) => {
                 docName: h.docName,
                 idx: h.idx,
                 score: h.score,
+                kind: h.kind,
                 preview: h.text.slice(0, 200),
+                imageUrl: h.imageFile ? `/api/rag/images/${h.docId}` : null,
             })),
             model: result.raw?.model ?? config.modelName,
             tier,

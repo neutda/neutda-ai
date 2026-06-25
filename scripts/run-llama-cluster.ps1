@@ -1,4 +1,4 @@
-<#
+﻿<#
   여러 개의 llama-server 인스턴스를 연속 포트로 띄운다 (로드밸런싱용 백엔드 풀).
 
   사용 예:
@@ -25,6 +25,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot/init-console.ps1"
 
 # 안전장치: 여러 인스턴스를 GPU 분산(-Gpus) 없이 띄우면 VRAM 초과로 시스템이 마비됩니다.
 $distinctGpus = if ($Gpus) { ($Gpus.Split(",") | ForEach-Object { $_.Trim() } | Select-Object -Unique).Count } else { 0 }

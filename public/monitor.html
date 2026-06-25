@@ -193,6 +193,71 @@
                 background: rgba(210, 153, 34, 0.15);
                 color: var(--warn);
             }
+            .role-switch {
+                position: relative;
+                display: inline-block;
+                width: 36px;
+                height: 20px;
+                vertical-align: middle;
+            }
+            .role-switch input {
+                opacity: 0;
+                width: 0;
+                height: 0;
+            }
+            .role-slider {
+                position: absolute;
+                cursor: pointer;
+                inset: 0;
+                background: #2a2f3d;
+                border-radius: 999px;
+                transition: 0.2s;
+            }
+            .role-slider::before {
+                content: "";
+                position: absolute;
+                height: 14px;
+                width: 14px;
+                left: 3px;
+                bottom: 3px;
+                background: var(--muted);
+                border-radius: 50%;
+                transition: 0.2s;
+            }
+            .role-switch input:checked + .role-slider {
+                background: rgba(63, 185, 80, 0.35);
+            }
+            .role-switch input:checked + .role-slider::before {
+                transform: translateX(16px);
+                background: var(--ok);
+            }
+            .role-switch input:disabled + .role-slider {
+                opacity: 0.45;
+                cursor: wait;
+            }
+            .role-tag {
+                font-size: 11px;
+                color: var(--muted);
+                margin-left: 6px;
+                vertical-align: middle;
+            }
+            .role-pair {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+            }
+            .route-badge {
+                font-size: 11px;
+                padding: 3px 10px;
+                border-radius: 999px;
+                background: rgba(108, 140, 255, 0.12);
+                color: var(--accent);
+                margin-left: 10px;
+            }
+            .route-badge.heuristic {
+                background: rgba(210, 153, 34, 0.12);
+                color: var(--warn);
+            }
             .dev {
                 font-size: 11px;
                 font-weight: 700;
@@ -318,7 +383,10 @@
     <body>
         <div class="wrap">
             <header>
-                <h1>LLM 백엔드 모니터링</h1>
+                <h1>
+                    LLM 백엔드 모니터링
+                    <span id="routeBadge" class="route-badge">–</span>
+                </h1>
                 <div><span id="updated" class="updated"></span></div>
             </header>
 
@@ -362,10 +430,13 @@
                             <th>백엔드</th>
                             <th>티어</th>
                             <th>장치</th>
+                            <th>채팅</th>
+                            <th>라우터</th>
                             <th>모델</th>
                             <th>상태</th>
                             <th class="num">진행 중</th>
-                            <th class="num">총 요청</th>
+                            <th class="num">라우팅</th>
+                            <th class="num">채팅</th>
                             <th class="num">오류</th>
                             <th class="num">평균(ms)</th>
                             <th class="num">헬스(ms)</th>
@@ -374,7 +445,7 @@
                     </thead>
                     <tbody id="rows">
                         <tr>
-                            <td colspan="11" class="muted">불러오는 중…</td>
+                            <td colspan="14" class="muted">불러오는 중…</td>
                         </tr>
                     </tbody>
                 </table>
@@ -394,6 +465,37 @@
 
         <script>
             const $ = (id) => document.getElementById(id);
+            let roleBusy = false;
+
+            function escAttr(s) {
+                return String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/"/g, "&quot;");
+            }
+
+            function roleToggle(b, role, enabled) {
+                const label = role === "chat" ? "채팅" : "라우터";
+                const hint =
+                    role === "chat"
+                        ? "채팅 응답 풀에 포함"
+                        : "티어·난이도 LLM 분류에 사용";
+                return `<span class="role-pair" title="${hint}">
+      <label class="role-switch">
+        <input type="checkbox" class="role-toggle" data-url="${escAttr(b.url)}" data-role="${role}" ${enabled ? "checked" : ""} ${roleBusy ? "disabled" : ""}>
+        <span class="role-slider"></span>
+      </label>
+      <span class="role-tag">${label}</span>
+    </span>`;
+            }
+
+            function roleCells(b) {
+                const chat = b.roles?.chat ?? b.chatEnabled ?? false;
+                const router = b.roles?.router ?? b.routerEnabled ?? false;
+                return {
+                    chat: roleToggle(b, "chat", chat),
+                    router: roleToggle(b, "router", router),
+                };
+            }
 
             async function refresh() {
                 try {
@@ -406,40 +508,87 @@
                     $("sTotal").textContent = s.totalRequests;
                     $("sErrors").textContent = s.totalErrors;
 
+                    const eff = s.routing?.effectiveMode ?? "heuristic";
+                    const badge = $("routeBadge");
+                    badge.textContent =
+                        eff === "llm"
+                            ? "티어 판정: LLM 라우터"
+                            : "티어 판정: 글자수 휴리스틱";
+                    badge.className =
+                        "route-badge" + (eff === "llm" ? "" : " heuristic");
+
                     const maxLoad = Math.max(
                         1,
                         ...s.backends.map((b) => b.inFlight),
                     );
                     $("rows").innerHTML = s.backends
-                        .map(
-                            (b) => `
+                        .map((b) => {
+                            const roles = roleCells(b);
+                            return `
           <tr>
             <td>${b.url}</td>
             <td><span class="tier tier-${b.tier}">${b.tier ?? "–"}</span></td>
             <td><span class="dev dev-${b.device || "na"}">${b.device ? b.device.toUpperCase() : "–"}</span></td>
+            <td>${roles.chat}</td>
+            <td>${roles.router}</td>
             <td class="model" title="${b.model ?? ""}">${b.model ? b.model.split(/[\\/]/).pop() : '<span class="muted">–</span>'}</td>
             <td><span class="pill ${b.healthy ? "up" : "down"}"><span class="dot"></span>${b.healthy ? "정상" : "다운"}</span></td>
             <td class="num">${b.inFlight}<div class="bar"><span style="width:${(b.inFlight / maxLoad) * 100}%"></span></div></td>
-            <td class="num">${b.totalRequests}</td>
+            <td class="num">${b.routerRequests ?? 0}</td>
+            <td class="num">${b.chatRequests ?? 0}</td>
             <td class="num">${b.totalErrors}</td>
             <td class="num">${b.avgLatencyMs ?? "–"}</td>
             <td class="num">${b.healthLatencyMs ?? "–"}</td>
             <td class="err" title="${b.lastError ?? ""}">${b.lastError ?? ""}</td>
-          </tr>`,
-                        )
+          </tr>`;
+                        })
                         .join("");
 
                     $("hint").textContent =
                         s.healthyBackends === 0
                             ? "정상 백엔드가 없습니다. llama-server 를 실행하세요 (npm run llama / run-llama-cluster.ps1)."
-                            : "";
+                            : eff === "heuristic"
+                              ? "라우터 역할이 모두 꺼져 있어 글자수·키워드 휴리스틱으로 티어를 판정합니다. 모니터에서 원하는 모델에 라우터 토글을 켜세요."
+                              : "";
                     $("updated").textContent =
                         "갱신 " + new Date().toLocaleTimeString();
                 } catch (e) {
                     $("rows").innerHTML =
-                        `<tr><td colspan="11" class="err">상태 조회 실패: ${e.message}</td></tr>`;
+                        `<tr><td colspan="14" class="err">상태 조회 실패: ${e.message}</td></tr>`;
                 }
             }
+
+            document.querySelector("table").addEventListener("change", async (e) => {
+                const inp = e.target;
+                if (!inp.matches(".role-toggle")) return;
+                if (roleBusy) return;
+                const url = inp.dataset.url;
+                const role = inp.dataset.role;
+                const enabled = inp.checked;
+                roleBusy = true;
+                inp.disabled = true;
+                try {
+                    const r = await fetch("/api/backends/role", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ url, role, enabled }),
+                    });
+                    if (!r.ok) {
+                        inp.checked = !enabled;
+                        const err = await r.json().catch(() => ({}));
+                        alert(err.error || "역할 변경에 실패했습니다.");
+                    } else {
+                        await refresh();
+                    }
+                } catch (err) {
+                    inp.checked = !enabled;
+                    alert(err.message);
+                } finally {
+                    roleBusy = false;
+                    inp.disabled = false;
+                }
+            });
+
             refresh();
             setInterval(refresh, 1000);
 

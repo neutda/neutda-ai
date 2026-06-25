@@ -26,6 +26,7 @@ function parseBackends() {
       let device = null;
       if (segs.length >= 2) {
         tier = segs[0].trim().toLowerCase() || "large";
+        if (tier === "router") tier = "small"; // 구설정 호환: router 는 티어가 아님
         const last = segs[segs.length - 1].trim().toLowerCase();
         if (segs.length >= 3 && (last === "gpu" || last === "cpu")) {
           device = last;
@@ -50,9 +51,24 @@ function parseBackends() {
     .map((url) => ({ url, tier: "large" }));
 }
 
+export const allBackendSpecs = parseBackends();
+
+const routingModeRaw = (process.env.ROUTING_MODE || "heuristic").toLowerCase();
+const routingMode =
+  routingModeRaw === "heuristic" || routingModeRaw === "llm" || routingModeRaw === "hybrid"
+    ? routingModeRaw
+    : "heuristic";
+
 export const config = {
   port: num(process.env.PORT, 3000),
-  backends: parseBackends(),
+  backends: allBackendSpecs,
+  // 시작 시 라우터 역할을 켤 백엔드 URL (모니터에서도 변경 가능). tier 와 무관.
+  routerBackendUrl: process.env.ROUTER_BACKEND_URL
+    ? normalizeUrl(process.env.ROUTER_BACKEND_URL)
+    : null,
+  routingMode,
+  routerTemperature: num(process.env.ROUTER_TEMPERATURE, 0.1),
+  routerMaxTokens: num(process.env.ROUTER_MAX_TOKENS, 128),
   modelName: process.env.MODEL_NAME || "qwen",
   // 외부 API 키(우선 고정값). .env 의 API_KEY 로 덮어쓸 수 있음
   apiKey: process.env.API_KEY || "tw-demo-key-2026",

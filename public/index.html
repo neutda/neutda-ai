@@ -634,7 +634,7 @@
                                 id="ragFile"
                                 type="file"
                                 multiple
-                                accept=".pdf,.docx,.hwp,.hwpx,.txt,.md,.csv,.json,.log"
+                                accept=".pdf,.docx,.hwp,.hwpx,.txt,.md,.csv,.json,.log,.png,.jpg,.jpeg,.gif,.webp,.bmp"
                                 style="font-size: 12px"
                             />
                             <div
@@ -642,7 +642,8 @@
                                 class="sb"
                                 style="color: var(--muted); font-size: 11px"
                             >
-                                PDF · Word(docx) · 한글(hwp/hwpx) · 텍스트 지원.
+                                PDF · Word · 한글 · 텍스트 · 이미지(png/jpg 등) 지원.
+                                이미지는 비전 모델로 글자·내용을 추출해 저장합니다.
                                 여러 개 선택 가능, 선택 시 자동 업로드됩니다.
                             </div>
                             <textarea
@@ -905,7 +906,7 @@
                 const useStream = $("stream").checked;
                 try {
                     if ($("rag").checked) {
-                        await sendRag(el, user, t0);
+                        await sendRag(el, user, t0, content || undefined);
                     } else if (useStream) {
                         await sendStream(el, body, user, t0);
                     } else {
@@ -1042,12 +1043,14 @@
             $("rag").addEventListener("change", syncRagOnly);
             syncRagOnly();
 
-            async function sendRag(el, user, t0) {
+            async function sendRag(el, user, t0, content) {
                 const strict = $("ragOnly").checked;
+                const payload = { q: user, strict, topK: 4 };
+                if (content) payload.content = content;
                 const r = await fetch("/api/rag/ask", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ q: user, strict, topK: 4 }),
+                    body: JSON.stringify(payload),
                 });
                 const j = await r.json();
                 const ms = Math.round(performance.now() - t0);
@@ -1112,7 +1115,7 @@
                     list.innerHTML = d.docs
                         .map(
                             (x) =>
-                                `<div class="rag-doc"><div><div class="nm">${esc(x.name)}</div><div class="sb">청크 ${x.chunkCount}개</div></div><button class="btn-sm" data-id="${x.id}">삭제</button></div>`,
+                                `<div class="rag-doc"><div><div class="nm">${esc(x.name)}${x.kind === "image" ? ' <span style="color:var(--accent);font-size:10px">이미지</span>' : ""}</div><div class="sb">청크 ${x.chunkCount}개</div></div><button class="btn-sm" data-id="${x.id}">삭제</button></div>`,
                         )
                         .join("");
                     list.querySelectorAll("button[data-id]").forEach((b) => {

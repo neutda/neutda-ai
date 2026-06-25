@@ -1,4 +1,4 @@
-<#
+﻿<#
   servers.json 에 정의된 LLM 서버들 + Express 를 한 번에 기동한다.
 
   사용: npm run up   (또는)  powershell -ExecutionPolicy Bypass -File scripts/start-all.ps1
@@ -17,6 +17,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot/init-console.ps1"
 $scriptDir = $PSScriptRoot
 if (-not $scriptDir) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $root = Split-Path -Parent $scriptDir

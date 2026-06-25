@@ -7,10 +7,10 @@
     "scripts": {
         "start": "node src/server.js",
         "dev": "node --watch src/server.js",
-        "up": "powershell -ExecutionPolicy Bypass -File scripts/start-all.ps1",
-        "down": "powershell -ExecutionPolicy Bypass -File scripts/stop-all.ps1",
-        "llama": "powershell -ExecutionPolicy Bypass -File scripts/run-llama-server.ps1",
-        "cluster": "powershell -ExecutionPolicy Bypass -File scripts/run-llama-cluster.ps1"
+        "up": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-all.ps1",
+        "down": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-all.ps1",
+        "llama": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-llama-server.ps1",
+        "cluster": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-llama-cluster.ps1"
     },
     "engines": {
         "node": ">=20"

@@ -1,4 +1,4 @@
-<#
+﻿<#
   llama.cpp 의 Windows 용 llama-server prebuilt 바이너리를 다운로드해 ./llama 에 설치한다.
   GPU(NVIDIA) 가 있으면 CUDA 빌드 + CUDA 런타임(cudart) 을 함께 받는다.
 
@@ -15,6 +15,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot/init-console.ps1"
 $ProgressPreference = "SilentlyContinue"   # 다운로드 속도 향상
 $headers = @{ "User-Agent" = "neutda-ai" }
 $repo = "ggml-org/llama.cpp"

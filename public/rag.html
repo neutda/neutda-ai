@@ -185,10 +185,10 @@
         <div class="wrap">
             <h1>RAG · 문서 기반 질의응답</h1>
             <p class="desc">
-                문서를 추가하면 청크로 나눠 저장하고, 질문하면
-                <code>BM25</code> 검색으로 관련 청크를 찾아 LLM이 그 근거만으로
-                한국어 답변을 생성합니다. 답변 아래에 사용한 <b>출처</b>가
-                표시됩니다.
+                문서·이미지를 추가하면 청크로 저장하고, 질문하면
+                <code>BM25</code> 검색으로 관련 내용을 찾아 LLM이 답합니다.
+                이미지는 업로드 시 비전 모델이 <b>글자(OCR)</b>와
+                <b>시각 내용</b>을 추출해 검색·답변에 사용합니다.
             </p>
 
             <div class="grid">
@@ -201,7 +201,7 @@
                         <input
                             type="file"
                             id="file"
-                            accept=".txt,.md,.csv,.json,.log"
+                            accept=".txt,.md,.csv,.json,.log,.pdf,.docx,.hwp,.hwpx,.png,.jpg,.jpeg,.gif,.webp,.bmp"
                             style="padding: 7px"
                         />
                         <textarea
@@ -267,7 +267,7 @@
                     <div class="doc">
                         <div>
                             <div class="name">${esc(x.name)}</div>
-                            <div class="sub">청크 ${x.chunkCount}개 · ${new Date(x.createdAt).toLocaleString("ko-KR")}</div>
+                            <div class="sub">${x.kind === "image" ? "🖼 이미지 · " : ""}청크 ${x.chunkCount}개 · ${new Date(x.createdAt).toLocaleString("ko-KR")}</div>
                         </div>
                         <button class="ghost" data-id="${x.id}">삭제</button>
                     </div>`,
@@ -289,6 +289,34 @@
             $("file").addEventListener("change", async (e) => {
                 const f = e.target.files[0];
                 if (!f) return;
+                const ext = f.name.split(".").pop()?.toLowerCase() || "";
+                const isImage = /^(png|jpe?g|gif|webp|bmp)$/.test(ext);
+                if (isImage) {
+                    $("addBtn").disabled = true;
+                    $("addBtn").textContent = "이미지 분석 중…";
+                    try {
+                        const fd = new FormData();
+                        fd.append("file", f);
+                        const name = $("docName").value.trim();
+                        if (name) fd.append("name", name);
+                        const r = await fetch("/api/rag/upload", {
+                            method: "POST",
+                            body: fd,
+                        });
+                        const d = await r.json();
+                        if (!r.ok) throw new Error(d.error || "실패");
+                        $("docName").value = "";
+                        $("docText").value = "";
+                        loadDocs();
+                    } catch (err) {
+                        alert("이미지 추가 실패: " + err.message);
+                    } finally {
+                        $("addBtn").disabled = false;
+                        $("addBtn").textContent = "문서 추가";
+                        e.target.value = "";
+                    }
+                    return;
+                }
                 $("docText").value = await f.text();
                 if (!$("docName").value.trim())
                     $("docName").value = f.name.replace(/\.[^.]+$/, "");
@@ -354,7 +382,7 @@
                             (s) => `
                         <div class="src">
                             <div class="head">[출처 ${s.n}] ${esc(s.docName)} #${s.idx} <span style="color:var(--muted);font-weight:400">(score ${s.score})</span></div>
-                            <div class="body">${esc(s.preview)}${s.preview.length >= 200 ? "…" : ""}</div>
+                            <div class="body">${esc(s.preview)}${s.preview.length >= 200 ? "…" : ""}${s.imageUrl ? `<br><img src="${esc(s.imageUrl)}" alt="" style="max-width:100%;margin-top:8px;border-radius:6px">` : ""}</div>
                         </div>`,
                         )
                         .join("");

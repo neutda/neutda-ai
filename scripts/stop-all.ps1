@@ -1,4 +1,4 @@
-<#
+﻿<#
   start-all 로 띄운 Express(node) + 모든 llama-server 를 종료한다.
   사용: npm run down
 #>
@@ -6,9 +6,10 @@
 param([int]$Port = 3000)
 
 $ErrorActionPreference = "SilentlyContinue"
+. "$PSScriptRoot/init-console.ps1"
 
 # Express(해당 포트 점유 node) 종료
-Get-NetTCPConnection -LocalPort $Port -State Listen |
+Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
   Select-Object -ExpandProperty OwningProcess -Unique |
   ForEach-Object { $p = Get-Process -Id $_; Stop-Process -Id $_ -Force; Write-Host "[down] Express 종료 PID=$_ ($($p.ProcessName))" }
 
