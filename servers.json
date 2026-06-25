@@ -1,0 +1,68 @@
+{
+  "llmServers": [
+    {
+      "name": "large",
+      "tier": "large",
+      "port": 8080,
+      "model": "models/Qwen3.6-27B-Q4_K_M.gguf",
+      "mmproj": "models/mmproj-Qwen3.6-27B-BF16.gguf",
+      "ctx": 8192,
+      "ngl": 99,
+      "gpu": ""
+    },
+    {
+      "name": "small-1",
+      "tier": "small",
+      "port": 8081,
+      "model": "models/qwen2.5-0.5b-instruct-q5_k_m.gguf",
+      "ctx": 4096,
+      "ngl": 99,
+      "gpu": ""
+    },
+    {
+      "name": "small-2",
+      "tier": "small",
+      "port": 8082,
+      "model": "models/qwen2.5-0.5b-instruct-q5_k_m.gguf",
+      "ctx": 4096,
+      "ngl": 0,
+      "gpu": ""
+    },
+    {
+      "name": "small-3",
+      "tier": "small",
+      "port": 8083,
+      "model": "models/qwen2.5-0.5b-instruct-q5_k_m.gguf",
+      "ctx": 4096,
+      "ngl": 0,
+      "gpu": ""
+    },
+    {
+      "name": "small-4",
+      "tier": "small",
+      "port": 8084,
+      "model": "models/qwen2.5-0.5b-instruct-q5_k_m.gguf",
+      "ctx": 4096,
+      "ngl": 0,
+      "gpu": ""
+    },
+    {
+      "name": "medium-1",
+      "tier": "medium",
+      "port": 8085,
+      "model": "models/qwen2.5-3b-instruct-q4_k_m.gguf",
+      "ctx": 4096,
+      "ngl": 99,
+      "gpu": ""
+    },
+    {
+      "name": "medium-2",
+      "tier": "medium",
+      "port": 8086,
+      "model": "models/qwen2.5-3b-instruct-q4_k_m.gguf",
+      "ctx": 4096,
+      "ngl": 0,
+      "gpu": ""
+    }
+  ]
+}

@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>RAG · 문서 기반 질의응답</title>
+        <style>
+            :root {
+                --bg: #0a0c12;
+                --panel: #12151d;
+                --border: #272b38;
+                --text: #e7e9ee;
+                --muted: #9aa3b2;
+                --accent: #6c8cff;
+                --accent-2: #5570e6;
+                --ok: #3fb950;
+                --warn: #d29922;
+                --err: #f85149;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                background: var(--bg);
+                color: var(--text);
+                font-family:
+                    "Segoe UI", system-ui, -apple-system, sans-serif;
+            }
+            .wrap {
+                max-width: 1100px;
+                margin: 0 auto;
+                padding: 24px 18px 60px;
+            }
+            h1 {
+                font-size: 20px;
+                margin: 6px 0 4px;
+            }
+            .desc {
+                color: var(--muted);
+                font-size: 13px;
+                margin: 0 0 18px;
+                line-height: 1.6;
+            }
+            code {
+                background: #1c2030;
+                padding: 1px 6px;
+                border-radius: 5px;
+                font-size: 12px;
+            }
+            .grid {
+                display: grid;
+                grid-template-columns: 360px 1fr;
+                gap: 18px;
+                align-items: start;
+            }
+            @media (max-width: 820px) {
+                .grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+            .panel {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 16px;
+            }
+            .panel h2 {
+                font-size: 14px;
+                margin: 0 0 12px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            label {
+                display: block;
+                font-size: 12px;
+                color: var(--muted);
+                margin: 10px 0 5px;
+                font-weight: 600;
+            }
+            input,
+            textarea {
+                width: 100%;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                color: var(--text);
+                padding: 9px 11px;
+                font-size: 13px;
+                font-family: inherit;
+            }
+            textarea {
+                min-height: 120px;
+                resize: vertical;
+            }
+            button {
+                background: var(--accent-2);
+                color: #fff;
+                border: 0;
+                border-radius: 8px;
+                padding: 10px 14px;
+                font-size: 13px;
+                font-weight: 700;
+                cursor: pointer;
+                margin-top: 12px;
+            }
+            button:disabled {
+                opacity: 0.55;
+                cursor: not-allowed;
+            }
+            button.ghost {
+                background: #222634;
+                padding: 4px 9px;
+                font-size: 11px;
+                font-weight: 600;
+                margin: 0;
+            }
+            .stats {
+                font-size: 12px;
+                color: var(--muted);
+                margin-bottom: 8px;
+            }
+            .doc {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                padding: 9px 10px;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                margin-bottom: 7px;
+            }
+            .doc .name {
+                font-size: 13px;
+                font-weight: 600;
+                word-break: break-all;
+            }
+            .doc .sub {
+                font-size: 11px;
+                color: var(--muted);
+            }
+            .answer {
+                font-size: 15px;
+                line-height: 1.7;
+                white-space: pre-wrap;
+                margin-top: 10px;
+            }
+            .meta {
+                color: var(--muted);
+                font-size: 12px;
+                margin-top: 10px;
+            }
+            .src {
+                border: 1px solid var(--border);
+                border-left: 3px solid var(--accent);
+                border-radius: 8px;
+                padding: 9px 11px;
+                margin-top: 8px;
+                font-size: 12.5px;
+            }
+            .src .head {
+                color: var(--accent);
+                font-weight: 700;
+                margin-bottom: 4px;
+            }
+            .src .body {
+                color: var(--muted);
+                line-height: 1.55;
+                white-space: pre-wrap;
+            }
+            .empty {
+                color: var(--muted);
+                font-size: 13px;
+                padding: 8px 0;
+            }
+            .badge {
+                font-size: 11px;
+                color: var(--muted);
+                font-weight: 600;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <h1>RAG · 문서 기반 질의응답</h1>
+            <p class="desc">
+                문서를 추가하면 청크로 나눠 저장하고, 질문하면
+                <code>BM25</code> 검색으로 관련 청크를 찾아 LLM이 그 근거만으로
+                한국어 답변을 생성합니다. 답변 아래에 사용한 <b>출처</b>가
+                표시됩니다.
+            </p>
+
+            <div class="grid">
+                <div>
+                    <div class="panel">
+                        <h2>문서 추가</h2>
+                        <label>제목</label>
+                        <input id="docName" placeholder="예: 사내 휴가 규정" />
+                        <label>내용 (텍스트 붙여넣기 또는 파일 선택)</label>
+                        <input
+                            type="file"
+                            id="file"
+                            accept=".txt,.md,.csv,.json,.log"
+                            style="padding: 7px"
+                        />
+                        <textarea
+                            id="docText"
+                            placeholder="문서 본문을 붙여넣으세요…"
+                        ></textarea>
+                        <button id="addBtn">문서 추가</button>
+                    </div>
+
+                    <div class="panel" style="margin-top: 16px">
+                        <h2>
+                            문서 목록
+                            <button id="reload" class="ghost">새로고침</button>
+                        </h2>
+                        <div class="stats" id="stats"></div>
+                        <div id="docList"></div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>질문하기</h2>
+                    <label>질문</label>
+                    <textarea
+                        id="q"
+                        placeholder="예: 연차 휴가는 며칠까지 쓸 수 있어?"
+                        style="min-height: 80px"
+                    ></textarea>
+                    <button id="askBtn">검색 + 답변</button>
+
+                    <div id="result" style="display: none; margin-top: 14px">
+                        <span class="badge" id="resBadge"></span>
+                        <div class="answer" id="answer"></div>
+                        <div class="meta" id="meta"></div>
+                        <div id="sources" style="margin-top: 12px"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const esc = (s) =>
+                String(s).replace(
+                    /[&<>]/g,
+                    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c],
+                );
+
+            async function loadDocs() {
+                const r = await fetch("/api/rag/docs");
+                const d = await r.json();
+                const s = d.stats || {};
+                $("stats").textContent =
+                    `문서 ${s.documents ?? 0}개 · 청크 ${s.chunks ?? 0}개 · 용어 ${s.terms ?? 0}개`;
+                const list = $("docList");
+                if (!d.docs || !d.docs.length) {
+                    list.innerHTML =
+                        '<div class="empty">아직 추가된 문서가 없습니다.</div>';
+                    return;
+                }
+                list.innerHTML = d.docs
+                    .map(
+                        (x) => `
+                    <div class="doc">
+                        <div>
+                            <div class="name">${esc(x.name)}</div>
+                            <div class="sub">청크 ${x.chunkCount}개 · ${new Date(x.createdAt).toLocaleString("ko-KR")}</div>
+                        </div>
+                        <button class="ghost" data-id="${x.id}">삭제</button>
+                    </div>`,
+                    )
+                    .join("");
+                list.querySelectorAll("button[data-id]").forEach((b) => {
+                    b.addEventListener("click", () => delDoc(b.dataset.id));
+                });
+            }
+
+            async function delDoc(id) {
+                if (!confirm("이 문서를 삭제할까요?")) return;
+                await fetch("/api/rag/docs/" + encodeURIComponent(id), {
+                    method: "DELETE",
+                });
+                loadDocs();
+            }
+
+            $("file").addEventListener("change", async (e) => {
+                const f = e.target.files[0];
+                if (!f) return;
+                $("docText").value = await f.text();
+                if (!$("docName").value.trim())
+                    $("docName").value = f.name.replace(/\.[^.]+$/, "");
+            });
+
+            async function addDoc() {
+                const name = $("docName").value.trim();
+                const text = $("docText").value.trim();
+                if (!text) {
+                    alert("문서 내용을 입력하세요.");
+                    return;
+                }
+                $("addBtn").disabled = true;
+                $("addBtn").textContent = "추가 중…";
+                try {
+                    const r = await fetch("/api/rag/docs", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name, text }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "실패");
+                    $("docName").value = "";
+                    $("docText").value = "";
+                    $("file").value = "";
+                    loadDocs();
+                } catch (err) {
+                    alert("추가 실패: " + err.message);
+                } finally {
+                    $("addBtn").disabled = false;
+                    $("addBtn").textContent = "문서 추가";
+                }
+            }
+
+            async function ask() {
+                const q = $("q").value.trim();
+                if (!q) {
+                    alert("질문을 입력하세요.");
+                    return;
+                }
+                $("askBtn").disabled = true;
+                $("askBtn").textContent = "검색 중…";
+                $("result").style.display = "block";
+                $("resBadge").textContent = "검색 + 생성 중…";
+                $("answer").textContent = "";
+                $("meta").textContent = "";
+                $("sources").innerHTML = "";
+                try {
+                    const r = await fetch("/api/rag/ask", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ q, topK: 4 }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "실패");
+                    $("resBadge").textContent = "완료";
+                    $("answer").textContent = d.answer || "(빈 응답)";
+                    $("meta").textContent = d.model
+                        ? `모델: ${d.model} · 티어: ${d.tier ?? "?"}/${d.device ?? "?"} · ${d.elapsedMs}ms`
+                        : `${d.elapsedMs}ms`;
+                    $("sources").innerHTML = (d.sources || [])
+                        .map(
+                            (s) => `
+                        <div class="src">
+                            <div class="head">[출처 ${s.n}] ${esc(s.docName)} #${s.idx} <span style="color:var(--muted);font-weight:400">(score ${s.score})</span></div>
+                            <div class="body">${esc(s.preview)}${s.preview.length >= 200 ? "…" : ""}</div>
+                        </div>`,
+                        )
+                        .join("");
+                } catch (err) {
+                    $("resBadge").textContent = "오류";
+                    $("answer").textContent = "오류: " + err.message;
+                } finally {
+                    $("askBtn").disabled = false;
+                    $("askBtn").textContent = "검색 + 답변";
+                }
+            }
+
+            $("addBtn").addEventListener("click", addDoc);
+            $("askBtn").addEventListener("click", ask);
+            $("reload").addEventListener("click", loadDocs);
+            loadDocs();
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>

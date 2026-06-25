@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · 외부 API 테스트</title>
+        <style>
+            :root {
+                --bg: #0f1117;
+                --panel: #171a23;
+                --border: #272b38;
+                --text: #e7e9ee;
+                --muted: #9aa3b2;
+                --accent: #6c8cff;
+                --accent-2: #4f6bd6;
+                --ok: #3fb950;
+                --err: #f85149;
+                --warn: #d29922;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                font-family:
+                    ui-sans-serif, system-ui, "Segoe UI", "Malgun Gothic",
+                    sans-serif;
+                background: var(--bg);
+                color: var(--text);
+            }
+            .wrap {
+                max-width: 900px;
+                margin: 0 auto;
+                padding: 22px 20px 64px;
+            }
+            h1 {
+                font-size: 18px;
+                margin: 0 0 4px;
+            }
+            p.desc {
+                color: var(--muted);
+                font-size: 13px;
+                margin: 0 0 18px;
+            }
+            label {
+                display: block;
+                font-size: 13px;
+                font-weight: 600;
+                margin: 14px 0 6px;
+            }
+            label .hint {
+                font-weight: 400;
+                color: var(--muted);
+                font-size: 12px;
+            }
+            input,
+            textarea,
+            select {
+                width: 100%;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                color: var(--text);
+                padding: 10px 12px;
+                font-size: 14px;
+                font-family: inherit;
+            }
+            textarea {
+                min-height: 90px;
+                resize: vertical;
+            }
+            .row {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 12px;
+            }
+            .row > div {
+                min-width: 0;
+            }
+            .row > div input,
+            .row > div select {
+                width: 100%;
+                box-sizing: border-box;
+            }
+            @media (max-width: 560px) {
+                .row {
+                    grid-template-columns: 1fr;
+                }
+            }
+            button {
+                margin-top: 16px;
+                background: var(--accent-2);
+                color: #fff;
+                border: 0;
+                border-radius: 8px;
+                padding: 11px 16px;
+                font-size: 14px;
+                font-weight: 600;
+                cursor: pointer;
+            }
+            button:hover {
+                background: var(--accent);
+            }
+            button:disabled {
+                opacity: 0.55;
+                cursor: not-allowed;
+            }
+            .card {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 16px;
+                margin-top: 18px;
+            }
+            .card h3 {
+                margin: 0 0 10px;
+                font-size: 14px;
+            }
+            .url {
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 12.5px;
+                word-break: break-all;
+                color: var(--accent);
+            }
+            pre {
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 12px;
+                overflow: auto;
+                font-size: 12.5px;
+                margin: 8px 0 0;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            .badge {
+                display: inline-block;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 9px;
+                border-radius: 999px;
+                text-transform: uppercase;
+            }
+            .b-gen {
+                background: rgba(210, 153, 34, 0.18);
+                color: var(--warn);
+            }
+            .b-done {
+                background: rgba(63, 185, 80, 0.18);
+                color: var(--ok);
+            }
+            .b-err {
+                background: rgba(248, 81, 73, 0.18);
+                color: var(--err);
+            }
+            .answer {
+                font-size: 15px;
+                line-height: 1.6;
+                margin-top: 8px;
+                white-space: pre-wrap;
+            }
+            .meta {
+                color: var(--muted);
+                font-size: 12px;
+                margin-top: 8px;
+            }
+            a {
+                color: var(--accent);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <h1>외부 API 테스트</h1>
+            <p class="desc">
+                GET <code>/api/ask</code> 로 질문을 보냅니다.
+                <code>WAIT=N</code>(기본)이면 즉시 "생성중" 응답과 결과 JSON URL
+                을 돌려주고, 결과는 자동으로 가져와 표시합니다.
+                <code>WAIT=Y</code> 면 답변이 끝날 때까지 기다렸다가 최종 결과를
+                바로 반환합니다.
+            </p>
+
+            <div class="row">
+                <div>
+                    <label>API KEY</label>
+                    <input id="key" value="tw-demo-key-2026" />
+                </div>
+                <div>
+                    <label
+                        >요청 키(ref)
+                        <span class="hint"
+                            >(보낼 때마다 랜덤 / 응답에 echo)</span
+                        ></label
+                    >
+                    <input id="ref" readonly />
+                </div>
+                <div>
+                    <label
+                        >티어
+                        <span class="hint"
+                            >(선택: auto/small/medium/large)</span
+                        ></label
+                    >
+                    <select id="tier">
+                        <option value="">auto</option>
+                        <option value="small">small</option>
+                        <option value="medium">medium</option>
+                        <option value="large">large</option>
+                    </select>
+                </div>
+                <div>
+                    <label
+                        >WAIT
+                        <span class="hint"
+                            >(Y=완료까지 대기 / N=즉시응답)</span
+                        ></label
+                    >
+                    <select id="wait">
+                        <option value="N">N (즉시응답 + 폴링)</option>
+                        <option value="Y">Y (완료까지 대기)</option>
+                    </select>
+                </div>
+            </div>
+
+            <label>질문 (q)</label>
+            <textarea
+                id="q"
+                placeholder="예: 대한민국의 수도는 어디야?"
+            ></textarea>
+
+            <button id="send">요청 보내기</button>
+
+            <div class="card" id="reqCard" style="display: none">
+                <h3 id="reqTitle">즉시 응답</h3>
+                <div>요청 URL: <span class="url" id="reqUrl"></span></div>
+                <pre id="reqResp"></pre>
+            </div>
+
+            <div class="card" id="resCard" style="display: none">
+                <h3>결과 <span class="badge" id="resBadge"></span></h3>
+                <div>
+                    결과 URL: <a class="url" id="resUrl" target="_blank"></a>
+                </div>
+                <div class="answer" id="answer"></div>
+                <div class="meta" id="resMeta"></div>
+                <pre id="resRaw"></pre>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            let resultUrl = null;
+            let pollTimer = null;
+
+            // 요청마다 새로 만드는 랜덤 식별 키
+            function newRef() {
+                return (
+                    "req-" +
+                    Date.now().toString(36) +
+                    "-" +
+                    Math.random().toString(36).slice(2, 8)
+                );
+            }
+
+            async function send() {
+                const key = $("key").value.trim();
+                const q = $("q").value.trim();
+                const tier = $("tier").value;
+                if (!q) {
+                    alert("질문(q)을 입력하세요.");
+                    return;
+                }
+
+                const wait = $("wait").value;
+                const ref = newRef();
+                $("ref").value = ref;
+                const params = new URLSearchParams({ key, q, WAIT: wait, ref });
+                if (tier) params.set("tier", tier);
+                const url = "/api/ask?" + params.toString();
+
+                $("reqUrl").textContent = location.origin + url;
+                $("resCard").style.display = "none";
+                if (pollTimer) clearInterval(pollTimer);
+
+                if (wait === "Y") {
+                    // WAIT=Y: 즉시응답 없이 결과가 올 때까지 응답을 유지한다.
+                    // 받은 응답이 곧 최종 결과.
+                    $("reqCard").style.display = "none";
+                    $("resCard").style.display = "block";
+                    $("resUrl").textContent = "(WAIT=Y: 응답으로 직접 반환)";
+                    $("resUrl").removeAttribute("href");
+                    renderResult({ status: "waiting" });
+                    try {
+                        const r = await fetch(url);
+                        const d = await r.json();
+                        renderResult(d);
+                    } catch (e) {
+                        renderResult({ status: "error", error: e.message });
+                    }
+                    return;
+                }
+
+                // WAIT=N: 즉시응답 + 결과 링크. 결과는 새로고침으로 확인.
+                $("reqCard").style.display = "block";
+                $("reqTitle").textContent = "즉시 응답";
+                $("reqResp").textContent = "요청 중…";
+                try {
+                    const r = await fetch(url);
+                    const d = await r.json();
+                    $("reqResp").textContent = JSON.stringify(d, null, 2);
+                    if (!r.ok && d.status !== "error") return;
+                    resultUrl = d.resultUrl;
+                    $("resCard").style.display = "block";
+                    $("resUrl").textContent = location.origin + resultUrl;
+                    $("resUrl").href = resultUrl;
+                    renderResult({ status: "generating" });
+                    poll();
+                    pollTimer = setInterval(poll, 2000);
+                } catch (e) {
+                    $("reqResp").textContent = "요청 실패: " + e.message;
+                }
+            }
+
+            function renderResult(d) {
+                $("resRaw").textContent = JSON.stringify(d, null, 2);
+                const badge = $("resBadge");
+                if (d.status === "done") {
+                    badge.textContent = "완료";
+                    badge.className = "badge b-done";
+                    $("answer").textContent = d.answer || "(빈 응답)";
+                    $("resMeta").textContent =
+                        `ref: ${d.ref ?? "-"} · 모델: ${d.model ?? "?"} · 티어: ${d.tier ?? "?"}/${d.device ?? "?"} · ${d.elapsedMs ?? "?"}ms`;
+                } else if (d.status === "error") {
+                    badge.textContent = "오류";
+                    badge.className = "badge b-err";
+                    $("answer").textContent = "오류: " + (d.error || "");
+                    $("resMeta").textContent = `ref: ${d.ref ?? "-"}`;
+                } else if (d.status === "waiting") {
+                    badge.textContent = "대기중";
+                    badge.className = "badge b-gen";
+                    $("answer").textContent =
+                        "응답 대기중… (완료까지 연결을 유지합니다)";
+                    $("resMeta").textContent = "";
+                    $("resRaw").textContent = "";
+                } else {
+                    badge.textContent = "생성중";
+                    badge.className = "badge b-gen";
+                    $("answer").textContent = "답변을 생성중입니다…";
+                }
+            }
+
+            async function poll() {
+                if (!resultUrl) return;
+                try {
+                    const r = await fetch(resultUrl + "?t=" + Date.now());
+                    if (!r.ok) {
+                        $("resBadge").textContent = "대기";
+                        return;
+                    }
+                    const d = await r.json();
+                    renderResult(d);
+                    if (
+                        (d.status === "done" || d.status === "error") &&
+                        pollTimer
+                    ) {
+                        clearInterval(pollTimer);
+                    }
+                } catch (e) {
+                    $("resBadge").textContent = "대기";
+                    $("resBadge").className = "badge b-gen";
+                }
+            }
+
+            $("ref").value = newRef();
+            $("send").addEventListener("click", send);
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>

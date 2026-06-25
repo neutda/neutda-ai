@@ -1,0 +1,1216 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · 테스트 콘솔</title>
+        <style>
+            :root {
+                --bg: #0f1117;
+                --panel: #171a23;
+                --border: #272b38;
+                --text: #e7e9ee;
+                --muted: #9aa3b2;
+                --accent: #6c8cff;
+                --accent-2: #4f6ef0;
+                --ok: #3fb950;
+                --err: #f85149;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                font-family:
+                    ui-sans-serif, system-ui, "Segoe UI", "Malgun Gothic",
+                    sans-serif;
+                background: var(--bg);
+                color: var(--text);
+                line-height: 1.5;
+            }
+            .wrap {
+                max-width: 980px;
+                margin: 0 auto;
+                padding: 24px 20px 64px;
+            }
+            header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 20px;
+            }
+            h1 {
+                font-size: 18px;
+                margin: 0;
+            }
+            .status {
+                font-size: 13px;
+                color: var(--muted);
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .dot {
+                width: 9px;
+                height: 9px;
+                border-radius: 50%;
+                background: var(--muted);
+            }
+            .dot.up {
+                background: var(--ok);
+            }
+            .dot.down {
+                background: var(--err);
+            }
+            .grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 16px;
+            }
+            @media (max-width: 820px) {
+                .grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+            .panel {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 16px;
+            }
+            label {
+                display: block;
+                font-size: 13px;
+                color: var(--muted);
+                margin: 12px 0 6px;
+            }
+            label:first-child {
+                margin-top: 0;
+            }
+            textarea,
+            input[type="text"],
+            input[type="number"] {
+                width: 100%;
+                background: #0d0f15;
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 10px 12px;
+                font-size: 14px;
+                font-family: inherit;
+                resize: vertical;
+            }
+            textarea:focus,
+            input:focus {
+                outline: none;
+                border-color: var(--accent);
+            }
+            .row {
+                display: flex;
+                gap: 12px;
+                align-items: center;
+            }
+            .row > div {
+                flex: 1;
+            }
+            .temp-row {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+            }
+            input[type="range"] {
+                flex: 1;
+            }
+            .temp-val {
+                width: 44px;
+                text-align: right;
+                font-variant-numeric: tabular-nums;
+            }
+            button {
+                margin-top: 16px;
+                width: 100%;
+                background: var(--accent-2);
+                color: #fff;
+                border: 0;
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 15px;
+                font-weight: 600;
+                cursor: pointer;
+            }
+            button:hover {
+                background: var(--accent);
+            }
+            button:disabled {
+                opacity: 0.55;
+                cursor: not-allowed;
+            }
+            .hint {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 4px;
+            }
+            .answer {
+                white-space: pre-wrap;
+                word-break: break-word;
+                min-height: 220px;
+                font-size: 14px;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 14px;
+            }
+            .answer.err {
+                color: var(--err);
+            }
+            .meta {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 10px;
+                display: flex;
+                gap: 16px;
+                flex-wrap: wrap;
+            }
+            .preview {
+                margin-top: 10px;
+            }
+            .preview img {
+                max-width: 100%;
+                max-height: 200px;
+                border-radius: 8px;
+                border: 1px solid var(--border);
+            }
+            .spin {
+                display: inline-block;
+                width: 14px;
+                height: 14px;
+                border: 2px solid #fff6;
+                border-top-color: #fff;
+                border-radius: 50%;
+                animation: s 0.7s linear infinite;
+                vertical-align: -2px;
+                margin-right: 6px;
+            }
+            @keyframes s {
+                to {
+                    transform: rotate(360deg);
+                }
+            }
+            /* 대화형 패널 */
+            .chat-panel {
+                display: flex;
+                flex-direction: column;
+                height: 640px;
+            }
+            .chat-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 10px;
+            }
+            .chat-head .t {
+                font-size: 13px;
+                color: var(--muted);
+            }
+            .btn-sm {
+                margin: 0;
+                width: auto;
+                padding: 6px 10px;
+                font-size: 12px;
+                font-weight: 500;
+                background: #222634;
+                color: var(--muted);
+            }
+            .btn-sm:hover {
+                background: #2c3142;
+                color: var(--text);
+            }
+            .btn-danger {
+                background: rgba(248, 81, 73, 0.14);
+                color: #ff9c95;
+            }
+            .btn-danger:hover {
+                background: rgba(248, 81, 73, 0.24);
+                color: #fff;
+            }
+            .stream-text {
+                white-space: pre-wrap;
+            }
+            .cursor {
+                color: var(--muted);
+                animation: blink 1s step-start infinite;
+            }
+            @keyframes blink {
+                50% {
+                    opacity: 0;
+                }
+            }
+            .chat-log {
+                flex: 1;
+                overflow-y: auto;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 14px;
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+            }
+            .chat-empty {
+                color: var(--muted);
+                font-size: 14px;
+                margin: auto;
+                text-align: center;
+            }
+            .msg {
+                max-width: 88%;
+                padding: 10px 12px;
+                border-radius: 12px;
+                font-size: 14px;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            .msg.user {
+                align-self: flex-end;
+                background: var(--accent-2);
+                color: #fff;
+                border-bottom-right-radius: 3px;
+            }
+            .msg.assistant {
+                align-self: flex-start;
+                background: #1d2130;
+                border: 1px solid var(--border);
+                border-bottom-left-radius: 3px;
+            }
+            .msg.assistant.err {
+                color: var(--err);
+            }
+            .msg .thumb {
+                display: block;
+                max-width: 160px;
+                max-height: 120px;
+                border-radius: 8px;
+                margin-bottom: 6px;
+            }
+            .msg-meta {
+                font-size: 11px;
+                color: var(--muted);
+                margin-top: 6px;
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+            }
+            .tier-badge {
+                font-size: 10px;
+                font-weight: 700;
+                padding: 1px 6px;
+                border-radius: 999px;
+                text-transform: uppercase;
+            }
+            .tier-large {
+                background: rgba(108, 140, 255, 0.18);
+                color: var(--accent);
+            }
+            .tier-medium {
+                background: rgba(63, 185, 80, 0.18);
+                color: var(--ok);
+            }
+            .tier-small {
+                background: rgba(210, 153, 34, 0.18);
+                color: #d29922;
+            }
+            .dev-badge {
+                font-size: 10px;
+                font-weight: 700;
+                padding: 1px 6px;
+                border-radius: 5px;
+                margin-left: 4px;
+            }
+            .dev-gpu {
+                background: rgba(63, 185, 80, 0.18);
+                color: var(--ok);
+            }
+            .dev-cpu {
+                background: rgba(210, 153, 34, 0.18);
+                color: #d29922;
+            }
+            .msg details {
+                margin-top: 6px;
+            }
+            .msg details summary {
+                cursor: pointer;
+                color: var(--muted);
+                font-size: 12px;
+            }
+            .msg details .reason {
+                margin-top: 6px;
+                color: var(--muted);
+                font-size: 13px;
+            }
+            .rag-opts {
+                display: flex;
+                gap: 16px;
+                flex-wrap: wrap;
+                margin-top: 12px;
+            }
+            .rag-chk {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                cursor: pointer;
+                font-size: 13px;
+                margin: 0;
+            }
+            .rag-chk input {
+                width: auto;
+            }
+            .rag-chk.disabled {
+                opacity: 0.45;
+                cursor: not-allowed;
+            }
+            .rag-box {
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                margin: 0 0 10px;
+                background: #0f1220;
+            }
+            .rag-box > summary {
+                cursor: pointer;
+                padding: 9px 12px;
+                font-size: 13px;
+                font-weight: 600;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                list-style: none;
+            }
+            .rag-box .rag-stats {
+                font-size: 11px;
+                color: var(--muted);
+                font-weight: 400;
+            }
+            .rag-box .rag-body {
+                padding: 0 12px 12px;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .rag-box input[type="text"],
+            .rag-box textarea {
+                width: 100%;
+            }
+            .rag-list {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+            .rag-doc {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 8px;
+                font-size: 12px;
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                padding: 6px 9px;
+            }
+            .rag-doc .nm {
+                font-weight: 600;
+                word-break: break-all;
+            }
+            .rag-doc .sb {
+                color: var(--muted);
+                font-size: 11px;
+            }
+            .src-toggle {
+                margin-top: 8px;
+            }
+            .src-toggle > summary {
+                cursor: pointer;
+                color: var(--muted);
+                font-size: 12px;
+                font-weight: 600;
+                list-style: none;
+                user-select: none;
+            }
+            .src-toggle > summary::before {
+                content: "▸ ";
+            }
+            .src-toggle[open] > summary::before {
+                content: "▾ ";
+            }
+            .src-list {
+                margin-top: 8px;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+            .src-item {
+                border: 1px solid var(--border);
+                border-left: 3px solid var(--accent);
+                border-radius: 7px;
+                padding: 6px 9px;
+                font-size: 12px;
+            }
+            .src-item .sh {
+                color: var(--accent);
+                font-weight: 700;
+                margin-bottom: 3px;
+            }
+            .src-item .sb {
+                color: var(--muted);
+                white-space: pre-wrap;
+                line-height: 1.5;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <header>
+                <h1>neutda-ai · 테스트 콘솔</h1>
+                <div
+                    class="status"
+                    style="display: flex; align-items: center; gap: 12px"
+                >
+                    <button id="testError" class="btn-sm btn-danger">
+                        오류 테스트
+                    </button>
+                </div>
+            </header>
+
+            <div class="grid">
+                <section class="panel">
+                    <label for="system"
+                        >ROLE_SYSTEM
+                        <span class="hint">(시스템 지시문, 선택)</span></label
+                    >
+                    <textarea
+                        id="system"
+                        rows="3"
+                        placeholder="예: 너는 친절한 한국어 비서야."
+                    ></textarea>
+
+                    <label for="user"
+                        >ROLE_USER
+                        <span class="hint">(사용자 질문, 필수)</span></label
+                    >
+                    <textarea
+                        id="user"
+                        rows="5"
+                        placeholder="예: 한국의 수도는 어디야?"
+                    ></textarea>
+
+                    <label>TEMPERATURE</label>
+                    <div class="temp-row">
+                        <input
+                            id="tempRange"
+                            type="range"
+                            min="0"
+                            max="2"
+                            step="0.1"
+                            value="0.7"
+                        />
+                        <input
+                            id="tempNum"
+                            class="temp-val"
+                            type="number"
+                            min="0"
+                            max="2"
+                            step="0.1"
+                            value="0.7"
+                        />
+                    </div>
+
+                    <label
+                        style="
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                            cursor: pointer;
+                        "
+                    >
+                        <input
+                            id="thinking"
+                            type="checkbox"
+                            style="width: auto"
+                        />
+                        <span>THINKING (추론 과정 사용)</span>
+                    </label>
+
+                    <label for="content"
+                        >content
+                        <span class="hint"
+                            >(이미지 URL / 로컬 경로 / data: URI, 선택)</span
+                        ></label
+                    >
+                    <input
+                        id="content"
+                        type="text"
+                        placeholder="https://... 또는 C:\images\photo.jpg"
+                    />
+                    <div class="row" style="margin-top: 8px">
+                        <input
+                            id="file"
+                            type="file"
+                            accept="image/*"
+                            style="font-size: 13px"
+                        />
+                    </div>
+                    <div id="preview" class="preview"></div>
+
+                    <div class="rag-opts">
+                        <label class="rag-chk">
+                            <input id="rag" type="checkbox" />
+                            <span>문서기반 답변 (RAG)</span>
+                        </label>
+                        <label class="rag-chk" id="ragOnlyWrap">
+                            <input id="ragOnly" type="checkbox" disabled />
+                            <span>문서에 대한 것만 답변</span>
+                        </label>
+                    </div>
+
+                    <button id="send">전송</button>
+                </section>
+
+                <section class="panel chat-panel">
+                    <div class="chat-head">
+                        <span class="t">대화</span>
+                        <div
+                            style="display: flex; gap: 8px; align-items: center"
+                        >
+                            <label
+                                style="
+                                    margin: 0;
+                                    display: flex;
+                                    align-items: center;
+                                    gap: 6px;
+                                    cursor: pointer;
+                                    font-size: 12px;
+                                "
+                            >
+                                <input
+                                    id="memory"
+                                    type="checkbox"
+                                    checked
+                                    style="width: auto"
+                                />
+                                <span>이전 대화 기억</span>
+                            </label>
+                            <label
+                                style="
+                                    margin: 0;
+                                    display: flex;
+                                    align-items: center;
+                                    gap: 6px;
+                                    cursor: pointer;
+                                    font-size: 12px;
+                                "
+                            >
+                                <input
+                                    id="stream"
+                                    type="checkbox"
+                                    checked
+                                    style="width: auto"
+                                />
+                                <span>스트리밍</span>
+                            </label>
+                            <button id="clear" class="btn-sm">초기화</button>
+                        </div>
+                    </div>
+
+                    <details class="rag-box" id="ragBox">
+                        <summary>
+                            문서 관리 (RAG)
+                            <span class="rag-stats" id="ragStats"></span>
+                        </summary>
+                        <div class="rag-body">
+                            <input
+                                id="ragName"
+                                type="text"
+                                placeholder="문서 제목 (선택)"
+                            />
+                            <input
+                                id="ragFile"
+                                type="file"
+                                multiple
+                                accept=".pdf,.docx,.hwp,.hwpx,.txt,.md,.csv,.json,.log"
+                                style="font-size: 12px"
+                            />
+                            <div
+                                id="ragFileHint"
+                                class="sb"
+                                style="color: var(--muted); font-size: 11px"
+                            >
+                                PDF · Word(docx) · 한글(hwp/hwpx) · 텍스트 지원.
+                                여러 개 선택 가능, 선택 시 자동 업로드됩니다.
+                            </div>
+                            <textarea
+                                id="ragText"
+                                rows="4"
+                                placeholder="또는 문서 내용을 직접 붙여넣으세요…"
+                            ></textarea>
+                            <button id="ragAdd" class="btn-sm">문서 추가</button>
+                            <div id="ragList" class="rag-list"></div>
+                        </div>
+                    </details>
+
+                    <div id="log" class="chat-log">
+                        <div class="chat-empty">
+                            대화 내역이 여기에 표시됩니다.
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const tempRange = $("tempRange"),
+                tempNum = $("tempNum");
+            tempRange.addEventListener(
+                "input",
+                () => (tempNum.value = tempRange.value),
+            );
+            tempNum.addEventListener(
+                "input",
+                () => (tempRange.value = tempNum.value),
+            );
+
+            // 파일 선택 시 base64 data URI 로 content 채우기
+            $("file").addEventListener("change", (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                    $("content").value = reader.result;
+                    renderPreview(reader.result);
+                };
+                reader.readAsDataURL(f);
+            });
+            $("content").addEventListener("input", () =>
+                renderPreview($("content").value.trim()),
+            );
+
+            function renderPreview(src) {
+                const box = $("preview");
+                box.innerHTML = "";
+                if (
+                    src &&
+                    (src.startsWith("http") || src.startsWith("data:image"))
+                ) {
+                    const img = document.createElement("img");
+                    img.src = src;
+                    box.appendChild(img);
+                }
+            }
+
+            const log = $("log");
+            // 현재 대화(메모리 전송용): [{role:'user'|'assistant', content}]
+            let convo = [];
+
+            const esc = (s) =>
+                String(s ?? "").replace(
+                    /[&<>"]/g,
+                    (c) =>
+                        ({
+                            "&": "&amp;",
+                            "<": "&lt;",
+                            ">": "&gt;",
+                            '"': "&quot;",
+                        })[c],
+                );
+
+            function clearEmpty() {
+                const e = log.querySelector(".chat-empty");
+                if (e) e.remove();
+            }
+            function scrollDown() {
+                log.scrollTop = log.scrollHeight;
+            }
+
+            function addUser(text, imgSrc) {
+                clearEmpty();
+                const el = document.createElement("div");
+                el.className = "msg user";
+                let html = "";
+                if (
+                    imgSrc &&
+                    (imgSrc.startsWith("http") ||
+                        imgSrc.startsWith("data:image"))
+                )
+                    html += `<img class="thumb" src="${esc(imgSrc)}" />`;
+                html += esc(text);
+                el.innerHTML = html;
+                log.appendChild(el);
+                scrollDown();
+            }
+
+            // 어시스턴트 메시지 추가. 반환된 엘리먼트로 나중에 내용 채움
+            function addAssistant() {
+                clearEmpty();
+                const el = document.createElement("div");
+                el.className = "msg assistant";
+                el.innerHTML = '<span class="spin"></span>생성 중…';
+                log.appendChild(el);
+                scrollDown();
+                return el;
+            }
+
+            function fillAssistant(el, data, ms) {
+                el.classList.remove("err");
+                const tier = data.tier
+                    ? `<span class="tier-badge tier-${data.tier}">${data.tier}</span>`
+                    : "";
+                const dev = data.device
+                    ? `<span class="dev-badge dev-${data.device}">${data.device.toUpperCase()}${data.difficulty != null ? " " + data.difficulty : ""}</span>`
+                    : "";
+                const u = data.usage;
+                const metaParts = [
+                    data.model ? `model: ${esc(data.model)}` : null,
+                    data.ttftMs != null ? `TTFT: ${data.ttftMs}ms` : null,
+                    data.tokensPerSec != null
+                        ? `${data.tokensPerSec} tok/s`
+                        : null,
+                    u
+                        ? `tokens: ${u.total_tokens ?? data.tokens ?? "?"}`
+                        : data.tokens
+                          ? `tokens: ${data.tokens}`
+                          : null,
+                    ms != null ? `${ms} ms` : null,
+                ].filter(Boolean);
+                let html = esc(data.answer || "(빈 응답)");
+                if (data.reasoning) {
+                    html += `<details><summary>추론 과정 보기</summary><div class="reason">${esc(data.reasoning)}</div></details>`;
+                }
+                html += `<div class="msg-meta">${tier}${dev}<span>${metaParts.join(" · ")}</span></div>`;
+                el.innerHTML = html;
+                scrollDown();
+            }
+
+            function fillError(el, msg) {
+                el.classList.add("err");
+                el.textContent = "오류: " + msg;
+                scrollDown();
+            }
+
+            // 서버 저장 히스토리 로드 → 화면/메모리 복원
+            async function loadHistory() {
+                try {
+                    const r = await fetch("/api/history");
+                    const j = await r.json();
+                    const items = j.items || [];
+                    if (items.length === 0) return;
+                    clearEmpty();
+                    for (const it of items) {
+                        addUser(it.user, it.hasImage ? null : null);
+                        const el = addAssistant();
+                        if (it.rag) {
+                            fillRag(
+                                el,
+                                {
+                                    answer: it.answer,
+                                    strict: it.strict,
+                                    sources: it.sources || [],
+                                    model: it.model,
+                                    tier: it.tier,
+                                    device: it.device,
+                                },
+                                null,
+                            );
+                        } else {
+                            fillAssistant(
+                                el,
+                                {
+                                    answer: it.answer,
+                                    reasoning: it.reasoning,
+                                    model: it.model,
+                                    tier: it.tier,
+                                    usage: it.usage,
+                                },
+                                null,
+                            );
+                        }
+                        convo.push({ role: "user", content: it.user });
+                        convo.push({ role: "assistant", content: it.answer });
+                    }
+                } catch {
+                    /* 무시 */
+                }
+            }
+            loadHistory();
+
+            $("clear").addEventListener("click", async () => {
+                if (!confirm("저장된 대화 내역을 모두 삭제할까요?")) return;
+                try {
+                    await fetch("/api/history", { method: "DELETE" });
+                } catch {}
+                convo = [];
+                log.innerHTML =
+                    '<div class="chat-empty">대화 내역이 여기에 표시됩니다.</div>';
+            });
+
+            $("testError").addEventListener("click", async () => {
+                const btn = $("testError");
+                btn.disabled = true;
+                try {
+                    const r = await fetch("/api/logs/test-error", {
+                        method: "POST",
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    alert(
+                        `강제 오류 유발 (HTTP ${r.status})\n` +
+                            `모델: ${d.model ?? "?"} (${d.tier ?? "?"}/${
+                                d.device ?? "?"
+                            })\n` +
+                            `시나리오: ${d.scenario ?? "?"}\n` +
+                            `원인: ${d.cause ?? "?"}\n\n` +
+                            `로그 페이지에서 상세를 확인하세요.`,
+                    );
+                } catch (e) {
+                    alert("요청 실패: " + e.message);
+                } finally {
+                    btn.disabled = false;
+                }
+            });
+
+            $("send").addEventListener("click", async () => {
+                const btn = $("send");
+                const user = $("user").value.trim();
+                if (!user) {
+                    alert("ROLE_USER 는 필수입니다.");
+                    return;
+                }
+
+                const body = {
+                    ROLE_USER: user,
+                    TEMPERATURE: Number(tempNum.value),
+                    THINKING: $("thinking").checked,
+                };
+                const sys = $("system").value.trim();
+                const content = $("content").value.trim();
+                if (sys) body.ROLE_SYSTEM = sys;
+                if (content) body.content = content;
+                // 이전 대화 기억: 직전까지의 대화를 컨텍스트로 전송
+                if ($("memory").checked && convo.length > 0) {
+                    body.HISTORY = convo.slice(-12);
+                }
+
+                addUser(user, content);
+                const el = addAssistant();
+                btn.disabled = true;
+                $("user").value = "";
+                const t0 = performance.now();
+
+                const useStream = $("stream").checked;
+                try {
+                    if ($("rag").checked) {
+                        await sendRag(el, user, t0);
+                    } else if (useStream) {
+                        await sendStream(el, body, user, t0);
+                    } else {
+                        const r = await fetch("/api/chat", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body),
+                        });
+                        const j = await r.json();
+                        const ms = Math.round(performance.now() - t0);
+                        if (!r.ok) {
+                            fillError(el, j.error || r.status);
+                        } else {
+                            fillAssistant(el, j, ms);
+                            convo.push({ role: "user", content: user });
+                            convo.push({
+                                role: "assistant",
+                                content: j.answer || "",
+                            });
+                        }
+                    }
+                } catch (err) {
+                    fillError(el, err.message);
+                } finally {
+                    btn.disabled = false;
+                }
+            });
+
+            // SSE 스트리밍 전송: 토큰을 실시간으로 받아 표시
+            async function sendStream(el, body, user, t0) {
+                const r = await fetch("/api/chat/stream", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                });
+                if (!r.ok || !r.body) {
+                    let msg = r.status;
+                    try {
+                        msg = (await r.json()).error || msg;
+                    } catch {}
+                    fillError(el, msg);
+                    return;
+                }
+
+                const reader = r.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = "";
+                let answer = "";
+                let meta = {};
+                let done = null;
+                el.classList.remove("err");
+                el.innerHTML =
+                    '<span class="stream-text"></span><span class="cursor">▋</span>';
+                const textEl = el.querySelector(".stream-text");
+
+                const handle = (event, dataStr) => {
+                    let data;
+                    try {
+                        data = JSON.parse(dataStr);
+                    } catch {
+                        return;
+                    }
+                    if (event === "token") {
+                        answer += data.text;
+                        textEl.textContent = answer;
+                        scrollDown();
+                    } else if (event === "meta") {
+                        meta = { ...meta, ...data };
+                    } else if (event === "done") {
+                        done = data;
+                    } else if (event === "error") {
+                        fillError(el, data.error || "스트리밍 오류");
+                    }
+                };
+
+                while (true) {
+                    const { done: rdone, value } = await reader.read();
+                    if (rdone) break;
+                    buf += decoder.decode(value, { stream: true });
+                    let sep;
+                    while ((sep = buf.indexOf("\n\n")) >= 0) {
+                        const chunk = buf.slice(0, sep);
+                        buf = buf.slice(sep + 2);
+                        const lines = chunk.split("\n");
+                        let ev = "message";
+                        let dataStr = "";
+                        for (const ln of lines) {
+                            if (ln.startsWith("event:"))
+                                ev = ln.slice(6).trim();
+                            else if (ln.startsWith("data:"))
+                                dataStr += ln.slice(5).trim();
+                        }
+                        if (dataStr) handle(ev, dataStr);
+                    }
+                }
+
+                const ms = Math.round(performance.now() - t0);
+                if (done) {
+                    fillAssistant(
+                        el,
+                        {
+                            answer: done.answer || answer,
+                            reasoning: done.reasoning,
+                            model: done.model,
+                            tier: done.tier,
+                            device: done.device,
+                            difficulty: done.difficulty,
+                            ttftMs: done.ttftMs,
+                            tokensPerSec: done.tokensPerSec,
+                            tokens: done.tokens,
+                            usage: done.usage,
+                        },
+                        ms,
+                    );
+                    convo.push({ role: "user", content: user });
+                    convo.push({
+                        role: "assistant",
+                        content: done.answer || answer,
+                    });
+                } else if (answer) {
+                    convo.push({ role: "user", content: user });
+                    convo.push({ role: "assistant", content: answer });
+                }
+            }
+
+            // ===== RAG: 문서기반 답변 =====
+            // "문서기반 답변" 체크 시에만 "문서에 대한 것만 답변" 사용 가능
+            function syncRagOnly() {
+                const on = $("rag").checked;
+                $("ragOnly").disabled = !on;
+                $("ragOnlyWrap").classList.toggle("disabled", !on);
+                if (!on) $("ragOnly").checked = false;
+            }
+            $("rag").addEventListener("change", syncRagOnly);
+            syncRagOnly();
+
+            async function sendRag(el, user, t0) {
+                const strict = $("ragOnly").checked;
+                const r = await fetch("/api/rag/ask", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ q: user, strict, topK: 4 }),
+                });
+                const j = await r.json();
+                const ms = Math.round(performance.now() - t0);
+                if (!r.ok) {
+                    fillError(el, j.error || r.status);
+                    return;
+                }
+                fillRag(el, j, ms);
+                convo.push({ role: "user", content: user });
+                convo.push({ role: "assistant", content: j.answer || "" });
+            }
+
+            function fillRag(el, data, ms) {
+                el.classList.remove("err");
+                const tier = data.tier
+                    ? `<span class="tier-badge tier-${data.tier}">${data.tier}</span>`
+                    : "";
+                const dev = data.device
+                    ? `<span class="dev-badge dev-${data.device}">${data.device.toUpperCase()}</span>`
+                    : "";
+                const mode = data.strict
+                    ? '<span class="tier-badge tier-small">문서만</span>'
+                    : '<span class="tier-badge tier-medium">문서기반</span>';
+                const metaParts = [
+                    data.model ? `model: ${esc(data.model)}` : null,
+                    ms != null ? `${ms} ms` : null,
+                ].filter(Boolean);
+                const cleanAnswer = (data.answer || "(빈 응답)")
+                    .replace(/\s*\[출처[^\]]*\]/g, "")
+                    .trim();
+                let html = esc(cleanAnswer);
+                if (data.sources && data.sources.length) {
+                    html +=
+                        `<details class="src-toggle"><summary>참고 문서 ${data.sources.length}개 보기</summary><div class="src-list">` +
+                        data.sources
+                            .map(
+                                (s) =>
+                                    `<div class="src-item"><div class="sh">[출처 ${s.n}] ${esc(s.docName)} #${s.idx} <span style="color:var(--muted);font-weight:400">(score ${s.score})</span></div><div class="sb">${esc(s.preview)}${s.preview.length >= 200 ? "…" : ""}</div></div>`,
+                            )
+                            .join("") +
+                        "</div></details>";
+                }
+                html += `<div class="msg-meta">${mode}${tier}${dev}<span>${metaParts.join(" · ")}</span></div>`;
+                el.innerHTML = html;
+                scrollDown();
+            }
+
+            // ===== RAG 문서 관리 =====
+            async function loadRagDocs() {
+                try {
+                    const r = await fetch("/api/rag/docs");
+                    const d = await r.json();
+                    const s = d.stats || {};
+                    $("ragStats").textContent =
+                        `문서 ${s.documents ?? 0} · 청크 ${s.chunks ?? 0}`;
+                    const list = $("ragList");
+                    if (!d.docs || !d.docs.length) {
+                        list.innerHTML =
+                            '<div class="sb" style="color:var(--muted)">추가된 문서가 없습니다.</div>';
+                        return;
+                    }
+                    list.innerHTML = d.docs
+                        .map(
+                            (x) =>
+                                `<div class="rag-doc"><div><div class="nm">${esc(x.name)}</div><div class="sb">청크 ${x.chunkCount}개</div></div><button class="btn-sm" data-id="${x.id}">삭제</button></div>`,
+                        )
+                        .join("");
+                    list.querySelectorAll("button[data-id]").forEach((b) => {
+                        b.addEventListener("click", () =>
+                            delRagDoc(b.dataset.id),
+                        );
+                    });
+                } catch {
+                    /* 무시 */
+                }
+            }
+
+            async function delRagDoc(id) {
+                if (!confirm("이 문서를 삭제할까요?")) return;
+                await fetch("/api/rag/docs/" + encodeURIComponent(id), {
+                    method: "DELETE",
+                });
+                loadRagDocs();
+            }
+
+            // 파일 선택 시: 바이너리(PDF/Word/HWP 등)는 서버에서 추출하므로 즉시 업로드
+            $("ragFile").addEventListener("change", async (e) => {
+                const files = Array.from(e.target.files || []);
+                if (!files.length) return;
+                await uploadRagFiles(files);
+                $("ragFile").value = "";
+            });
+
+            async function uploadRagFiles(files) {
+                const btn = $("ragAdd");
+                const hint = $("ragFileHint");
+                btn.disabled = true;
+                // 파일이 1개일 때만 제목 입력칸을 적용한다.
+                const allowName = files.length === 1;
+                let ok = 0;
+                const failed = [];
+                for (let i = 0; i < files.length; i++) {
+                    const f = files[i];
+                    hint.textContent = `(${i + 1}/${files.length}) "${f.name}" 업로드/추출 중…`;
+                    try {
+                        const fd = new FormData();
+                        fd.append("file", f);
+                        const name = allowName ? $("ragName").value.trim() : "";
+                        if (name) fd.append("name", name);
+                        const r = await fetch("/api/rag/upload", {
+                            method: "POST",
+                            body: fd,
+                        });
+                        const d = await r.json();
+                        if (!r.ok) throw new Error(d.error || "실패");
+                        ok++;
+                    } catch (err) {
+                        failed.push(`${f.name}: ${err.message}`);
+                    }
+                    loadRagDocs();
+                }
+                $("ragName").value = "";
+                hint.textContent =
+                    `완료: ${ok}개 추가` +
+                    (failed.length ? ` · 실패 ${failed.length}개` : "");
+                if (failed.length) {
+                    alert("일부 파일 업로드 실패:\n" + failed.join("\n"));
+                }
+                btn.disabled = false;
+            }
+
+            // 붙여넣은 텍스트로 문서 추가
+            $("ragAdd").addEventListener("click", async () => {
+                const name = $("ragName").value.trim();
+                const text = $("ragText").value.trim();
+                if (!text) {
+                    alert("문서 내용을 붙여넣거나, 위에서 파일을 선택하세요.");
+                    return;
+                }
+                const btn = $("ragAdd");
+                btn.disabled = true;
+                btn.textContent = "추가 중…";
+                try {
+                    const r = await fetch("/api/rag/docs", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name, text }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "실패");
+                    $("ragName").value = "";
+                    $("ragText").value = "";
+                    loadRagDocs();
+                } catch (err) {
+                    alert("추가 실패: " + err.message);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = "문서 추가";
+                }
+            });
+
+            loadRagDocs();
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>

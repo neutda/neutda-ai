@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · LLM 모니터링</title>
+        <style>
+            :root {
+                --bg: #0f1117;
+                --panel: #171a23;
+                --border: #272b38;
+                --text: #e7e9ee;
+                --muted: #9aa3b2;
+                --accent: #6c8cff;
+                --ok: #3fb950;
+                --err: #f85149;
+                --warn: #d29922;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                font-family:
+                    ui-sans-serif, system-ui, "Segoe UI", "Malgun Gothic",
+                    sans-serif;
+                background: var(--bg);
+                color: var(--text);
+            }
+            .wrap {
+                max-width: 1500px;
+                margin: 0 auto;
+                padding: 24px 20px 64px;
+            }
+            .table-scroll {
+                width: 100%;
+                overflow-x: auto;
+            }
+            header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 18px;
+                flex-wrap: wrap;
+            }
+            h1 {
+                font-size: 18px;
+                margin: 0;
+            }
+            a {
+                color: var(--accent);
+                text-decoration: none;
+                font-size: 13px;
+            }
+            .summary {
+                display: grid;
+                grid-template-columns: repeat(6, 1fr);
+                gap: 12px;
+                margin-bottom: 20px;
+            }
+            @media (max-width: 760px) {
+                .summary {
+                    grid-template-columns: repeat(2, 1fr);
+                }
+            }
+            .card {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 14px 16px;
+            }
+            .card .k {
+                font-size: 12px;
+                color: var(--muted);
+            }
+            .card .v {
+                font-size: 24px;
+                font-weight: 700;
+                margin-top: 4px;
+                font-variant-numeric: tabular-nums;
+            }
+            table {
+                width: 100%;
+                min-width: 1180px;
+                border-collapse: collapse;
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                overflow: hidden;
+            }
+            th,
+            td {
+                text-align: left;
+                padding: 11px 14px;
+                font-size: 14px;
+                border-bottom: 1px solid var(--border);
+                white-space: nowrap;
+            }
+            th {
+                color: var(--muted);
+                font-weight: 600;
+                font-size: 12px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            tr:last-child td {
+                border-bottom: 0;
+            }
+            th.num,
+            td.num {
+                text-align: right;
+                font-variant-numeric: tabular-nums;
+            }
+            .pill {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                font-size: 12px;
+                padding: 3px 9px;
+                border-radius: 999px;
+                white-space: nowrap;
+            }
+            .model {
+                max-width: 320px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .pill .dot {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+            }
+            .up {
+                background: rgba(63, 185, 80, 0.12);
+                color: var(--ok);
+            }
+            .up .dot {
+                background: var(--ok);
+            }
+            .down {
+                background: rgba(248, 81, 73, 0.12);
+                color: var(--err);
+            }
+            .down .dot {
+                background: var(--err);
+            }
+            .bar {
+                height: 6px;
+                background: #0d0f15;
+                border-radius: 4px;
+                overflow: hidden;
+                margin-top: 6px;
+            }
+            .bar > span {
+                display: block;
+                height: 100%;
+                background: var(--accent);
+            }
+            .muted {
+                color: var(--muted);
+                font-size: 12px;
+            }
+            .err {
+                color: var(--err);
+                font-size: 12px;
+                max-width: 280px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .updated {
+                font-size: 12px;
+                color: var(--muted);
+            }
+            .tier {
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 8px;
+                border-radius: 999px;
+                text-transform: uppercase;
+            }
+            .tier-large {
+                background: rgba(108, 140, 255, 0.15);
+                color: var(--accent);
+            }
+            .tier-medium {
+                background: rgba(63, 185, 80, 0.15);
+                color: var(--ok);
+            }
+            .tier-small {
+                background: rgba(210, 153, 34, 0.15);
+                color: var(--warn);
+            }
+            .dev {
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 8px;
+                border-radius: 6px;
+            }
+            .dev-gpu {
+                background: rgba(63, 185, 80, 0.15);
+                color: var(--ok);
+            }
+            .dev-cpu {
+                background: rgba(210, 153, 34, 0.15);
+                color: var(--warn);
+            }
+            .dev-na {
+                background: rgba(154, 163, 178, 0.15);
+                color: var(--muted);
+            }
+            h2 {
+                font-size: 15px;
+                margin: 28px 0 12px;
+            }
+            .res-grid {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 12px;
+            }
+            @media (max-width: 760px) {
+                .res-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+            .res {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 14px 16px;
+            }
+            .res .top {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 8px;
+            }
+            .res .name {
+                font-size: 13px;
+                font-weight: 600;
+            }
+            .res .name small {
+                color: var(--muted);
+                font-weight: 400;
+                font-size: 11px;
+            }
+            .res .pct {
+                font-size: 20px;
+                font-weight: 700;
+                font-variant-numeric: tabular-nums;
+            }
+            .meter {
+                height: 9px;
+                background: #0d0f15;
+                border-radius: 5px;
+                overflow: hidden;
+                margin: 9px 0 8px;
+            }
+            .meter > span {
+                display: block;
+                height: 100%;
+                background: var(--ok);
+                transition: width 0.4s ease;
+            }
+            .meter.warn > span {
+                background: var(--warn);
+            }
+            .meter.crit > span {
+                background: var(--err);
+            }
+            .res .sub {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px 14px;
+                font-size: 12px;
+                color: var(--muted);
+                font-variant-numeric: tabular-nums;
+            }
+            .chart-wrap {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 14px 16px;
+                margin-top: 12px;
+            }
+            .chart-legend {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 16px;
+                margin-bottom: 10px;
+                font-size: 12px;
+                color: var(--muted);
+            }
+            .chart-legend .lg {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .chart-legend .sw {
+                width: 11px;
+                height: 11px;
+                border-radius: 2px;
+                display: inline-block;
+            }
+            .chart-legend b {
+                color: var(--text);
+                font-variant-numeric: tabular-nums;
+            }
+            canvas#resChart {
+                width: 100%;
+                height: 220px;
+                display: block;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <header>
+                <h1>LLM 백엔드 모니터링</h1>
+                <div><span id="updated" class="updated"></span></div>
+            </header>
+
+            <div class="summary">
+                <div class="card">
+                    <div class="k">백엔드</div>
+                    <div class="v" id="sBackends">–</div>
+                </div>
+                <div class="card">
+                    <div class="k">정상</div>
+                    <div class="v" id="sHealthy" style="color: var(--ok)">
+                        –
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="k">진행 중(in-flight)</div>
+                    <div class="v" id="sInflight">–</div>
+                </div>
+                <div class="card">
+                    <div class="k">처리량(최근 1분)</div>
+                    <div class="v" id="sRpm" style="color: var(--accent)">
+                        –
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="k">총 요청</div>
+                    <div class="v" id="sTotal">–</div>
+                </div>
+                <div class="card">
+                    <div class="k">총 오류</div>
+                    <div class="v" id="sErrors" style="color: var(--err)">
+                        –
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>백엔드</th>
+                            <th>티어</th>
+                            <th>장치</th>
+                            <th>모델</th>
+                            <th>상태</th>
+                            <th class="num">진행 중</th>
+                            <th class="num">총 요청</th>
+                            <th class="num">오류</th>
+                            <th class="num">평균(ms)</th>
+                            <th class="num">헬스(ms)</th>
+                            <th>비고</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rows">
+                        <tr>
+                            <td colspan="11" class="muted">불러오는 중…</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="muted" id="hint" style="margin-top: 14px"></p>
+
+            <h2>실시간 시스템 자원</h2>
+            <div class="res-grid" id="resGrid">
+                <div class="res"><div class="muted">불러오는 중…</div></div>
+            </div>
+
+            <div class="chart-wrap">
+                <div class="chart-legend" id="chartLegend"></div>
+                <canvas id="resChart"></canvas>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+
+            async function refresh() {
+                try {
+                    const r = await fetch("/api/status");
+                    const s = await r.json();
+                    $("sBackends").textContent = s.totalBackends;
+                    $("sHealthy").textContent = s.healthyBackends;
+                    $("sInflight").textContent = s.totalInFlight;
+                    $("sRpm").textContent = s.requestsLastMin ?? "–";
+                    $("sTotal").textContent = s.totalRequests;
+                    $("sErrors").textContent = s.totalErrors;
+
+                    const maxLoad = Math.max(
+                        1,
+                        ...s.backends.map((b) => b.inFlight),
+                    );
+                    $("rows").innerHTML = s.backends
+                        .map(
+                            (b) => `
+          <tr>
+            <td>${b.url}</td>
+            <td><span class="tier tier-${b.tier}">${b.tier ?? "–"}</span></td>
+            <td><span class="dev dev-${b.device || "na"}">${b.device ? b.device.toUpperCase() : "–"}</span></td>
+            <td class="model" title="${b.model ?? ""}">${b.model ? b.model.split(/[\\/]/).pop() : '<span class="muted">–</span>'}</td>
+            <td><span class="pill ${b.healthy ? "up" : "down"}"><span class="dot"></span>${b.healthy ? "정상" : "다운"}</span></td>
+            <td class="num">${b.inFlight}<div class="bar"><span style="width:${(b.inFlight / maxLoad) * 100}%"></span></div></td>
+            <td class="num">${b.totalRequests}</td>
+            <td class="num">${b.totalErrors}</td>
+            <td class="num">${b.avgLatencyMs ?? "–"}</td>
+            <td class="num">${b.healthLatencyMs ?? "–"}</td>
+            <td class="err" title="${b.lastError ?? ""}">${b.lastError ?? ""}</td>
+          </tr>`,
+                        )
+                        .join("");
+
+                    $("hint").textContent =
+                        s.healthyBackends === 0
+                            ? "정상 백엔드가 없습니다. llama-server 를 실행하세요 (npm run llama / run-llama-cluster.ps1)."
+                            : "";
+                    $("updated").textContent =
+                        "갱신 " + new Date().toLocaleTimeString();
+                } catch (e) {
+                    $("rows").innerHTML =
+                        `<tr><td colspan="11" class="err">상태 조회 실패: ${e.message}</td></tr>`;
+                }
+            }
+            refresh();
+            setInterval(refresh, 1000);
+
+            function meterClass(pct) {
+                return pct >= 90
+                    ? "meter crit"
+                    : pct >= 70
+                      ? "meter warn"
+                      : "meter";
+            }
+            function resCard(name, sub, pct, extra) {
+                return `<div class="res">
+        <div class="top"><div class="name">${name} ${extra ? `<small>${extra}</small>` : ""}</div><div class="pct">${pct == null ? "–" : pct + "%"}</div></div>
+        <div class="${meterClass(pct ?? 0)}"><span style="width:${pct ?? 0}%"></span></div>
+        <div class="sub">${sub}</div>
+      </div>`;
+            }
+            const gb = (mb) => (mb / 1024).toFixed(1) + " GB";
+
+            async function refreshMetrics() {
+                try {
+                    const m = await (await fetch("/api/metrics")).json();
+                    const cards = [];
+                    for (const g of m.gpus || []) {
+                        const sub = [
+                            `VRAM ${gb(g.memUsedMb)} / ${gb(g.memTotalMb)}`,
+                            g.tempC != null ? `${g.tempC}°C` : null,
+                            g.powerW != null ? `${g.powerW} W` : null,
+                            `사용률 ${g.utilPct}%`,
+                        ]
+                            .filter(Boolean)
+                            .join(" · ");
+                        cards.push(
+                            resCard(
+                                `GPU${g.index} <small>${g.name}</small>`,
+                                sub,
+                                g.memUsagePct,
+                                "VRAM",
+                            ),
+                        );
+                    }
+                    if (!(m.gpus || []).length) {
+                        cards.push(
+                            `<div class="res"><div class="name">GPU</div><div class="sub" style="margin-top:8px">nvidia-smi 사용 불가</div></div>`,
+                        );
+                    }
+                    cards.push(
+                        resCard(
+                            "CPU",
+                            `${m.cpu.cores} 코어 · ${m.cpu.model}`,
+                            m.cpu.usagePct,
+                        ),
+                    );
+                    cards.push(
+                        resCard(
+                            "RAM",
+                            `${gb(m.mem.usedMb)} / ${gb(m.mem.totalMb)} (여유 ${gb(m.mem.freeMb)})`,
+                            m.mem.usagePct,
+                        ),
+                    );
+                    $("resGrid").innerHTML = cards.join("");
+
+                    const g0 = (m.gpus || [])[0];
+                    pushPoint("vram", g0 ? g0.memUsagePct : null);
+                    pushPoint("util", g0 ? g0.utilPct : null);
+                    pushPoint("cpu", m.cpu.usagePct);
+                    pushPoint("ram", m.mem.usagePct);
+                    drawChart();
+                } catch (e) {
+                    $("resGrid").innerHTML =
+                        `<div class="res"><div class="err">자원 조회 실패: ${e.message}</div></div>`;
+                }
+            }
+
+            // ===== 실시간 라인 그래프 =====
+            const SERIES = [
+                { key: "vram", label: "GPU VRAM", color: "#6c8cff" },
+                { key: "util", label: "GPU 사용률", color: "#3fb950" },
+                { key: "cpu", label: "CPU", color: "#d29922" },
+                { key: "ram", label: "RAM", color: "#f85149" },
+            ];
+            const MAXP = 60; // 최근 60 샘플 유지
+            const hist = { vram: [], util: [], cpu: [], ram: [] };
+            function pushPoint(key, val) {
+                const arr = hist[key];
+                arr.push(typeof val === "number" && isFinite(val) ? val : null);
+                if (arr.length > MAXP) arr.shift();
+            }
+
+            function drawChart() {
+                const cv = $("resChart");
+                const dpr = window.devicePixelRatio || 1;
+                const cssW = cv.clientWidth || 600;
+                const cssH = cv.clientHeight || 220;
+                cv.width = Math.round(cssW * dpr);
+                cv.height = Math.round(cssH * dpr);
+                const ctx = cv.getContext("2d");
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                ctx.clearRect(0, 0, cssW, cssH);
+
+                const padL = 34,
+                    padR = 10,
+                    padT = 10,
+                    padB = 18;
+                const plotW = cssW - padL - padR;
+                const plotH = cssH - padT - padB;
+                const yOf = (v) => padT + (1 - v / 100) * plotH;
+                const xOf = (i) =>
+                    padL + (MAXP === 1 ? 0 : (i / (MAXP - 1)) * plotW);
+
+                // 그리드 + Y 라벨
+                ctx.font = "10px ui-sans-serif,system-ui";
+                ctx.textBaseline = "middle";
+                for (let v = 0; v <= 100; v += 25) {
+                    const y = yOf(v);
+                    ctx.strokeStyle = "#212533";
+                    ctx.beginPath();
+                    ctx.moveTo(padL, y);
+                    ctx.lineTo(cssW - padR, y);
+                    ctx.stroke();
+                    ctx.fillStyle = "#6b7280";
+                    ctx.textAlign = "right";
+                    ctx.fillText(v + "%", padL - 6, y);
+                }
+
+                // 시리즈 라인
+                for (const s of SERIES) {
+                    const arr = hist[s.key];
+                    const offset = MAXP - arr.length; // 오른쪽 정렬(최신이 우측)
+                    ctx.strokeStyle = s.color;
+                    ctx.lineWidth = 1.8;
+                    ctx.beginPath();
+                    let started = false;
+                    for (let i = 0; i < arr.length; i++) {
+                        const v = arr[i];
+                        if (v == null) {
+                            started = false;
+                            continue;
+                        }
+                        const x = xOf(offset + i);
+                        const y = yOf(v);
+                        if (!started) {
+                            ctx.moveTo(x, y);
+                            started = true;
+                        } else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                }
+
+                // 범례(현재값 포함)
+                $("chartLegend").innerHTML = SERIES.map((s) => {
+                    const arr = hist[s.key];
+                    const last = arr.length ? arr[arr.length - 1] : null;
+                    return `<span class="lg"><span class="sw" style="background:${s.color}"></span>${s.label} <b>${last == null ? "–" : last + "%"}</b></span>`;
+                }).join("");
+            }
+
+            refreshMetrics();
+            setInterval(refreshMetrics, 1000);
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>
