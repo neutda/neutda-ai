@@ -1,6 +1,7 @@
 import { allBackendSpecs, config } from "./config.js";
 import { chatCompletion, chatCompletionStream, checkHealth, fetchModel } from "./llamaClient.js";
 import { logger } from "./logger.js";
+import { recordChat } from "./stats.js";
 
 const CHAT_TIERS = new Set(["small", "medium", "large"]);
 
@@ -247,6 +248,7 @@ class Pool {
         const result = await chatCompletion({ baseUrl: backend.url, ...rest });
         backend.lastLatencyMs = Date.now() - started;
         backend.totalLatencyMs += backend.lastLatencyMs;
+        recordChat({ tier: backend.tier, usage: result.raw?.usage ?? null, ms: backend.lastLatencyMs });
         return { result, backendUrl: backend.url, tier: backend.tier, device: backend.device };
       } catch (err) {
         backend.totalErrors++;
@@ -297,6 +299,7 @@ class Pool {
         const totalMs = Date.now() - started;
         backend.lastLatencyMs = totalMs;
         backend.totalLatencyMs += totalMs;
+        recordChat({ tier: backend.tier, usage: out.usage ?? null, ms: totalMs });
         return {
           ...out,
           backendUrl: backend.url,

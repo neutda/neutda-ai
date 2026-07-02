@@ -222,6 +222,16 @@ export async function addImageDocument(name, buffer, ext, description) {
     return addDocument(docName, description, { kind: "image", imageFile });
 }
 
+/** 문서 부가정보(요약·예상 질문 등)를 갱신해 저장한다 */
+export async function updateDocumentMeta(id, meta) {
+    await load();
+    const doc = docs.find((d) => d.id === id);
+    if (!doc) return false;
+    Object.assign(doc, meta);
+    await persist();
+    return true;
+}
+
 export async function deleteDocument(id) {
     await load();
     const doc = docs.find((d) => d.id === id);

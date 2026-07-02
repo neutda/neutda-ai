@@ -179,6 +179,40 @@
                 color: var(--muted);
                 font-weight: 600;
             }
+            .doc .sum {
+                margin-top: 5px;
+                line-height: 1.5;
+            }
+            .chips {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 5px;
+                margin-top: 7px;
+            }
+            .chip {
+                background: rgba(108, 140, 255, 0.1);
+                border: 1px solid rgba(108, 140, 255, 0.35);
+                color: var(--accent);
+                border-radius: 999px;
+                padding: 3px 10px;
+                font-size: 11px;
+                font-weight: 600;
+                cursor: pointer;
+                margin: 0;
+                text-align: left;
+            }
+            .chip:hover {
+                background: rgba(108, 140, 255, 0.22);
+            }
+            .cursor {
+                color: var(--muted);
+                animation: blink 1s step-start infinite;
+            }
+            @keyframes blink {
+                50% {
+                    opacity: 0;
+                }
+            }
         </style>
     </head>
     <body>
@@ -245,8 +279,14 @@
             const $ = (id) => document.getElementById(id);
             const esc = (s) =>
                 String(s).replace(
-                    /[&<>]/g,
-                    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c],
+                    /[&<>"]/g,
+                    (c) =>
+                        ({
+                            "&": "&amp;",
+                            "<": "&lt;",
+                            ">": "&gt;",
+                            '"': "&quot;",
+                        })[c],
                 );
 
             async function loadDocs() {
@@ -264,10 +304,16 @@
                 list.innerHTML = d.docs
                     .map(
                         (x) => `
-                    <div class="doc">
-                        <div>
+                    <div class="doc" style="align-items:flex-start">
+                        <div style="flex:1">
                             <div class="name">${esc(x.name)}</div>
                             <div class="sub">${x.kind === "image" ? "🖼 이미지 · " : ""}청크 ${x.chunkCount}개 · ${new Date(x.createdAt).toLocaleString("ko-KR")}</div>
+                            ${x.summary ? `<div class="sub sum">${esc(x.summary)}</div>` : ""}
+                            ${
+                                Array.isArray(x.questions) && x.questions.length
+                                    ? `<div class="chips">${x.questions.map((q) => `<button class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>`
+                                    : ""
+                            }
                         </div>
                         <button class="ghost" data-id="${x.id}">삭제</button>
                     </div>`,
@@ -275,6 +321,13 @@
                     .join("");
                 list.querySelectorAll("button[data-id]").forEach((b) => {
                     b.addEventListener("click", () => delDoc(b.dataset.id));
+                });
+                // 예상 질문 클릭 → 질문창에 넣고 바로 질의
+                list.querySelectorAll("button[data-q]").forEach((b) => {
+                    b.addEventListener("click", () => {
+                        $("q").value = b.dataset.q;
+                        ask();
+                    });
                 });
             }
 
@@ -351,6 +404,19 @@
                 }
             }
 
+            function renderSources(sources) {
+                $("sources").innerHTML = (sources || [])
+                    .map(
+                        (s) => `
+                    <div class="src">
+                        <div class="head">[출처 ${s.n}] ${esc(s.docName)} #${s.idx} <span style="color:var(--muted);font-weight:400">(score ${s.score})</span></div>
+                        <div class="body">${esc(s.preview)}${s.preview.length >= 200 ? "…" : ""}${s.imageUrl ? `<br><img src="${esc(s.imageUrl)}" alt="" style="max-width:100%;margin-top:8px;border-radius:6px">` : ""}</div>
+                    </div>`,
+                    )
+                    .join("");
+            }
+
+            // SSE 스트리밍 질의: 출처가 먼저 도착하고, 답변 토큰이 실시간 표시된다.
             async function ask() {
                 const q = $("q").value.trim();
                 if (!q) {
@@ -361,31 +427,83 @@
                 $("askBtn").textContent = "검색 중…";
                 $("result").style.display = "block";
                 $("resBadge").textContent = "검색 + 생성 중…";
-                $("answer").textContent = "";
+                $("answer").innerHTML =
+                    '<span class="stream-text"></span><span class="cursor">▋</span>';
                 $("meta").textContent = "";
                 $("sources").innerHTML = "";
+                const textEl = $("answer").querySelector(".stream-text");
+                let answer = "";
+                let done = null;
+                let failed = null;
                 try {
-                    const r = await fetch("/api/rag/ask", {
+                    const r = await fetch("/api/rag/ask/stream", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ q, topK: 4 }),
                     });
-                    const d = await r.json();
-                    if (!r.ok) throw new Error(d.error || "실패");
+                    if (!r.ok || !r.body) {
+                        let msg = r.status;
+                        try {
+                            msg = (await r.json()).error || msg;
+                        } catch {}
+                        throw new Error(msg);
+                    }
+
+                    const reader = r.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buf = "";
+                    const handle = (event, data) => {
+                        if (event === "token") {
+                            answer += data.text;
+                            textEl.textContent = answer;
+                        } else if (event === "meta") {
+                            if (data.sources) {
+                                renderSources(data.sources);
+                                $("resBadge").textContent =
+                                    data.sources.length
+                                        ? `관련 청크 ${data.sources.length}개 검색됨 · 생성 중…`
+                                        : "관련 문서 없음 · 생성 중…";
+                            }
+                        } else if (event === "done") {
+                            done = data;
+                        } else if (event === "error") {
+                            failed = data.error || "스트리밍 오류";
+                        }
+                    };
+                    while (true) {
+                        const { done: rdone, value } = await reader.read();
+                        if (rdone) break;
+                        buf += decoder.decode(value, { stream: true });
+                        let sep;
+                        while ((sep = buf.indexOf("\n\n")) >= 0) {
+                            const chunk = buf.slice(0, sep);
+                            buf = buf.slice(sep + 2);
+                            const lines = chunk.split("\n");
+                            let ev = "message";
+                            let dataStr = "";
+                            for (const ln of lines) {
+                                if (ln.startsWith("event:"))
+                                    ev = ln.slice(6).trim();
+                                else if (ln.startsWith("data:"))
+                                    dataStr += ln.slice(5).trim();
+                            }
+                            if (!dataStr) continue;
+                            try {
+                                handle(ev, JSON.parse(dataStr));
+                            } catch {}
+                        }
+                    }
+                    if (failed) throw new Error(failed);
+
                     $("resBadge").textContent = "완료";
-                    $("answer").textContent = d.answer || "(빈 응답)";
-                    $("meta").textContent = d.model
-                        ? `모델: ${d.model} · 티어: ${d.tier ?? "?"}/${d.device ?? "?"} · ${d.elapsedMs}ms`
-                        : `${d.elapsedMs}ms`;
-                    $("sources").innerHTML = (d.sources || [])
-                        .map(
-                            (s) => `
-                        <div class="src">
-                            <div class="head">[출처 ${s.n}] ${esc(s.docName)} #${s.idx} <span style="color:var(--muted);font-weight:400">(score ${s.score})</span></div>
-                            <div class="body">${esc(s.preview)}${s.preview.length >= 200 ? "…" : ""}${s.imageUrl ? `<br><img src="${esc(s.imageUrl)}" alt="" style="max-width:100%;margin-top:8px;border-radius:6px">` : ""}</div>
-                        </div>`,
-                        )
-                        .join("");
+                    $("answer").textContent =
+                        (done?.answer ?? answer) || "(빈 응답)";
+                    if (done) {
+                        renderSources(done.sources);
+                        $("meta").textContent = done.model
+                            ? `모델: ${done.model} · 티어: ${done.tier ?? "?"}/${done.device ?? "?"} · TTFT ${done.ttftMs ?? "?"}ms · ${done.elapsedMs}ms`
+                            : `${done.elapsedMs}ms`;
+                    }
                 } catch (err) {
                     $("resBadge").textContent = "오류";
                     $("answer").textContent = "오류: " + err.message;
