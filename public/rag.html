@@ -213,6 +213,122 @@
                     opacity: 0;
                 }
             }
+            /* 봇 답변 마크다운 렌더링 */
+            .md {
+                white-space: normal;
+            }
+            .md p {
+                margin: 0 0 8px;
+            }
+            .md > *:last-child {
+                margin-bottom: 0;
+            }
+            .md h1,
+            .md h2,
+            .md h3,
+            .md h4 {
+                margin: 10px 0 6px;
+                font-size: 16px;
+                line-height: 1.4;
+            }
+            .md h1 {
+                font-size: 18px;
+            }
+            .md h2 {
+                font-size: 17px;
+            }
+            .md ul,
+            .md ol {
+                margin: 6px 0;
+                padding-left: 20px;
+            }
+            .md li {
+                margin: 2px 0;
+            }
+            .md pre {
+                background: #1c2030;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 10px 12px;
+                overflow-x: auto;
+                font-size: 13px;
+                margin: 8px 0;
+            }
+            /* 코드박스: 언어 라벨 + 복사 버튼 헤더 */
+            .md .codebox {
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                margin: 8px 0;
+                overflow: hidden;
+                background: #1c2030;
+            }
+            .md .codebox-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                background: #232840;
+                border-bottom: 1px solid var(--border);
+                padding: 5px 6px 5px 12px;
+                font-size: 11px;
+                color: var(--muted);
+                font-family: ui-monospace, Consolas, monospace;
+            }
+            .md .codebox .copy-btn {
+                margin: 0;
+                width: auto;
+                background: #2a2f45;
+                border: 0;
+                color: var(--muted);
+                font-size: 11px;
+                font-weight: 600;
+                padding: 3px 10px;
+                border-radius: 6px;
+                cursor: pointer;
+            }
+            .md .codebox .copy-btn:hover {
+                color: var(--text);
+            }
+            .md .codebox pre {
+                margin: 0;
+                border: 0;
+                border-radius: 0;
+            }
+            .md code {
+                background: #1c2030;
+                padding: 1px 5px;
+                border-radius: 5px;
+                font-size: 13px;
+            }
+            .md pre code {
+                background: none;
+                padding: 0;
+            }
+            .md table {
+                border-collapse: collapse;
+                margin: 8px 0;
+                font-size: 13px;
+                display: block;
+                overflow-x: auto;
+            }
+            .md th,
+            .md td {
+                border: 1px solid var(--border);
+                padding: 5px 9px;
+            }
+            .md blockquote {
+                border-left: 3px solid var(--accent);
+                margin: 8px 0;
+                padding: 2px 10px;
+                color: var(--muted);
+            }
+            .md a {
+                color: var(--accent);
+            }
+            .md hr {
+                border: 0;
+                border-top: 1px solid var(--border);
+                margin: 10px 0;
+            }
         </style>
     </head>
     <body>
@@ -275,6 +391,7 @@
             </div>
         </div>
 
+        <script src="/vendor/marked.umd.js"></script>
         <script>
             const $ = (id) => document.getElementById(id);
             const esc = (s) =>
@@ -288,6 +405,54 @@
                             '"': "&quot;",
                         })[c],
                 );
+
+            // 봇 답변 마크다운 렌더링.
+            // - 코드블록은 marked 가 한 번만 이스케이프 (이중 이스케이프 방지)
+            // - 마크다운 밖의 원본 HTML 토큰만 이스케이프해 스크립트 주입 차단
+            // - 코드블록은 언어 라벨 + 복사 버튼이 있는 박스로 렌더
+            marked.use({
+                breaks: true,
+                gfm: true,
+                renderer: {
+                    html(token) {
+                        const raw =
+                            typeof token === "string"
+                                ? token
+                                : (token?.text ?? token?.raw ?? "");
+                        return esc(raw);
+                    },
+                    code(token) {
+                        const isTok = typeof token === "object";
+                        const text = isTok ? token.text : token;
+                        const lang = ((isTok ? token.lang : "") || "")
+                            .trim()
+                            .split(/\s+/)[0];
+                        return (
+                            `<div class="codebox">` +
+                            `<div class="codebox-head"><span>${esc(lang || "code")}</span>` +
+                            `<button type="button" class="copy-btn">복사</button></div>` +
+                            `<pre><code>${esc(text)}</code></pre></div>`
+                        );
+                    },
+                },
+            });
+            const renderMd = (text) =>
+                `<div class="md">${marked.parse(String(text ?? ""))}</div>`;
+
+            // 코드박스 복사 버튼 (이벤트 위임)
+            document.addEventListener("click", (e) => {
+                const btn = e.target.closest(".copy-btn");
+                if (!btn) return;
+                const pre = btn.closest(".codebox")?.querySelector("pre");
+                if (!pre) return;
+                navigator.clipboard
+                    .writeText(pre.textContent)
+                    .then(() => {
+                        btn.textContent = "복사됨!";
+                        setTimeout(() => (btn.textContent = "복사"), 1200);
+                    })
+                    .catch(() => {});
+            });
 
             async function loadDocs() {
                 const r = await fetch("/api/rag/docs");
@@ -455,7 +620,7 @@
                     const handle = (event, data) => {
                         if (event === "token") {
                             answer += data.text;
-                            textEl.textContent = answer;
+                            textEl.innerHTML = renderMd(answer);
                         } else if (event === "meta") {
                             if (data.sources) {
                                 renderSources(data.sources);
@@ -496,8 +661,9 @@
                     if (failed) throw new Error(failed);
 
                     $("resBadge").textContent = "완료";
-                    $("answer").textContent =
-                        (done?.answer ?? answer) || "(빈 응답)";
+                    $("answer").innerHTML = renderMd(
+                        (done?.answer ?? answer) || "(빈 응답)",
+                    );
                     if (done) {
                         renderSources(done.sources);
                         $("meta").textContent = done.model
