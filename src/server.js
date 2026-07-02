@@ -12,6 +12,8 @@ import { logger, getLogs } from "./logger.js";
 import * as rag from "./rag.js";
 import { describeImageForRag } from "./ragVision.js";
 import { extractText } from "./extract.js";
+import { loadStats, getStats } from "./stats.js";
+import { parseRouterJson } from "./llmRouter.js";
 import multer from "multer";
 
 const upload = multer({
@@ -132,7 +134,13 @@ app.get("/api/status", (_req, res) => {
             ...pool.getRoutingSummary(),
             configMode: config.routingMode,
         },
+        stats: getStats(),
     });
+});
+
+// 티어 라우팅 절감 통계
+app.get("/api/stats", (_req, res) => {
+    res.json(getStats());
 });
 
 // 백엔드 역할(채팅 / 라우터) 개별 on·off
@@ -481,6 +489,8 @@ app.post("/api/chat/stream", async (req, res) => {
             routedTier: route.tier,
             routedDevice: route.device,
             difficulty: route.difficulty,
+            reason: route.reason,
+            deviceReason: route.deviceReason,
         });
 
         let firstLogged = false;
@@ -774,7 +784,7 @@ async function buildRagUserContent(q, context, hits, questionContent) {
     return parts;
 }
 
-async function ragChat({ q, hits, strict, questionContent, temperature = 0.3 }) {
+async function buildRagMessages({ q, hits, strict, questionContent }) {
     const context =
         hits?.length > 0
             ? hits
@@ -798,17 +808,110 @@ async function ragChat({ q, hits, strict, questionContent, temperature = 0.3 }) 
         questionContent,
     );
 
+    return [
+        { role: "system", content: ragSystemPrompt(strict, hasVision) },
+        { role: "user", content: userContent },
+    ];
+}
+
+async function ragChat({ q, hits, strict, questionContent, temperature = 0.3 }) {
+    const messages = await buildRagMessages({ q, hits, strict, questionContent });
     return pool.chat({
-        messages: [
-            { role: "system", content: ragSystemPrompt(strict, hasVision) },
-            { role: "user", content: userContent },
-        ],
+        messages,
         temperature,
         maxTokens: config.defaultMaxTokens,
         enableThinking: config.enableThinking,
         preferredTier: "large",
         allowOtherTiers: false,
     });
+}
+
+function ragSources(hits) {
+    return hits.map((h, i) => ({
+        n: i + 1,
+        docName: h.docName,
+        idx: h.idx,
+        score: h.score,
+        kind: h.kind,
+        preview: h.text.slice(0, 200),
+        imageUrl: h.imageFile ? `/api/rag/images/${h.docId}` : null,
+    }));
+}
+
+// RAG 대화도 새로고침 후 복원되도록 히스토리에 저장한다 (best-effort).
+function persistRagHistory(q, payload) {
+    appendHistory({
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+        ts: new Date().toISOString(),
+        rag: true,
+        strict: payload.strict,
+        user: q,
+        answer: payload.answer,
+        model: payload.model ?? null,
+        tier: payload.tier ?? null,
+        device: payload.device ?? null,
+        sources: payload.sources || [],
+    }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+}
+
+// ---- 문서 요약 + 예상 질문 자동 생성 (업로드 시 best-effort) ----------
+
+const INSIGHT_MAX_CHARS = 2500;
+
+/**
+ * 문서 텍스트를 LLM에 보내 2문장 요약과 예상 질문 3개를 만든다.
+ * medium 티어 선호(빠름), 실패 시 null (문서 추가 자체는 막지 않음).
+ */
+async function generateDocInsights(name, text) {
+    try {
+        const { result } = await pool.chat({
+            messages: [
+                {
+                    role: "system",
+                    content:
+                        "너는 문서 색인 도우미다. 반드시 JSON 객체 하나만 출력하라. 다른 설명은 금지.",
+                },
+                {
+                    role: "user",
+                    content:
+                        `다음 문서를 읽고 이 형식의 JSON 으로만 답하라:\n` +
+                        `{"summary":"핵심 내용 1~2문장 한국어 요약","questions":["이 문서로 답할 수 있는 자연스러운 한국어 질문 3개"]}\n\n` +
+                        `[문서: ${name}]\n${String(text).slice(0, INSIGHT_MAX_CHARS)}`,
+                },
+            ],
+            temperature: 0.3,
+            maxTokens: 400,
+            enableThinking: false,
+            preferredTier: "medium",
+        });
+        const parsed = parseRouterJson(result.content);
+        if (!parsed) return null;
+        const summary =
+            typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+        const questions = Array.isArray(parsed.questions)
+            ? parsed.questions
+                  .filter((s) => typeof s === "string" && s.trim())
+                  .map((s) => s.trim())
+                  .slice(0, 3)
+            : [];
+        if (!summary && !questions.length) return null;
+        return { summary, questions };
+    } catch (err) {
+        logger.warn(`문서 요약 생성 실패("${name}"): ${err.message}`);
+        return null;
+    }
+}
+
+/** 문서 추가 직후 요약·예상 질문을 생성해 저장하고, 생성물을 반환한다 */
+async function attachDocInsights(docId, name, text) {
+    const insights = await generateDocInsights(name, text);
+    if (insights) {
+        await rag.updateDocumentMeta(docId, insights).catch(() => {});
+        logger.info(
+            `RAG 문서 요약 생성: "${name}" (예상 질문 ${insights.questions.length}개)`,
+        );
+    }
+    return insights;
 }
 
 // 문서 목록 + 통계
@@ -848,9 +951,15 @@ app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
             logger.info(
                 `RAG 이미지 추가: "${info.name}" (${original}, 추출 ${description.length}자)`,
             );
+            const insights = await attachDocInsights(
+                info.id,
+                info.name,
+                description,
+            );
             return res.json({
                 ok: true,
                 ...info,
+                ...(insights ?? {}),
                 chars: description.length,
                 stats: rag.stats(),
             });
@@ -866,7 +975,14 @@ app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
         logger.info(
             `RAG 업로드: "${info.name}" (${original}, ${text.length}자, 청크 ${info.chunkCount}개)`,
         );
-        res.json({ ok: true, ...info, chars: text.length, stats: rag.stats() });
+        const insights = await attachDocInsights(info.id, info.name, text);
+        res.json({
+            ok: true,
+            ...info,
+            ...(insights ?? {}),
+            chars: text.length,
+            stats: rag.stats(),
+        });
     } catch (err) {
         logger.warn(`RAG 업로드 실패: ${err.message}`);
         res.status(400).json({ error: err.message });
@@ -898,7 +1014,8 @@ app.post("/api/rag/docs", async (req, res) => {
         logger.info(
             `RAG 문서 추가: "${info.name}" (청크 ${info.chunkCount}개)`,
         );
-        res.json({ ok: true, ...info, stats: rag.stats() });
+        const insights = await attachDocInsights(info.id, info.name, text);
+        res.json({ ok: true, ...info, ...(insights ?? {}), stats: rag.stats() });
     } catch (err) {
         logger.warn(`RAG 문서 추가 실패: ${err.message}`);
         res.status(400).json({ error: err.message });
@@ -936,23 +1053,7 @@ app.post("/api/rag/ask", async (req, res) => {
         // strict=true(문서만 답변): 문서 밖 내용은 "문서 내용에 없습니다"로 답한다.
         const strict = req.body?.strict !== false;
         const questionContent = req.body?.content;
-
-        // RAG 대화도 새로고침 후 복원되도록 히스토리에 저장한다.
-        const persist = (payload) =>
-            appendHistory({
-                id:
-                    Date.now().toString(36) +
-                    Math.random().toString(36).slice(2, 8),
-                ts: new Date().toISOString(),
-                rag: true,
-                strict: payload.strict,
-                user: q,
-                answer: payload.answer,
-                model: payload.model ?? null,
-                tier: payload.tier ?? null,
-                device: payload.device ?? null,
-                sources: payload.sources || [],
-            }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+        const persist = (payload) => persistRagHistory(q, payload);
 
         const hits = rag.retrieve(q, topK);
         logger.info(
@@ -1006,15 +1107,7 @@ app.post("/api/rag/ask", async (req, res) => {
         const payload = {
             answer: result.content,
             strict,
-            sources: hits.map((h, i) => ({
-                n: i + 1,
-                docName: h.docName,
-                idx: h.idx,
-                score: h.score,
-                kind: h.kind,
-                preview: h.text.slice(0, 200),
-                imageUrl: h.imageFile ? `/api/rag/images/${h.docId}` : null,
-            })),
+            sources: ragSources(hits),
             model: result.raw?.model ?? config.modelName,
             tier,
             device,
@@ -1029,8 +1122,103 @@ app.post("/api/rag/ask", async (req, res) => {
     }
 });
 
+// 문서 기반 질문 (스트리밍 SSE): 출처를 먼저 보내고 토큰을 실시간 전송한다.
+app.post("/api/rag/ask/stream", async (req, res) => {
+    const started = Date.now();
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    const send = (event, data) =>
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+    try {
+        await rag.load();
+        const q =
+            typeof req.body?.q === "string"
+                ? req.body.q
+                : typeof req.body?.ROLE_USER === "string"
+                  ? req.body.ROLE_USER
+                  : "";
+        if (!q.trim()) {
+            send("error", { error: "q (질문) 가 필요합니다." });
+            return res.end();
+        }
+        const topK = Number.isFinite(Number(req.body?.topK))
+            ? Math.max(1, Math.min(8, Number(req.body.topK)))
+            : 4;
+        const strict = req.body?.strict !== false;
+        const questionContent = req.body?.content;
+
+        const hits = rag.retrieve(q, topK);
+        const sources = ragSources(hits);
+        logger.info(
+            `RAG 질문(stream) "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색`,
+        );
+
+        // 검색된 출처를 생성 시작 전에 먼저 보여준다.
+        send("meta", { strict, sources });
+
+        // strict 모드에서 관련 문서가 없으면 즉시 종료
+        if (!hits.length && strict) {
+            const payload = {
+                answer: "문서 내용에 없습니다.",
+                sources: [],
+                strict,
+                elapsedMs: Date.now() - started,
+            };
+            send("done", payload);
+            persistRagHistory(q, payload);
+            return res.end();
+        }
+
+        const messages = await buildRagMessages({
+            q,
+            hits,
+            strict: hits.length ? strict : false,
+            questionContent,
+        });
+        const out = await pool.chatStream({
+            messages,
+            temperature: strict && hits.length ? 0.2 : 0.4,
+            maxTokens: config.defaultMaxTokens,
+            enableThinking: config.enableThinking,
+            preferredTier: "large",
+            allowOtherTiers: false,
+            onMeta: (m) => send("meta", m),
+            onToken: (t) => send("token", { text: t }),
+        });
+
+        const payload = {
+            answer: out.content,
+            strict,
+            sources,
+            model: out.model ?? config.modelName,
+            tier: out.tier,
+            device: out.device,
+            backend: out.backendUrl,
+            ttftMs: out.ttftMs,
+            totalMs: out.totalMs,
+            elapsedMs: Date.now() - started,
+        };
+        send("done", payload);
+        persistRagHistory(q, payload);
+        logger.info(
+            `RAG 답변 완료(stream) tier=${out.tier} device=${out.device ?? "-"} ${Date.now() - started}ms`,
+        );
+        res.end();
+    } catch (err) {
+        logger.error(
+            `RAG 질문(stream) 실패 (${Date.now() - started}ms): ${err.message}`,
+        );
+        send("error", { error: err.message });
+        res.end();
+    }
+});
+
 app.use((_req, res) => res.status(404).json({ error: "Not Found" }));
 
+loadStats();
 pool.startHealthChecks();
 
 app.listen(config.port, () => {

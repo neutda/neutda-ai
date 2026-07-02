@@ -378,6 +378,59 @@
                 height: 220px;
                 display: block;
             }
+            .savings-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr 2fr;
+                gap: 12px;
+                margin-bottom: 20px;
+            }
+            @media (max-width: 760px) {
+                .savings-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+            .tier-dist {
+                display: flex;
+                height: 16px;
+                border-radius: 8px;
+                overflow: hidden;
+                background: #0d0f15;
+                margin-top: 10px;
+            }
+            .tier-dist > span {
+                display: block;
+                height: 100%;
+                transition: width 0.4s ease;
+            }
+            .tier-dist .seg-small {
+                background: var(--warn);
+            }
+            .tier-dist .seg-medium {
+                background: var(--ok);
+            }
+            .tier-dist .seg-large {
+                background: var(--accent);
+            }
+            .tier-legend {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px 16px;
+                margin-top: 9px;
+                font-size: 12px;
+                color: var(--muted);
+                font-variant-numeric: tabular-nums;
+            }
+            .tier-legend b {
+                color: var(--text);
+            }
+            .tier-legend .sw {
+                width: 10px;
+                height: 10px;
+                border-radius: 2px;
+                display: inline-block;
+                margin-right: 5px;
+                vertical-align: -1px;
+            }
         </style>
     </head>
     <body>
@@ -420,6 +473,28 @@
                     <div class="v" id="sErrors" style="color: var(--err)">
                         –
                     </div>
+                </div>
+            </div>
+
+            <h2 style="margin-top: 4px">
+                티어 라우팅 효과
+                <span class="muted" id="svSince" style="font-weight: 400"></span>
+            </h2>
+            <div class="savings-grid">
+                <div class="card">
+                    <div class="k">연산량 절감 (전부 large 처리 대비)</div>
+                    <div class="v" id="svSaved" style="color: var(--ok)">–</div>
+                    <div class="muted" id="svSavedSub" style="margin-top: 4px"></div>
+                </div>
+                <div class="card">
+                    <div class="k">누적 처리 토큰</div>
+                    <div class="v" id="svTokens">–</div>
+                    <div class="muted" id="svTokensSub" style="margin-top: 4px"></div>
+                </div>
+                <div class="card">
+                    <div class="k">티어별 요청 분포</div>
+                    <div class="tier-dist" id="tierDist"></div>
+                    <div class="tier-legend" id="tierLegend"></div>
                 </div>
             </div>
 
@@ -508,6 +583,8 @@
                     $("sTotal").textContent = s.totalRequests;
                     $("sErrors").textContent = s.totalErrors;
 
+                    renderSavings(s.stats);
+
                     const eff = s.routing?.effectiveMode ?? "heuristic";
                     const badge = $("routeBadge");
                     badge.textContent =
@@ -556,6 +633,56 @@
                     $("rows").innerHTML =
                         `<tr><td colspan="14" class="err">상태 조회 실패: ${e.message}</td></tr>`;
                 }
+            }
+
+            // ===== 티어 라우팅 효과 (절감 통계) =====
+            const TIER_COLORS = {
+                small: "var(--warn)",
+                medium: "var(--ok)",
+                large: "var(--accent)",
+            };
+            const fmt = (n) => Number(n ?? 0).toLocaleString("ko-KR");
+
+            function renderSavings(st) {
+                if (!st) return;
+                const sv = st.savings || {};
+                // 토큰 기준 절감률 우선, 없으면 요청 수 기준
+                const pct = sv.savedPctTokens ?? sv.savedPctRequests;
+                $("svSaved").textContent = pct == null ? "–" : pct + "%";
+                $("svSavedSub").textContent =
+                    pct == null
+                        ? "아직 처리된 요청이 없습니다."
+                        : sv.savedPctTokens != null
+                          ? `토큰 가중 기준 · 요청 수 기준 ${sv.savedPctRequests}%`
+                          : "요청 수 기준 (토큰 usage 미집계)";
+                $("svTokens").textContent = fmt(st.totals?.tokens);
+                $("svTokensSub").textContent =
+                    st.totals?.tokens > 0
+                        ? `large 환산 시 약 ${fmt(sv.largeEquivalentTokens)} 토큰 상당`
+                        : "";
+                $("svSince").textContent = st.since
+                    ? `(${new Date(st.since).toLocaleDateString("ko-KR")} 부터 누적)`
+                    : "";
+
+                const tiers = st.tiers || {};
+                const totalReq = st.totals?.requests || 0;
+                const order = ["small", "medium", "large"];
+                $("tierDist").innerHTML = order
+                    .map((t) => {
+                        const req = tiers[t]?.requests || 0;
+                        const w = totalReq ? (req / totalReq) * 100 : 0;
+                        return `<span class="seg-${t}" style="width:${w}%" title="${t}: ${fmt(req)}건"></span>`;
+                    })
+                    .join("");
+                $("tierLegend").innerHTML = order
+                    .map((t) => {
+                        const req = tiers[t]?.requests || 0;
+                        const p = totalReq
+                            ? Math.round((req / totalReq) * 100)
+                            : 0;
+                        return `<span><span class="sw" style="background:${TIER_COLORS[t]}"></span>${t} <b>${fmt(req)}건 (${p}%)</b></span>`;
+                    })
+                    .join("");
             }
 
             document.querySelector("table").addEventListener("change", async (e) => {

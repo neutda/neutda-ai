@@ -335,6 +335,10 @@
                 background: rgba(210, 153, 34, 0.18);
                 color: #d29922;
             }
+            .route-why {
+                font-style: italic;
+                cursor: help;
+            }
             .msg details {
                 margin-top: 6px;
             }
@@ -766,6 +770,10 @@
                 const dev = data.device
                     ? `<span class="dev-badge dev-${data.device}">${data.device.toUpperCase()}${data.difficulty != null ? " " + data.difficulty : ""}</span>`
                     : "";
+                // 라우팅 판단 근거 (호버 시 장치 선택 사유까지 표시)
+                const why = data.routeReason
+                    ? `<span class="route-why" title="${esc(data.deviceReason || "")}">🧭 ${esc(data.routeReason)}</span>`
+                    : "";
                 const u = data.usage;
                 const metaParts = [
                     data.model ? `model: ${esc(data.model)}` : null,
@@ -784,7 +792,7 @@
                 if (data.reasoning) {
                     html += `<details><summary>추론 과정 보기</summary><div class="reason">${esc(data.reasoning)}</div></details>`;
                 }
-                html += `<div class="msg-meta">${tier}${dev}<span>${metaParts.join(" · ")}</span></div>`;
+                html += `<div class="msg-meta">${tier}${dev}${why}<span>${metaParts.join(" · ")}</span></div>`;
                 el.innerHTML = html;
                 scrollDown();
             }
@@ -935,53 +943,11 @@
                 }
             });
 
-            // SSE 스트리밍 전송: 토큰을 실시간으로 받아 표시
-            async function sendStream(el, body, user, t0) {
-                const r = await fetch("/api/chat/stream", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(body),
-                });
-                if (!r.ok || !r.body) {
-                    let msg = r.status;
-                    try {
-                        msg = (await r.json()).error || msg;
-                    } catch {}
-                    fillError(el, msg);
-                    return;
-                }
-
+            // SSE 응답 파싱: event/data 블록 단위로 handle(event, data) 호출
+            async function readSse(r, handle) {
                 const reader = r.body.getReader();
                 const decoder = new TextDecoder();
                 let buf = "";
-                let answer = "";
-                let meta = {};
-                let done = null;
-                el.classList.remove("err");
-                el.innerHTML =
-                    '<span class="stream-text"></span><span class="cursor">▋</span>';
-                const textEl = el.querySelector(".stream-text");
-
-                const handle = (event, dataStr) => {
-                    let data;
-                    try {
-                        data = JSON.parse(dataStr);
-                    } catch {
-                        return;
-                    }
-                    if (event === "token") {
-                        answer += data.text;
-                        textEl.textContent = answer;
-                        scrollDown();
-                    } else if (event === "meta") {
-                        meta = { ...meta, ...data };
-                    } else if (event === "done") {
-                        done = data;
-                    } else if (event === "error") {
-                        fillError(el, data.error || "스트리밍 오류");
-                    }
-                };
-
                 while (true) {
                     const { done: rdone, value } = await reader.read();
                     if (rdone) break;
@@ -999,9 +965,60 @@
                             else if (ln.startsWith("data:"))
                                 dataStr += ln.slice(5).trim();
                         }
-                        if (dataStr) handle(ev, dataStr);
+                        if (!dataStr) continue;
+                        let data;
+                        try {
+                            data = JSON.parse(dataStr);
+                        } catch {
+                            continue;
+                        }
+                        handle(ev, data);
                     }
                 }
+            }
+
+            // 스트리밍 응답 표시 준비: 커서 포함 텍스트 영역을 만들어 반환
+            function startStreamText(el) {
+                el.classList.remove("err");
+                el.innerHTML =
+                    '<span class="stream-text"></span><span class="cursor">▋</span>';
+                return el.querySelector(".stream-text");
+            }
+
+            // SSE 스트리밍 전송: 토큰을 실시간으로 받아 표시
+            async function sendStream(el, body, user, t0) {
+                const r = await fetch("/api/chat/stream", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                });
+                if (!r.ok || !r.body) {
+                    let msg = r.status;
+                    try {
+                        msg = (await r.json()).error || msg;
+                    } catch {}
+                    fillError(el, msg);
+                    return;
+                }
+
+                let answer = "";
+                let meta = {};
+                let done = null;
+                const textEl = startStreamText(el);
+
+                await readSse(r, (event, data) => {
+                    if (event === "token") {
+                        answer += data.text;
+                        textEl.textContent = answer;
+                        scrollDown();
+                    } else if (event === "meta") {
+                        meta = { ...meta, ...data };
+                    } else if (event === "done") {
+                        done = data;
+                    } else if (event === "error") {
+                        fillError(el, data.error || "스트리밍 오류");
+                    }
+                });
 
                 const ms = Math.round(performance.now() - t0);
                 if (done) {
@@ -1014,6 +1031,8 @@
                             tier: done.tier,
                             device: done.device,
                             difficulty: done.difficulty,
+                            routeReason: meta.reason,
+                            deviceReason: meta.deviceReason,
                             ttftMs: done.ttftMs,
                             tokensPerSec: done.tokensPerSec,
                             tokens: done.tokens,
@@ -1047,20 +1066,69 @@
                 const strict = $("ragOnly").checked;
                 const payload = { q: user, strict, topK: 4 };
                 if (content) payload.content = content;
-                const r = await fetch("/api/rag/ask", {
+
+                // 스트리밍 꺼짐: 기존 동기 방식
+                if (!$("stream").checked) {
+                    const r = await fetch("/api/rag/ask", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                    const j = await r.json();
+                    const ms = Math.round(performance.now() - t0);
+                    if (!r.ok) {
+                        fillError(el, j.error || r.status);
+                        return;
+                    }
+                    fillRag(el, j, ms);
+                    convo.push({ role: "user", content: user });
+                    convo.push({ role: "assistant", content: j.answer || "" });
+                    return;
+                }
+
+                // 스트리밍: 토큰을 실시간 표시하고 완료 시 출처까지 렌더
+                const r = await fetch("/api/rag/ask/stream", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload),
                 });
-                const j = await r.json();
-                const ms = Math.round(performance.now() - t0);
-                if (!r.ok) {
-                    fillError(el, j.error || r.status);
+                if (!r.ok || !r.body) {
+                    let msg = r.status;
+                    try {
+                        msg = (await r.json()).error || msg;
+                    } catch {}
+                    fillError(el, msg);
                     return;
                 }
-                fillRag(el, j, ms);
-                convo.push({ role: "user", content: user });
-                convo.push({ role: "assistant", content: j.answer || "" });
+
+                let answer = "";
+                let done = null;
+                const textEl = startStreamText(el);
+
+                await readSse(r, (event, data) => {
+                    if (event === "token") {
+                        answer += data.text;
+                        textEl.textContent = answer;
+                        scrollDown();
+                    } else if (event === "done") {
+                        done = data;
+                    } else if (event === "error") {
+                        fillError(el, data.error || "스트리밍 오류");
+                    }
+                });
+
+                const ms = Math.round(performance.now() - t0);
+                if (done) {
+                    fillRag(el, done, ms);
+                    convo.push({ role: "user", content: user });
+                    convo.push({
+                        role: "assistant",
+                        content: done.answer || answer,
+                    });
+                } else if (answer) {
+                    convo.push({ role: "user", content: user });
+                    convo.push({ role: "assistant", content: answer });
+                }
             }
 
             function fillRag(el, data, ms) {
