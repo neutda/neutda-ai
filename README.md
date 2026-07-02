@@ -20,11 +20,13 @@ Node.js + Express API 게이트웨이. 요청을 받아 로컬 **llama-server**(
 - **멀티 티어 라우팅**: `small` / `medium` / `large` — LLM 라우터(`ROUTING_MODE=llm`) 또는 휴리스틱(글자수·키워드)으로 자동 선택
 - **GPU/CPU 선호**: 같은 티어 안에서 난이도 점수에 따라 GPU 또는 CPU 백엔드 우선
 - **로드밸런싱**: 헬스체크 + least-connections + 장애 시 failover
+- **자원 절감 통계**: 티어별 요청·토큰 누적, "전부 large 처리 대비" 절감률 추정 (`/api/stats`, 모니터링 대시보드)
 - **비전**: 이미지 입력 시 large(비전 모델)로 라우팅
-- **스트리밍**: SSE 기반 실시간 토큰 전송 (`/api/chat/stream`)
-- **RAG**: PDF/DOCX/HWPX/HWP/이미지 등 문서 업로드 → BM25 검색 → 문서 기반 답변
+- **스트리밍**: SSE 기반 실시간 토큰 전송 (`/api/chat/stream`, `/api/rag/ask/stream`)
+- **RAG**: PDF/DOCX/HWPX/HWP/이미지 등 문서 업로드 → BM25 검색 → 문서 기반 답변 (스트리밍 지원)
+- **문서 요약·예상 질문**: 업로드 시 LLM 이 요약 + 예상 질문 3개 자동 생성 (클릭 시 즉시 질의)
 - **외부 API**: API 키 인증 GET `/api/ask` (비동기·동기 모두 지원)
-- **모니터링**: 백엔드 상태, GPU/CPU 지표, 로그, 대화 히스토리
+- **모니터링**: 백엔드 상태, 티어 라우팅 효과, GPU/CPU 지표, 로그, 대화 히스토리
 
 > ⚠️ **VRAM 주의**: Qwen3.6-27B-Q4 한 인스턴스가 약 16GB. RTX 3090(24GB) 한 장엔 보통 large 1개만 올라갑니다.
 > 여러 large 인스턴스는 **서로 다른 GPU / 여러 머신**에 분산하세요. small·medium 은 0.5B~3B 모델로 CPU/GPU 혼용이 가능합니다.
@@ -94,11 +96,11 @@ npm run dev     # 파일 변경 시 자동 재시작
 
 | 페이지 | URL | 설명 |
 | --- | --- | --- |
-| 테스트 콘솔 | `http://localhost:3000/` | 채팅·이미지·스트리밍·대화 기억 테스트 |
-| 모니터링 | `http://localhost:3000/monitor.html` | 백엔드 상태, 라우터 역할 토글, GPU/CPU 지표 |
+| 테스트 콘솔 | `http://localhost:3000/` | 채팅·이미지·스트리밍·대화 기억 테스트. 전체화면 레이아웃, 답변 마크다운 렌더링(코드박스+복사 버튼), 라우팅 사유 배지 |
+| 모니터링 | `http://localhost:3000/monitor.html` | 백엔드 상태, 라우터 역할 토글, 티어 라우팅 효과(절감률·티어 분포), GPU/CPU 지표 |
 | 로그 | `http://localhost:3000/logs.html` | 서버 로그 실시간 조회 |
 | 외부 API | `http://localhost:3000/api.html` | `/api/ask` 호출 예시 |
-| RAG | `http://localhost:3000/rag.html` | 문서 업로드·문서 기반 질의 |
+| RAG | `http://localhost:3000/rag.html` | 문서 업로드·문서 기반 질의(스트리밍). 문서 요약·예상 질문 칩 표시 |
 
 ## 5. API
 
@@ -108,7 +110,21 @@ npm run dev     # 파일 변경 시 자동 재시작
 
 ### `GET /api/status`
 
-풀/백엔드별 상세 통계 (모니터링 대시보드가 사용).
+풀/백엔드별 상세 통계 + 티어 라우팅 절감 통계(`stats`) 포함 (모니터링 대시보드가 사용).
+
+### `GET /api/stats`
+
+티어 라우팅 효과 통계. 티어별 누적 요청·토큰과 "전부 large 로 처리했다면" 대비
+절감률(모델 파라미터 수 비례 근사: small 0.5B, medium 3B, large 27B)을 반환합니다.
+`data/stats.json` 에 영속되어 재시작 후에도 유지됩니다.
+
+```json
+{
+  "tiers": { "small": { "requests": 120, "tokens": 8400, "weight": 0.0185 }, "...": {} },
+  "totals": { "requests": 150, "tokens": 21000 },
+  "savings": { "savedPctTokens": 78, "savedPctRequests": 81, "largeEquivalentTokens": 4620 }
+}
+```
 
 ### `POST /api/backends/role`
 
@@ -170,7 +186,7 @@ curl -X POST http://localhost:3000/api/chat `
 ### `POST /api/chat/stream`
 
 SSE 스트리밍 채팅. body 는 `/api/chat` 과 동일.
-이벤트: `meta` → `token`(반복) → `done`(TTFT, tokens/sec 포함).
+이벤트: `meta`(라우팅 티어·난이도·사유) → `token`(반복) → `done`(TTFT, tokens/sec 포함).
 
 ### `GET /api/ask`
 
@@ -206,14 +222,23 @@ curl "http://localhost:3000/api/ask?key=tw-demo-key-2026&q=안녕하세요"
 
 | 메서드 | 경로 | 설명 |
 | --- | --- | --- |
-| `GET` | `/api/rag/docs` | 문서 목록 + 통계 |
+| `GET` | `/api/rag/docs` | 문서 목록(요약·예상 질문 포함) + 통계 |
 | `POST` | `/api/rag/upload` | 파일 업로드 (multipart, field `file`) |
 | `POST` | `/api/rag/docs` | 텍스트 직접 추가 `{ name, text }` |
 | `DELETE` | `/api/rag/docs/:id` | 문서 삭제 |
 | `GET` | `/api/rag/images/:docId` | 이미지 문서 미리보기 |
-| `POST` | `/api/rag/ask` | 문서 기반 질문 |
+| `POST` | `/api/rag/ask` | 문서 기반 질문 (동기) |
+| `POST` | `/api/rag/ask/stream` | 문서 기반 질문 (SSE 스트리밍) |
 
 **지원 업로드 형식**: PDF, DOCX, HWPX, HWP(구형), TXT/MD/CSV/JSON, PNG/JPG/GIF/WebP/BMP(비전 모델로 설명 추출 후 인덱싱)
+
+문서 추가 시 LLM(medium 티어 선호)이 **요약 1~2문장 + 예상 질문 3개**를 자동 생성해
+문서 메타에 저장합니다(생성 실패해도 문서 추가는 정상 진행). 응답과 문서 목록의
+`summary`, `questions` 필드로 확인할 수 있습니다.
+
+`POST /api/rag/ask/stream` 이벤트 순서: `meta`(검색된 출처 `sources` — 생성 시작 전 전송)
+→ `token`(반복) → `done`(답변·출처·모델·TTFT). strict 모드에서 관련 문서가 없으면
+`meta` 직후 `done` 으로 즉시 종료합니다.
 
 `POST /api/rag/ask` body:
 
