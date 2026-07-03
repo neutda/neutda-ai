@@ -4,6 +4,7 @@ import { logger } from "./logger.js";
 import { recordChat } from "./stats.js";
 
 const CHAT_TIERS = new Set(["small", "medium", "large"]);
+const TIER_RANK = { small: 0, medium: 1, large: 2 };
 
 /**
  * 여러 llama-server 백엔드를 관리하는 풀.
@@ -117,6 +118,24 @@ class Pool {
     if (small) small.routerEnabled = true;
   }
 
+  /** 런타임에 백엔드 추가 (이미 있으면 null) */
+  addBackend(url, tier, device = null) {
+    if (this.backends.some((b) => b.url === url)) return null;
+    const b = new Backend(url, tier, device);
+    this.backends.push(b);
+    logger.info(`백엔드 추가됨 ➕ ${tier}/${device ?? "-"} @ ${url}`);
+    return b;
+  }
+
+  /** 런타임에 백엔드 제거 */
+  removeBackend(url) {
+    const idx = this.backends.findIndex((b) => b.url === url);
+    if (idx < 0) return false;
+    const [b] = this.backends.splice(idx, 1);
+    logger.info(`백엔드 제거됨 ➖ ${b.tier}/${b.device ?? "-"} @ ${b.url}`);
+    return true;
+  }
+
   setRoleEnabled(url, role, enabled) {
     const b = this.backends.find((x) => x.url === url);
     if (!b) return false;
@@ -213,7 +232,16 @@ class Pool {
     let candidates = preferredTier ? healthy.filter((b) => b.tier === preferredTier) : healthy;
     if (candidates.length === 0) {
       if (!allowOtherTiers) return null;
-      candidates = healthy;
+      // 선호 티어가 비어 있으면 "상위 티어 우선" 폴백: 가까운 상위 → 없을 때만 하위.
+      // (medium 요청이 small 로 떨어져 지시 준수·품질이 깨지는 것을 방지)
+      const want = TIER_RANK[preferredTier] ?? 0;
+      const fallbackScore = (b) => {
+        const r = TIER_RANK[b.tier] ?? 0;
+        return r >= want ? r - want : 10 + (want - r);
+      };
+      let best = Infinity;
+      for (const b of healthy) best = Math.min(best, fallbackScore(b));
+      candidates = healthy.filter((b) => fallbackScore(b) === best);
     }
 
     if (preferredDevice) {

@@ -63,6 +63,12 @@ export function chooseTierHeuristic(body) {
     return { tier: "medium", reason: `heuristic: length>${config.smallMaxChars}` };
   }
 
+  // 시스템 지시문(페르소나·출력형식 등)이 있으면 small(0.5B)은 지시 준수가
+  // 어려우므로 최소 medium 으로 올린다.
+  if (sys.trim()) {
+    return { tier: "medium", reason: "heuristic: system-prompt → min medium" };
+  }
+
   return {
     tier: VALID_TIERS.has(config.defaultTier) ? config.defaultTier : "small",
     reason: "heuristic: simple",

@@ -19,6 +19,8 @@ import {
     serverStatus,
     startServer,
     stopServer,
+    addServerDef,
+    removeServerDef,
 } from "./serverManager.js";
 import multer from "multer";
 
@@ -174,6 +176,68 @@ async function findServerDef(name) {
     const defs = await loadServerDefs();
     return defs.find((d) => d.name === name) ?? null;
 }
+
+// 모델 서버 추가: servers.json 에 영속 + 풀 등록 + 즉시 기동.
+// 이름·포트 자동 할당, 미지정 값은 같은 티어 정의를 템플릿으로 사용.
+app.post("/api/servers", async (req, res) => {
+    try {
+        const tier = String(req.body?.tier ?? "").toLowerCase();
+        if (!["small", "medium", "large"].includes(tier)) {
+            return res.status(400).json({
+                error: '"tier" 는 small|medium|large 중 하나여야 합니다.',
+            });
+        }
+        const def = await addServerDef({
+            tier,
+            model: req.body?.model,
+            ctx: req.body?.ctx,
+            ngl: req.body?.ngl,
+            gpu: req.body?.gpu,
+        });
+        const url = `http://127.0.0.1:${def.port}`;
+        pool.addBackend(url, def.tier, Number(def.ngl) > 0 ? "gpu" : "cpu");
+        let r;
+        try {
+            r = await startServer(def);
+        } catch (e) {
+            // 기동 실패(GPU 부족 등) 시 정의·풀 등록 롤백
+            await removeServerDef(def.name).catch(() => {});
+            pool.removeBackend(url);
+            throw e;
+        }
+        logger.info(
+            `모델 서버 추가 ➕ ${def.name} [${def.tier}] :${def.port} (model=${def.model}, ngl=${def.ngl}, PID ${r.pid ?? "?"})`,
+        );
+        res.json({ ok: true, server: def });
+    } catch (err) {
+        logger.error(`모델 서버 추가 실패: ${err.message}`);
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// 모델 서버 삭제: 프로세스 종료 + servers.json 정의 제거 + 풀에서 제외
+app.delete("/api/servers/:name", async (req, res) => {
+    try {
+        const def = await findServerDef(req.params.name);
+        if (!def) {
+            return res.status(404).json({
+                error: `servers.json 에 "${req.params.name}" 정의가 없습니다.`,
+            });
+        }
+        try {
+            await stopServer(def);
+        } catch (e) {
+            logger.warn(`서버 삭제 중 종료 실패(${def.name}): ${e.message}`);
+        }
+        await removeServerDef(def.name);
+        pool.removeBackend(`http://127.0.0.1:${def.port}`);
+        logger.warn(`모델 서버 삭제 🗑 ${def.name} [${def.tier}] :${def.port}`);
+        res.json({ ok: true, removed: def.name });
+    } catch (err) {
+        logger.error(`모델 서버 삭제 실패 (${req.params.name}): ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // 모델 서버 종료 (프로세스 kill → VRAM/메모리 해제)
 app.post("/api/servers/:name/stop", async (req, res) => {
@@ -797,25 +861,31 @@ function bufferToDataUrl(buffer, ext) {
     return `data:${mime};base64,${buffer.toString("base64")}`;
 }
 
-function ragSystemPrompt(strict, withVision) {
+function ragSystemPrompt(strict, withVision, userSystem) {
     const vision =
         withVision
             ? " 참고 문서에 첨부된 이미지가 있으면 이미지 속 글자와 시각적 내용 모두를 근거로 사용하라."
             : "";
+    let base;
     if (strict) {
-        return (
+        base =
             "너는 제공된 '참고 문서'만 근거로 한국어로 답하는 어시스턴트다." +
             vision +
             " 문서에 없는 내용은 절대 추측하지 말고 정확히 '문서 내용에 없습니다.'라고만 답하라. " +
-            "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라."
-        );
+            "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라.";
+    } else {
+        base =
+            "너는 한국어로 답하는 어시스턴트다. '참고 문서'를 우선 근거로 사용하되," +
+            vision +
+            " 문서에 없으면 너의 일반 지식으로 보완해 답하라. " +
+            "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라.";
     }
-    return (
-        "너는 한국어로 답하는 어시스턴트다. '참고 문서'를 우선 근거로 사용하되," +
-        vision +
-        " 문서에 없으면 너의 일반 지식으로 보완해 답하라. " +
-        "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라."
-    );
+    // 사용자가 ROLE_SYSTEM 으로 보낸 지시(페르소나·출력형식 등)를 함께 적용
+    const extra =
+        typeof userSystem === "string" && userSystem.trim()
+            ? ` 추가 지시사항: ${userSystem.trim()}`
+            : "";
+    return base + extra;
 }
 
 async function buildRagUserContent(q, context, hits, questionContent) {
@@ -857,7 +927,7 @@ async function buildRagUserContent(q, context, hits, questionContent) {
     return parts;
 }
 
-async function buildRagMessages({ q, hits, strict, questionContent }) {
+async function buildRagMessages({ q, hits, strict, questionContent, system }) {
     const context =
         hits?.length > 0
             ? hits
@@ -882,20 +952,77 @@ async function buildRagMessages({ q, hits, strict, questionContent }) {
     );
 
     return [
-        { role: "system", content: ragSystemPrompt(strict, hasVision) },
+        { role: "system", content: ragSystemPrompt(strict, hasVision, system) },
         { role: "user", content: userContent },
     ];
 }
 
-async function ragChat({ q, hits, strict, questionContent, temperature = 0.3 }) {
-    const messages = await buildRagMessages({ q, hits, strict, questionContent });
+// RAG 프롬프트 오버헤드(시스템 프롬프트 + 출처 헤더) 근사치
+const RAG_PROMPT_OVERHEAD = 400;
+
+/**
+ * RAG 질의 티어 결정.
+ * - 이미지(출처 문서 or 질문 첨부) → large 고정 (비전은 large 만 가능)
+ * - 검색 결과 없음(일반 지식 답변) → 일반 라우팅 적용 (간단하면 small)
+ * - 텍스트 출처만: 컨텍스트+질문이 medium 예산 이내면 medium, 초과면 large
+ */
+async function chooseRagRoute({ q, hits, questionContent, body }) {
+    const hasImage =
+        (hits || []).some((h) => h.imageFile) ||
+        (questionContent !== undefined &&
+            questionContent !== null &&
+            questionContent !== "");
+    if (hasImage) {
+        return {
+            tier: "large",
+            device: null,
+            allowOtherTiers: false,
+            reason: "이미지 출처/첨부 → 비전 모델 필요",
+        };
+    }
+
+    if (!hits?.length) {
+        const route = await chooseRoute({ ...(body ?? {}), ROLE_USER: q, content: undefined });
+        return {
+            tier: route.tier,
+            device: route.device,
+            allowOtherTiers: config.escalateTier,
+            reason: `검색 결과 없음 → 일반 라우팅 (${route.reason})`,
+        };
+    }
+
+    const promptChars =
+        hits.reduce((s, h) => s + h.text.length + 40, 0) +
+        q.length +
+        RAG_PROMPT_OVERHEAD;
+    if (promptChars <= config.maxPromptCharsSmall) {
+        return {
+            tier: "medium",
+            device: null,
+            allowOtherTiers: config.escalateTier,
+            reason: `텍스트 출처 ${hits.length}개, 프롬프트 ${promptChars}자 ≤ medium 예산(${config.maxPromptCharsSmall})`,
+        };
+    }
+    return {
+        tier: "large",
+        device: null,
+        allowOtherTiers: false,
+        reason: `텍스트 출처 ${hits.length}개, 프롬프트 ${promptChars}자 > medium 예산(${config.maxPromptCharsSmall})`,
+    };
+}
+
+async function ragChat({ q, hits, strict, questionContent, system, temperature = 0.3, route }) {
+    const messages = await buildRagMessages({ q, hits, strict, questionContent, system });
+    const tier = route?.tier ?? "large";
     return pool.chat({
         messages,
         temperature,
-        maxTokens: config.defaultMaxTokens,
+        maxTokens:
+            tier === "large" ? config.defaultMaxTokens : config.maxTokensSmall,
         enableThinking: config.enableThinking,
-        preferredTier: "large",
-        allowOtherTiers: false,
+        preferredTier: tier,
+        preferredDevice: route?.device ?? null,
+        allowOtherTiers: route?.allowOtherTiers ?? false,
     });
 }
 
@@ -1126,6 +1253,10 @@ app.post("/api/rag/ask", async (req, res) => {
         // strict=true(문서만 답변): 문서 밖 내용은 "문서 내용에 없습니다"로 답한다.
         const strict = req.body?.strict !== false;
         const questionContent = req.body?.content;
+        const system =
+            typeof req.body?.ROLE_SYSTEM === "string"
+                ? req.body.ROLE_SYSTEM
+                : undefined;
         const persist = (payload) => persistRagHistory(q, payload);
 
         const hits = rag.retrieve(q, topK);
@@ -1145,12 +1276,21 @@ app.post("/api/rag/ask", async (req, res) => {
                 persist(payload);
                 return res.json(payload);
             }
+            const route = await chooseRagRoute({
+                q,
+                hits: [],
+                questionContent,
+                body: req.body,
+            });
+            logger.info(`RAG 라우팅 → tier=${route.tier} (${route.reason})`);
             const { result, backendUrl, tier, device } = await ragChat({
                 q,
                 hits: [],
                 strict: false,
                 questionContent,
+                system,
                 temperature: 0.4,
+                route,
             });
             const payload = {
                 answer: result.content,
@@ -1166,12 +1306,21 @@ app.post("/api/rag/ask", async (req, res) => {
             return res.json(payload);
         }
 
+        const route = await chooseRagRoute({
+            q,
+            hits,
+            questionContent,
+            body: req.body,
+        });
+        logger.info(`RAG 라우팅 → tier=${route.tier} (${route.reason})`);
         const { result, backendUrl, tier, device } = await ragChat({
             q,
             hits,
             strict,
             questionContent,
+            system,
             temperature: strict ? 0.2 : 0.4,
+            route,
         });
 
         logger.info(
@@ -1222,6 +1371,10 @@ app.post("/api/rag/ask/stream", async (req, res) => {
             : 4;
         const strict = req.body?.strict !== false;
         const questionContent = req.body?.content;
+        const system =
+            typeof req.body?.ROLE_SYSTEM === "string"
+                ? req.body.ROLE_SYSTEM
+                : undefined;
 
         const hits = rag.retrieve(q, topK);
         const sources = ragSources(hits);
@@ -1245,19 +1398,34 @@ app.post("/api/rag/ask/stream", async (req, res) => {
             return res.end();
         }
 
+        const route = await chooseRagRoute({
+            q,
+            hits,
+            questionContent,
+            body: req.body,
+        });
+        logger.info(
+            `RAG 라우팅(stream) → tier=${route.tier} (${route.reason})`,
+        );
+
         const messages = await buildRagMessages({
             q,
             hits,
             strict: hits.length ? strict : false,
             questionContent,
+            system,
         });
         const out = await pool.chatStream({
             messages,
             temperature: strict && hits.length ? 0.2 : 0.4,
-            maxTokens: config.defaultMaxTokens,
+            maxTokens:
+                route.tier === "large"
+                    ? config.defaultMaxTokens
+                    : config.maxTokensSmall,
             enableThinking: config.enableThinking,
-            preferredTier: "large",
-            allowOtherTiers: false,
+            preferredTier: route.tier,
+            preferredDevice: route.device ?? null,
+            allowOtherTiers: route.allowOtherTiers,
             onMeta: (m) => send("meta", m),
             onToken: (t) => send("token", { text: t }),
         });

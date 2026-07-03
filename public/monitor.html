@@ -431,6 +431,74 @@
                 margin-right: 5px;
                 vertical-align: -1px;
             }
+            /* 모델 서버 추가 폼 */
+            .add-server {
+                margin-bottom: 14px;
+            }
+            .as-row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+                align-items: flex-end;
+            }
+            .as-row label {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                font-size: 11px;
+                color: var(--muted);
+                font-weight: 600;
+            }
+            .as-row input,
+            .as-row select {
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                color: var(--text);
+                padding: 7px 9px;
+                font-size: 13px;
+                font-family: inherit;
+            }
+            .as-row .grow {
+                flex: 1;
+                min-width: 260px;
+            }
+            .as-row .grow input {
+                width: 100%;
+            }
+            .as-add-btn {
+                background: var(--accent);
+                color: #fff;
+                border: 0;
+                border-radius: 7px;
+                padding: 8px 18px;
+                font-size: 13px;
+                font-weight: 700;
+                cursor: pointer;
+            }
+            .as-add-btn:hover {
+                background: #5570e6;
+            }
+            .as-add-btn:disabled {
+                opacity: 0.55;
+                cursor: wait;
+            }
+            .del-btn {
+                background: rgba(248, 81, 73, 0.12);
+                color: #ff9c95;
+                border: 0;
+                border-radius: 6px;
+                padding: 3px 8px;
+                font-size: 10px;
+                font-weight: 700;
+                cursor: pointer;
+                margin-left: 6px;
+                vertical-align: middle;
+            }
+            .del-btn:hover {
+                background: rgba(248, 81, 73, 0.26);
+                color: #fff;
+            }
             /* 모델 서버 전원 토글 */
             .pw-loading {
                 font-size: 11px;
@@ -510,6 +578,42 @@
                 </div>
             </div>
 
+            <div class="card add-server">
+                <div class="k" style="margin-bottom: 9px">
+                    모델 서버 추가
+                    <span class="muted" style="font-weight: 400">
+                        — 티어 선택 시 servers.json 의 같은 티어 정의가 기본값으로 채워집니다. 이름·포트는 자동 할당.</span
+                    >
+                </div>
+                <div class="as-row">
+                    <label>
+                        티어
+                        <select id="asTier">
+                            <option value="small">small</option>
+                            <option value="medium">medium</option>
+                            <option value="large">large</option>
+                        </select>
+                    </label>
+                    <label class="grow">
+                        모델 파일
+                        <input id="asModel" type="text" placeholder="models/....gguf" />
+                    </label>
+                    <label>
+                        컨텍스트(ctx)
+                        <input id="asCtx" type="number" style="width: 90px" />
+                    </label>
+                    <label title="0 = CPU 전용, 99 = 전체 레이어 GPU">
+                        GPU 레이어(ngl)
+                        <input id="asNgl" type="number" style="width: 90px" />
+                    </label>
+                    <label title="CUDA_VISIBLE_DEVICES 값. 비우면 기본 GPU">
+                        GPU ID
+                        <input id="asGpu" type="text" style="width: 70px" placeholder="(기본)" />
+                    </label>
+                    <button id="asAdd" class="as-add-btn">추가 + 기동</button>
+                </div>
+            </div>
+
             <div class="table-scroll">
                 <table>
                     <thead>
@@ -555,6 +659,8 @@
             const $ = (id) => document.getElementById(id);
             let roleBusy = false;
             let powerBusy = false;
+            let serversCache = [];
+            let addFormInit = false;
 
             function escAttr(s) {
                 return String(s ?? "")
@@ -599,6 +705,11 @@
                         servers = (await rs?.json())?.servers ?? [];
                     } catch {}
                     const svByUrl = new Map(servers.map((x) => [x.url, x]));
+                    serversCache = servers;
+                    if (!addFormInit && servers.length) {
+                        addFormInit = true;
+                        prefillAddForm();
+                    }
                     $("sBackends").textContent = s.totalBackends;
                     $("sHealthy").textContent = s.healthyBackends;
                     $("sInflight").textContent = s.totalInFlight;
@@ -635,7 +746,7 @@
       <label class="role-switch">
         <input type="checkbox" class="pw-toggle" data-name="${escAttr(sv.name)}" ${sv.running ? "checked" : ""} ${powerBusy ? "disabled" : ""}>
         <span class="role-slider"></span>
-      </label>${state}
+      </label>${state}<button class="del-btn" data-name="${escAttr(sv.name)}" title="서버 정의 삭제 (실행 중이면 종료 후 servers.json 에서 제거)">삭제</button>
     </span>`;
                             }
                             return `
@@ -672,6 +783,73 @@
                         `<tr><td colspan="15" class="err">상태 조회 실패: ${e.message}</td></tr>`;
                 }
             }
+
+            // ===== 모델 서버 추가/삭제 =====
+            function prefillAddForm() {
+                const tier = $("asTier").value;
+                const t = serversCache.find((s) => s.tier === tier);
+                if (!t) return;
+                $("asModel").value = t.model ?? "";
+                $("asCtx").value = t.ctx ?? 4096;
+                $("asNgl").value = t.ngl ?? 0;
+                $("asGpu").value = t.gpu ?? "";
+            }
+            $("asTier").addEventListener("change", prefillAddForm);
+
+            $("asAdd").addEventListener("click", async () => {
+                const btn = $("asAdd");
+                btn.disabled = true;
+                btn.textContent = "추가 중…";
+                try {
+                    const body = {
+                        tier: $("asTier").value,
+                        model: $("asModel").value.trim(),
+                        ctx: Number($("asCtx").value),
+                        ngl: Number($("asNgl").value),
+                        gpu: $("asGpu").value.trim(),
+                    };
+                    const r = await fetch("/api/servers", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(d.error || "추가 실패");
+                } catch (e) {
+                    alert(e.message);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = "추가 + 기동";
+                    refresh();
+                }
+            });
+
+            // 서버 정의 삭제 버튼
+            document.querySelector("table").addEventListener("click", async (e) => {
+                const btn = e.target.closest(".del-btn");
+                if (!btn || powerBusy) return;
+                const name = btn.dataset.name;
+                if (
+                    !confirm(
+                        `"${name}" 서버를 삭제할까요?\n실행 중이면 종료되고 servers.json 정의에서도 제거됩니다.`,
+                    )
+                )
+                    return;
+                powerBusy = true;
+                try {
+                    const r = await fetch(
+                        "/api/servers/" + encodeURIComponent(name),
+                        { method: "DELETE" },
+                    );
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) alert(d.error || "삭제 실패");
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    powerBusy = false;
+                    refresh();
+                }
+            });
 
             // 모델 서버 전원 토글 (ON=기동, OFF=종료)
             document.querySelector("table").addEventListener("change", async (e) => {

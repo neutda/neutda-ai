@@ -277,6 +277,26 @@
                     opacity: 0;
                 }
             }
+            /* 하단 입력창 (채팅 앱 스타일) */
+            .composer {
+                display: flex;
+                gap: 8px;
+                margin-top: 10px;
+                align-items: flex-end;
+            }
+            .composer textarea {
+                flex: 1;
+                min-height: 44px;
+                max-height: 140px;
+                resize: none;
+                overflow-y: auto;
+            }
+            .composer button {
+                margin: 0;
+                width: auto;
+                padding: 12px 22px;
+                white-space: nowrap;
+            }
             .chat-log {
                 flex: 1;
                 overflow-y: auto;
@@ -648,16 +668,6 @@
                         placeholder="예: 너는 친절한 한국어 비서야."
                     ></textarea>
 
-                    <label for="user"
-                        >ROLE_USER
-                        <span class="hint">(사용자 질문, 필수)</span></label
-                    >
-                    <textarea
-                        id="user"
-                        rows="5"
-                        placeholder="예: 한국의 수도는 어디야?"
-                    ></textarea>
-
                     <label>TEMPERATURE</label>
                     <div class="temp-row">
                         <input
@@ -716,18 +726,52 @@
                     </div>
                     <div id="preview" class="preview"></div>
 
-                    <div class="rag-opts">
-                        <label class="rag-chk">
-                            <input id="rag" type="checkbox" />
-                            <span>문서기반 답변 (RAG)</span>
-                        </label>
-                        <label class="rag-chk" id="ragOnlyWrap">
-                            <input id="ragOnly" type="checkbox" disabled />
-                            <span>문서에 대한 것만 답변</span>
-                        </label>
-                    </div>
-
-                    <button id="send">전송</button>
+                    <details class="rag-box" id="ragBox" open style="margin-top: 14px">
+                        <summary>
+                            문서 관리 (RAG)
+                            <span class="rag-stats" id="ragStats"></span>
+                        </summary>
+                        <div class="rag-body">
+                            <div class="rag-opts" style="margin-top: 0">
+                                <label class="rag-chk">
+                                    <input id="rag" type="checkbox" />
+                                    <span>문서기반 답변 (RAG)</span>
+                                </label>
+                                <label class="rag-chk" id="ragOnlyWrap">
+                                    <input id="ragOnly" type="checkbox" disabled />
+                                    <span>문서에 대한 것만 답변</span>
+                                </label>
+                            </div>
+                            <input
+                                id="ragName"
+                                type="text"
+                                placeholder="문서 제목 (선택)"
+                            />
+                            <input
+                                id="ragFile"
+                                type="file"
+                                multiple
+                                accept=".pdf,.docx,.hwp,.hwpx,.txt,.md,.csv,.json,.log,.png,.jpg,.jpeg,.gif,.webp,.bmp"
+                                style="font-size: 12px"
+                            />
+                            <div
+                                id="ragFileHint"
+                                class="sb"
+                                style="color: var(--muted); font-size: 11px"
+                            >
+                                PDF · Word · 한글 · 텍스트 · 이미지(png/jpg 등) 지원.
+                                이미지는 비전 모델로 글자·내용을 추출해 저장합니다.
+                                여러 개 선택 가능, 선택 시 자동 업로드됩니다.
+                            </div>
+                            <textarea
+                                id="ragText"
+                                rows="4"
+                                placeholder="또는 문서 내용을 직접 붙여넣으세요…"
+                            ></textarea>
+                            <button id="ragAdd" class="btn-sm">문서 추가</button>
+                            <div id="ragList" class="rag-list"></div>
+                        </div>
+                    </details>
                 </section>
 
                 <section class="panel chat-panel">
@@ -776,47 +820,19 @@
                         </div>
                     </div>
 
-                    <details class="rag-box" id="ragBox">
-                        <summary>
-                            문서 관리 (RAG)
-                            <span class="rag-stats" id="ragStats"></span>
-                        </summary>
-                        <div class="rag-body">
-                            <input
-                                id="ragName"
-                                type="text"
-                                placeholder="문서 제목 (선택)"
-                            />
-                            <input
-                                id="ragFile"
-                                type="file"
-                                multiple
-                                accept=".pdf,.docx,.hwp,.hwpx,.txt,.md,.csv,.json,.log,.png,.jpg,.jpeg,.gif,.webp,.bmp"
-                                style="font-size: 12px"
-                            />
-                            <div
-                                id="ragFileHint"
-                                class="sb"
-                                style="color: var(--muted); font-size: 11px"
-                            >
-                                PDF · Word · 한글 · 텍스트 · 이미지(png/jpg 등) 지원.
-                                이미지는 비전 모델로 글자·내용을 추출해 저장합니다.
-                                여러 개 선택 가능, 선택 시 자동 업로드됩니다.
-                            </div>
-                            <textarea
-                                id="ragText"
-                                rows="4"
-                                placeholder="또는 문서 내용을 직접 붙여넣으세요…"
-                            ></textarea>
-                            <button id="ragAdd" class="btn-sm">문서 추가</button>
-                            <div id="ragList" class="rag-list"></div>
-                        </div>
-                    </details>
-
                     <div id="log" class="chat-log">
                         <div class="chat-empty">
                             대화 내역이 여기에 표시됩니다.
                         </div>
+                    </div>
+
+                    <div class="composer">
+                        <textarea
+                            id="user"
+                            rows="1"
+                            placeholder="메시지를 입력하세요… (Enter 전송 · Shift+Enter 줄바꿈)"
+                        ></textarea>
+                        <button id="send">전송</button>
                     </div>
                 </section>
             </div>
@@ -1114,6 +1130,7 @@
                 const el = addAssistant();
                 btn.disabled = true;
                 $("user").value = "";
+                $("user").style.height = "auto";
                 const t0 = performance.now();
 
                 const useStream = $("stream").checked;
@@ -1146,6 +1163,20 @@
                 } finally {
                     btn.disabled = false;
                 }
+            });
+
+            // 채팅 앱처럼: Enter 전송, Shift+Enter 줄바꿈 (한글 조합 중엔 무시)
+            $("user").addEventListener("keydown", (e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+                    e.preventDefault();
+                    if (!$("send").disabled) $("send").click();
+                }
+            });
+            // 입력 내용에 따라 높이 자동 조절 (최대 140px)
+            $("user").addEventListener("input", () => {
+                const ta = $("user");
+                ta.style.height = "auto";
+                ta.style.height = Math.min(ta.scrollHeight, 140) + "px";
             });
 
             // SSE 응답 파싱: event/data 블록 단위로 handle(event, data) 호출
@@ -1271,6 +1302,8 @@
                 const strict = $("ragOnly").checked;
                 const payload = { q: user, strict, topK: 4 };
                 if (content) payload.content = content;
+                const sys = $("system").value.trim();
+                if (sys) payload.ROLE_SYSTEM = sys;
 
                 // 스트리밍 꺼짐: 기존 동기 방식
                 if (!$("stream").checked) {

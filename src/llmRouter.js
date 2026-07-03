@@ -12,6 +12,8 @@ Tiers:
 - medium: moderate explanations, summaries, light multi-step tasks
 - large: complex reasoning, coding, math/proofs, deep analysis, long creative writing, translation of long text
 
+If system_prompt contains non-trivial instructions (persona, output format, constraints), choose at least medium — small models cannot follow them.
+
 difficulty: integer 0–100 (higher = more compute needed; coding and multi-step reasoning should be high)
 
 Output format: {"tier":"small|medium|large","difficulty":0-100,"reason":"brief Korean reason"}`;
