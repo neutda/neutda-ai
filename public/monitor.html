@@ -431,39 +431,17 @@
                 margin-right: 5px;
                 vertical-align: -1px;
             }
-            /* 모델 서버 전원 버튼 */
-            .pw-btn {
-                border: 0;
-                border-radius: 6px;
-                padding: 4px 12px;
-                font-size: 11px;
-                font-weight: 700;
-                cursor: pointer;
-            }
-            .pw-btn:disabled {
-                opacity: 0.5;
-                cursor: wait;
-            }
-            .pw-stop {
-                background: rgba(248, 81, 73, 0.14);
-                color: #ff9c95;
-            }
-            .pw-stop:hover {
-                background: rgba(248, 81, 73, 0.28);
-                color: #fff;
-            }
-            .pw-start {
-                background: rgba(63, 185, 80, 0.14);
-                color: #56d364;
-            }
-            .pw-start:hover {
-                background: rgba(63, 185, 80, 0.28);
-                color: #fff;
-            }
+            /* 모델 서버 전원 토글 */
             .pw-loading {
                 font-size: 11px;
                 color: var(--warn);
-                margin-right: 6px;
+                margin-left: 6px;
+            }
+            .pw-state {
+                font-size: 11px;
+                color: var(--muted);
+                margin-left: 6px;
+                vertical-align: middle;
             }
         </style>
     </head>
@@ -649,14 +627,16 @@
                             const sv = svByUrl.get(b.url);
                             let power = '<span class="muted">–</span>';
                             if (sv) {
-                                if (sv.running) {
-                                    const loading = !b.healthy
+                                const state =
+                                    sv.running && !b.healthy
                                         ? '<span class="pw-loading">로딩중…</span>'
-                                        : "";
-                                    power = `${loading}<button class="pw-btn pw-stop" data-name="${escAttr(sv.name)}">종료</button>`;
-                                } else {
-                                    power = `<button class="pw-btn pw-start" data-name="${escAttr(sv.name)}">기동</button>`;
-                                }
+                                        : `<span class="pw-state">${sv.running ? "ON" : "OFF"}</span>`;
+                                power = `<span class="role-pair" title="모델 서버 프로세스 기동/종료 (OFF 시 VRAM/메모리 해제)">
+      <label class="role-switch">
+        <input type="checkbox" class="pw-toggle" data-name="${escAttr(sv.name)}" ${sv.running ? "checked" : ""} ${powerBusy ? "disabled" : ""}>
+        <span class="role-slider"></span>
+      </label>${state}
+    </span>`;
                             }
                             return `
           <tr>
@@ -693,28 +673,33 @@
                 }
             }
 
-            // 모델 서버 기동/종료 버튼
-            document.querySelector("table").addEventListener("click", async (e) => {
-                const btn = e.target.closest(".pw-btn");
-                if (!btn || powerBusy) return;
-                const name = btn.dataset.name;
-                const action = btn.classList.contains("pw-stop") ? "stop" : "start";
+            // 모델 서버 전원 토글 (ON=기동, OFF=종료)
+            document.querySelector("table").addEventListener("change", async (e) => {
+                const inp = e.target;
+                if (!inp.matches(".pw-toggle") || powerBusy) return;
+                const name = inp.dataset.name;
+                const turnOn = inp.checked;
                 if (
-                    action === "stop" &&
+                    !turnOn &&
                     !confirm(`"${name}" 모델 서버를 종료할까요?\nVRAM/메모리가 해제되고, 해당 백엔드는 다운 상태가 됩니다.`)
-                )
+                ) {
+                    inp.checked = true;
                     return;
+                }
                 powerBusy = true;
-                btn.disabled = true;
-                btn.textContent = action === "stop" ? "종료 중…" : "기동 중…";
+                inp.disabled = true;
                 try {
                     const r = await fetch(
-                        `/api/servers/${encodeURIComponent(name)}/${action}`,
+                        `/api/servers/${encodeURIComponent(name)}/${turnOn ? "start" : "stop"}`,
                         { method: "POST" },
                     );
                     const d = await r.json().catch(() => ({}));
-                    if (!r.ok) alert(d.error || "요청 실패");
+                    if (!r.ok) {
+                        inp.checked = !turnOn;
+                        alert(d.error || "요청 실패");
+                    }
                 } catch (err) {
+                    inp.checked = !turnOn;
                     alert(err.message);
                 } finally {
                     powerBusy = false;
