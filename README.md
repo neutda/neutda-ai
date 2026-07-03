@@ -10,7 +10,7 @@ Node.js + Express API 게이트웨이. 요청을 받아 로컬 **llama-server**(
                     │
         ┌───────────┼───────────┬──────────────┐
         ▼           ▼           ▼              ▼
-   large:8080  medium:8085  small:8081…   (라우터 역할)
+   large:8080  medium:8085  small:8082…   (라우터 역할)
    Qwen3.6 27B  Qwen2.5 3B   Qwen2.5 0.5B   small 백엔드 1대
    + mmproj     (텍스트)      (텍스트/GPU·CPU)
 ```
@@ -18,13 +18,16 @@ Node.js + Express API 게이트웨이. 요청을 받아 로컬 **llama-server**(
 **주요 기능**
 
 - **멀티 티어 라우팅**: `small` / `medium` / `large` — LLM 라우터(`ROUTING_MODE=llm`) 또는 휴리스틱(글자수·키워드)으로 자동 선택
+- **시스템 지시문 보호**: `ROLE_SYSTEM`(페르소나·출력형식 등)이 있으면 최소 `medium` 으로 라우팅 — 0.5B small 모델의 지시 미준수 방지
 - **GPU/CPU 선호**: 같은 티어 안에서 난이도 점수에 따라 GPU 또는 CPU 백엔드 우선
-- **로드밸런싱**: 헬스체크 + least-connections + 장애 시 failover
+- **로드밸런싱**: 헬스체크 + least-connections + 장애 시 failover (선호 티어 부재 시 **상위 티어 우선** 폴백)
 - **자원 절감 통계**: 티어별 요청·토큰 누적, "전부 large 처리 대비" 절감률 추정 (`/api/stats`, 모니터링 대시보드)
 - **비전**: 이미지 입력 시 large(비전 모델)로 라우팅
 - **스트리밍**: SSE 기반 실시간 토큰 전송 (`/api/chat/stream`, `/api/rag/ask/stream`)
 - **RAG**: PDF/DOCX/HWPX/HWP/이미지 등 문서 업로드 → BM25 검색 → 문서 기반 답변 (스트리밍 지원)
+- **RAG 스마트 라우팅**: 이미지 출처 → large, 검색 결과 없음 → 일반 라우팅, 텍스트 출처 → 프롬프트 길이에 따라 medium/large 자동 선택
 - **문서 요약·예상 질문**: 업로드 시 LLM 이 요약 + 예상 질문 3개 자동 생성 (클릭 시 즉시 질의)
+- **모델 서버 운영**: 모니터·API 로 서버 추가/삭제/기동/종료, `servers.json` 영속, GPU VRAM 사전 점검
 - **외부 API**: API 키 인증 GET `/api/ask` (비동기·동기 모두 지원)
 - **모니터링**: 백엔드 상태, 티어 라우팅 효과, GPU/CPU 지표, 로그, 대화 히스토리
 
@@ -71,6 +74,11 @@ npm run down    # Express + 모든 llama-server 종료
 
 로그: `./llama/logs/server-<port>.log`, `./llama/logs/express.log`
 
+### 런타임 서버 관리
+
+Express 가 이미 떠 있는 상태에서 [모니터링 대시보드](http://localhost:3000/monitor.html) 또는 `/api/servers` 로
+개별 llama-server 를 추가·삭제·기동·종료할 수 있습니다. 변경 사항은 `servers.json` 에 즉시 반영됩니다.
+
 ### 수동 실행
 
 ```powershell
@@ -96,8 +104,8 @@ npm run dev     # 파일 변경 시 자동 재시작
 
 | 페이지 | URL | 설명 |
 | --- | --- | --- |
-| 테스트 콘솔 | `http://localhost:3000/` | 채팅·이미지·스트리밍·대화 기억 테스트. 전체화면 레이아웃, 답변 마크다운 렌더링(코드박스+복사 버튼), 라우팅 사유 배지 |
-| 모니터링 | `http://localhost:3000/monitor.html` | 백엔드 상태, 라우터 역할 토글, 티어 라우팅 효과(절감률·티어 분포), GPU/CPU 지표 |
+| 테스트 콘솔 | `http://localhost:3000/` | 채팅·이미지·스트리밍·대화 기억 테스트. 하단 컴포저(Enter 전송·Shift+Enter 줄바꿈), 좌측 패널에 RAG 문서 관리, 답변 마크다운 렌더링(코드박스+복사 버튼), 라우팅 사유 배지 |
+| 모니터링 | `http://localhost:3000/monitor.html` | 백엔드 상태, **모델 서버 추가/삭제·전원 토글**, 라우터 역할 토글, 티어 라우팅 효과(절감률·티어 분포), GPU/CPU 지표 |
 | 로그 | `http://localhost:3000/logs.html` | 서버 로그 실시간 조회 |
 | 외부 API | `http://localhost:3000/api.html` | `/api/ask` 호출 예시 |
 | RAG | `http://localhost:3000/rag.html` | 문서 업로드·문서 기반 질의(스트리밍). 문서 요약·예상 질문 칩 표시 |
@@ -132,6 +140,38 @@ npm run dev     # 파일 변경 시 자동 재시작
 
 ```json
 { "url": "http://127.0.0.1:8087", "role": "router", "enabled": true }
+```
+
+### 모델 서버 API (`/api/servers`)
+
+`servers.json` 에 정의된 llama-server 프로세스를 조회·추가·삭제·기동·종료합니다.
+모니터링 대시보드에서도 동일 기능을 UI 로 제공합니다.
+
+| 메서드 | 경로 | 설명 |
+| --- | --- | --- |
+| `GET` | `/api/servers` | 정의 목록 + PID·헬스·풀 등록 여부 |
+| `POST` | `/api/servers` | 서버 추가 + 즉시 기동 (이름·포트 자동 할당) |
+| `DELETE` | `/api/servers/:name` | 프로세스 종료 + `servers.json` 에서 정의 제거 |
+| `POST` | `/api/servers/:name/start` | 정의대로 기동 |
+| `POST` | `/api/servers/:name/stop` | 프로세스 종료 (VRAM/메모리 해제) |
+
+`POST /api/servers` body:
+
+| 필드 | 필수 | 설명 |
+| --- | --- | --- |
+| `tier` | O | `small` \| `medium` \| `large` |
+| `model` | X | 모델 경로 (미지정 시 같은 티어 템플릿 사용) |
+| `ctx` | X | 컨텍스트 길이 |
+| `ngl` | X | GPU 레이어 수 (`0` = CPU 전용) |
+| `gpu` | X | `CUDA_VISIBLE_DEVICES` 값 |
+
+GPU 모델(`ngl > 0`) 기동 전 nvidia-smi 로 가용 VRAM 을 점검합니다.
+부족하면 기동을 차단하고, 추가 API 호출 시 정의·풀 등록을 롤백합니다.
+
+```powershell
+curl -X POST http://localhost:3000/api/servers `
+  -H "Content-Type: application/json" `
+  -d '{ "tier": "small", "ngl": 0 }'
 ```
 
 ### `GET /api/metrics`
@@ -245,9 +285,13 @@ curl "http://localhost:3000/api/ask?key=tw-demo-key-2026&q=안녕하세요"
 | 필드 | 설명 |
 | --- | --- |
 | `q` 또는 `ROLE_USER` | 질문 (필수) |
+| `ROLE_SYSTEM` | 페르소나·출력형식 등 추가 지시 (RAG 시스템 프롬프트에 병합) |
 | `topK` | 검색 청크 수 (1~8, 기본 4) |
 | `strict` | `true`(기본)=문서에 없으면 "문서 내용에 없습니다" |
 | `content` | 질문에 첨부할 이미지 |
+
+RAG 질의는 항상 large 가 아니라 출처·프롬프트 길이에 따라 티어가 결정됩니다.
+응답·스트리밍 `meta` 이벤트의 `tier`, `routeReason` 으로 확인할 수 있습니다.
 
 ## 6. 라우팅
 
@@ -255,15 +299,26 @@ curl "http://localhost:3000/api/ask?key=tw-demo-key-2026&q=안녕하세요"
 
 1. **하드 규칙**: `MODEL_TIER` 명시 > 이미지(→large) > `THINKING`(→large)
 2. **LLM 라우터** (`ROUTING_MODE=llm`): 라우터 역할이 켜진 small 백엔드가 티어·난이도 분류
-3. **휴리스틱 폴백**: 글자수·코드 패턴·복잡 키워드
+   (시스템 지시문이 있으면 최소 medium 권장)
+3. **휴리스틱 폴백**: 글자수·코드 패턴·복잡 키워드·시스템 지시문
 
 ### 휴리스틱 임계값
 
 | 조건 | 티어 |
 | --- | --- |
-| `SMALL_MAX_CHARS`(200) 이하 | small |
+| `SMALL_MAX_CHARS`(200) 이하, 시스템 지시문 없음 | small |
+| `ROLE_SYSTEM` 이 있음 (페르소나·출력형식 등) | medium (최소) |
 | 그 사이 ~ `LARGE_MIN_CHARS`(600) | medium |
 | 600자 초과 / 코드·복잡 키워드 | large |
+
+### RAG 라우팅
+
+| 조건 | 티어 |
+| --- | --- |
+| 이미지 출처 또는 질문 첨부 | large (비전 모델) |
+| 검색 결과 없음 (일반 지식 답변) | 일반 라우팅 (간단하면 small) |
+| 텍스트 출처, 프롬프트 ≤ `MAX_PROMPT_CHARS_SMALL` | medium |
+| 텍스트 출처, 프롬프트 초과 | large |
 
 ### GPU/CPU 선호
 
@@ -276,10 +331,15 @@ LLAMA_BACKENDS=large@http://127.0.0.1:8080@gpu,medium@http://127.0.0.1:8085@gpu,
 ```
 
 선택 티어가 전부 다운이면 `ESCALATE_TIER=true` 일 때 다른 티어로 폴백합니다.
+폴백 시 **가까운 상위 티어를 우선**합니다 (예: medium 요청이 small 로 떨어지지 않음).
 
 ## 7. servers.json
 
-`npm run up` 이 읽는 LLM 서버 정의 파일입니다. 각 항목:
+`npm run up` 이 읽는 LLM 서버 정의 파일입니다.
+모니터·`POST/DELETE /api/servers` 로 런타임에 추가·삭제하면 파일에 영속됩니다.
+이름(`small-1` …)과 포트(8080~8199 중 빈 값)는 자동 할당됩니다.
+
+각 항목:
 
 ```json
 {
@@ -296,6 +356,9 @@ LLAMA_BACKENDS=large@http://127.0.0.1:8080@gpu,medium@http://127.0.0.1:8085@gpu,
 - `ngl`: GPU 레이어 수 (`0` = CPU 전용)
 - `mmproj`: large 비전 모델에만 필요
 - `gpu`: `CUDA_VISIBLE_DEVICES` 값 (빈 문자열이면 기본 GPU)
+
+> GPU 모델 기동 시 모델 파일 크기 + 512MB 여유분으로 필요 VRAM 을 추정하고,
+> nvidia-smi 가용 VRAM 이 부족하면 기동을 차단합니다.
 
 ## 8. 환경 변수 (`.env`)
 
