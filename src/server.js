@@ -14,6 +14,12 @@ import { describeImageForRag } from "./ragVision.js";
 import { extractText } from "./extract.js";
 import { loadStats, getStats } from "./stats.js";
 import { parseRouterJson } from "./llmRouter.js";
+import {
+    loadServerDefs,
+    serverStatus,
+    startServer,
+    stopServer,
+} from "./serverManager.js";
 import multer from "multer";
 
 const upload = multer({
@@ -141,6 +147,73 @@ app.get("/api/status", (_req, res) => {
 // 티어 라우팅 절감 통계
 app.get("/api/stats", (_req, res) => {
     res.json(getStats());
+});
+
+// ===== 모델 서버(llama-server) 프로세스 제어 ==========================
+
+// servers.json 정의 + 실행 상태(PID/健康) 목록
+app.get("/api/servers", async (_req, res) => {
+    try {
+        const defs = await loadServerDefs();
+        const list = await serverStatus(defs);
+        const byUrl = new Map(pool.backends.map((b) => [b.url, b]));
+        res.json({
+            servers: list.map((s) => ({
+                ...s,
+                running: s.pid != null,
+                healthy: byUrl.get(s.url)?.healthy ?? false,
+                inPool: byUrl.has(s.url),
+            })),
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+async function findServerDef(name) {
+    const defs = await loadServerDefs();
+    return defs.find((d) => d.name === name) ?? null;
+}
+
+// 모델 서버 종료 (프로세스 kill → VRAM/메모리 해제)
+app.post("/api/servers/:name/stop", async (req, res) => {
+    try {
+        const def = await findServerDef(req.params.name);
+        if (!def) {
+            return res
+                .status(404)
+                .json({ error: `servers.json 에 "${req.params.name}" 정의가 없습니다.` });
+        }
+        const r = await stopServer(def);
+        logger.warn(
+            `모델 서버 종료 ⏻ ${def.name} [${def.tier}] :${def.port}${r.alreadyStopped ? " (이미 정지 상태)" : ` (PID ${r.pid})`}`,
+        );
+        pool.checkAll(); // 헬스 상태 즉시 갱신 (best-effort)
+        res.json({ ok: true, name: def.name, ...r });
+    } catch (err) {
+        logger.error(`모델 서버 종료 실패 (${req.params.name}): ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 모델 서버 기동 (servers.json 정의대로 llama-server 실행)
+app.post("/api/servers/:name/start", async (req, res) => {
+    try {
+        const def = await findServerDef(req.params.name);
+        if (!def) {
+            return res
+                .status(404)
+                .json({ error: `servers.json 에 "${req.params.name}" 정의가 없습니다.` });
+        }
+        const r = await startServer(def);
+        logger.info(
+            `모델 서버 기동 ▶ ${def.name} [${def.tier}] :${def.port}${r.alreadyRunning ? " (이미 실행 중)" : ` (PID ${r.pid}, 모델 로딩 중)`}`,
+        );
+        res.json({ ok: true, name: def.name, ...r });
+    } catch (err) {
+        logger.error(`모델 서버 기동 실패 (${req.params.name}): ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // 백엔드 역할(채팅 / 라우터) 개별 on·off

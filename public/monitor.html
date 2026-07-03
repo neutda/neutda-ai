@@ -431,6 +431,40 @@
                 margin-right: 5px;
                 vertical-align: -1px;
             }
+            /* 모델 서버 전원 버튼 */
+            .pw-btn {
+                border: 0;
+                border-radius: 6px;
+                padding: 4px 12px;
+                font-size: 11px;
+                font-weight: 700;
+                cursor: pointer;
+            }
+            .pw-btn:disabled {
+                opacity: 0.5;
+                cursor: wait;
+            }
+            .pw-stop {
+                background: rgba(248, 81, 73, 0.14);
+                color: #ff9c95;
+            }
+            .pw-stop:hover {
+                background: rgba(248, 81, 73, 0.28);
+                color: #fff;
+            }
+            .pw-start {
+                background: rgba(63, 185, 80, 0.14);
+                color: #56d364;
+            }
+            .pw-start:hover {
+                background: rgba(63, 185, 80, 0.28);
+                color: #fff;
+            }
+            .pw-loading {
+                font-size: 11px;
+                color: var(--warn);
+                margin-right: 6px;
+            }
         </style>
     </head>
     <body>
@@ -509,6 +543,7 @@
                             <th>라우터</th>
                             <th>모델</th>
                             <th>상태</th>
+                            <th>전원</th>
                             <th class="num">진행 중</th>
                             <th class="num">라우팅</th>
                             <th class="num">채팅</th>
@@ -520,7 +555,7 @@
                     </thead>
                     <tbody id="rows">
                         <tr>
-                            <td colspan="14" class="muted">불러오는 중…</td>
+                            <td colspan="15" class="muted">불러오는 중…</td>
                         </tr>
                     </tbody>
                 </table>
@@ -541,6 +576,7 @@
         <script>
             const $ = (id) => document.getElementById(id);
             let roleBusy = false;
+            let powerBusy = false;
 
             function escAttr(s) {
                 return String(s ?? "")
@@ -573,9 +609,18 @@
             }
 
             async function refresh() {
+                if (powerBusy) return; // 전원 조작 중엔 재렌더 보류
                 try {
-                    const r = await fetch("/api/status");
+                    const [r, rs] = await Promise.all([
+                        fetch("/api/status"),
+                        fetch("/api/servers").catch(() => null),
+                    ]);
                     const s = await r.json();
+                    let servers = [];
+                    try {
+                        servers = (await rs?.json())?.servers ?? [];
+                    } catch {}
+                    const svByUrl = new Map(servers.map((x) => [x.url, x]));
                     $("sBackends").textContent = s.totalBackends;
                     $("sHealthy").textContent = s.healthyBackends;
                     $("sInflight").textContent = s.totalInFlight;
@@ -601,6 +646,18 @@
                     $("rows").innerHTML = s.backends
                         .map((b) => {
                             const roles = roleCells(b);
+                            const sv = svByUrl.get(b.url);
+                            let power = '<span class="muted">–</span>';
+                            if (sv) {
+                                if (sv.running) {
+                                    const loading = !b.healthy
+                                        ? '<span class="pw-loading">로딩중…</span>'
+                                        : "";
+                                    power = `${loading}<button class="pw-btn pw-stop" data-name="${escAttr(sv.name)}">종료</button>`;
+                                } else {
+                                    power = `<button class="pw-btn pw-start" data-name="${escAttr(sv.name)}">기동</button>`;
+                                }
+                            }
                             return `
           <tr>
             <td>${b.url}</td>
@@ -610,6 +667,7 @@
             <td>${roles.router}</td>
             <td class="model" title="${b.model ?? ""}">${b.model ? b.model.split(/[\\/]/).pop() : '<span class="muted">–</span>'}</td>
             <td><span class="pill ${b.healthy ? "up" : "down"}"><span class="dot"></span>${b.healthy ? "정상" : "다운"}</span></td>
+            <td>${power}</td>
             <td class="num">${b.inFlight}<div class="bar"><span style="width:${(b.inFlight / maxLoad) * 100}%"></span></div></td>
             <td class="num">${b.routerRequests ?? 0}</td>
             <td class="num">${b.chatRequests ?? 0}</td>
@@ -631,9 +689,38 @@
                         "갱신 " + new Date().toLocaleTimeString();
                 } catch (e) {
                     $("rows").innerHTML =
-                        `<tr><td colspan="14" class="err">상태 조회 실패: ${e.message}</td></tr>`;
+                        `<tr><td colspan="15" class="err">상태 조회 실패: ${e.message}</td></tr>`;
                 }
             }
+
+            // 모델 서버 기동/종료 버튼
+            document.querySelector("table").addEventListener("click", async (e) => {
+                const btn = e.target.closest(".pw-btn");
+                if (!btn || powerBusy) return;
+                const name = btn.dataset.name;
+                const action = btn.classList.contains("pw-stop") ? "stop" : "start";
+                if (
+                    action === "stop" &&
+                    !confirm(`"${name}" 모델 서버를 종료할까요?\nVRAM/메모리가 해제되고, 해당 백엔드는 다운 상태가 됩니다.`)
+                )
+                    return;
+                powerBusy = true;
+                btn.disabled = true;
+                btn.textContent = action === "stop" ? "종료 중…" : "기동 중…";
+                try {
+                    const r = await fetch(
+                        `/api/servers/${encodeURIComponent(name)}/${action}`,
+                        { method: "POST" },
+                    );
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) alert(d.error || "요청 실패");
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    powerBusy = false;
+                    refresh();
+                }
+            });
 
             // ===== 티어 라우팅 효과 (절감 통계) =====
             const TIER_COLORS = {
