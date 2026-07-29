@@ -184,6 +184,10 @@ foreach ($s in $servers) {
     $mmproj = Join-Path $root $s.mmproj
     if (Test-Path $mmproj) { $args += @("--mmproj", $mmproj) }
   }
+  # RAG 임베딩: --embeddings + OAI 호환 pooling
+  if ($s.embedding -eq $true -or $s.embedding -eq "true" -or $s.embedding -eq 1) {
+    $args += @("--embeddings", "--pooling", "mean")
+  }
   if ($s.gpu -ne $null -and $s.gpu -ne "") { $env:CUDA_VISIBLE_DEVICES = "$($s.gpu)" }
 
   $log = Join-Path $logDir "server-$($s.port).log"

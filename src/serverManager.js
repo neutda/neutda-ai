@@ -835,6 +835,10 @@ export async function startServer(def) {
             const mmproj = path.join(ROOT, def.mmproj);
             if (existsSync(mmproj)) args.push("--mmproj", mmproj);
         }
+        // RAG 임베딩: --embeddings + OAI 호환 pooling (없으면 501 / pooling none 400)
+        if (def.embedding === true) {
+            args.push("--embeddings", "--pooling", "mean");
+        }
 
         await mkdir(LOG_DIR, { recursive: true });
         const out = openSync(path.join(LOG_DIR, `server-${def.port}.log`), "a");

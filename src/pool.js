@@ -68,12 +68,11 @@ class Backend {
         this.lastCheck = null;
     }
 
-    /** 전용 인프라 역할이 켜져 있으면 해결(답변) 풀에서 제외 */
+    /** 전용 인프라 역할이 켜져 있으면 해결(답변) 풀에서 제외 (embedding 은 겸용 가능) */
     get exclusiveInfra() {
         return (
             this.routerEnabled ||
             this.plannerEnabled ||
-            this.embeddingEnabled ||
             this.securityEnabled
         );
     }
@@ -867,7 +866,22 @@ class Pool {
             }
         }
 
-        throw lastErr ?? new Error("스트리밍 가능한 백엔드를 찾지 못했습니다.");
+        const healthyCount = this.backends.filter(
+            (b) => b.healthy && b.canChat,
+        ).length;
+        if (healthyCount === 0) {
+            throw new Error(
+                "사용 가능한 llama-server 백엔드가 없습니다(모두 비정상 또는 해결 역할 비활성).",
+            );
+        }
+        throw (
+            lastErr ??
+            new Error(
+                preferredTier
+                    ? `스트리밍 가능한 ${preferredTier} 백엔드를 찾지 못했습니다(해결 풀에 해당 티어가 없거나 전용 역할만 켜져 있음).`
+                    : "스트리밍 가능한 백엔드를 찾지 못했습니다.",
+            )
+        );
     }
 
     /**
@@ -903,7 +917,15 @@ class Pool {
                 backend.totalErrors++;
                 backend.lastError = err.message;
                 lastErr = err;
-                if (!err.retryable) throw err;
+                // --embeddings 미기동 등: 임베딩만 끄고 채팅 health 는 유지
+                if (err.notSupported || err.status === 501) {
+                    backend.embeddingEnabled = false;
+                    logger.warn(
+                        `임베딩 미지원 → 해당 백엔드 임베딩 비활성 (${backend.url}): ${err.message}`,
+                    );
+                    continue;
+                }
+                if (!err.retryable) break;
                 backend.healthy = false;
                 logger.warn(
                     `임베딩 실패 → 페일오버 (${backend.url}): ${err.message}`,
@@ -912,7 +934,10 @@ class Pool {
                 backend.inFlight--;
             }
         }
-        if (lastErr) throw lastErr;
+        // 임베딩 실패해도 RAG 키워드 검색으로 넘어갈 수 있게 null 반환 (chat health 유지)
+        if (lastErr) {
+            logger.warn(`임베딩 사용 불가: ${lastErr.message}`);
+        }
         return null;
     }
 
@@ -1074,11 +1099,11 @@ ${policy.slice(0, 6000)}`;
             t.total++;
             if (b.healthy) t.healthy++;
             // 전용 인프라 역할은 해결 풀에서 제외 → active 로 세지 않는다.
+            // embedding 은 해결과 겸용 가능하므로 active 에 포함한다.
             if (
                 (b.roles?.solve ?? b.roles?.chat) &&
                 !b.roles?.router &&
                 !b.roles?.planner &&
-                !b.roles?.embedding &&
                 !b.roles?.security
             ) {
                 t.active++;
@@ -1095,7 +1120,6 @@ ${policy.slice(0, 6000)}`;
                     (r.solve ?? r.chat) &&
                     !r.router &&
                     !r.planner &&
-                    !r.embedding &&
                     !r.security &&
                     CHAT_TIERS.has(b.tier)
                 );

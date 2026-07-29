@@ -18,13 +18,12 @@ export const FIXED_ROLES = [
     "security",
 ];
 
-/** 켜면 해결(답변) 풀에서 제외되는 전용 역할 */
-export const EXCLUSIVE_FIXED_ROLES = [
-    "router",
-    "planner",
-    "embedding",
-    "security",
-];
+/**
+ * 켜면 해결(답변) 풀에서 제외되는 전용 역할.
+ * embedding 은 제외하지 않음 — 비전·대형 모델이 임베딩+답변을 겸하는 경우가 흔함.
+ * 임베딩 전용으로 쓰려면 solve 를 끄면 된다.
+ */
+export const EXCLUSIVE_FIXED_ROLES = ["router", "planner", "security"];
 
 /** API·저장용 정규 이름 */
 export function normalizeFixedRole(role) {

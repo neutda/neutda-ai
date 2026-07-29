@@ -1906,7 +1906,13 @@
                     return;
                 }
 
-                // 스트리밍: 토큰을 실시간 표시하고 완료 시 출처까지 렌더
+                // 스트리밍: 검색 상태부터 바로 표시 → 토큰 실시간 → 완료 시 출처
+                el.classList.remove("err");
+                el.innerHTML =
+                    '<div class="rag-status" style="color:var(--muted);font-size:.9em;margin-bottom:.4em">문서 검색 중…</div><span class="stream-text"></span><span class="cursor">▋</span>';
+                const statusEl = el.querySelector(".rag-status");
+                const textEl = el.querySelector(".stream-text");
+
                 const r = await fetch("/api/rag/ask/stream", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -1923,10 +1929,15 @@
 
                 let answer = "";
                 let done = null;
-                const textEl = startStreamText(el);
 
                 await readSse(r, (event, data) => {
-                    if (event === "token") {
+                    if (event === "status") {
+                        if (statusEl)
+                            statusEl.textContent =
+                                data.message || statusEl.textContent;
+                        scrollDown();
+                    } else if (event === "token") {
+                        if (statusEl) statusEl.remove();
                         answer += data.text;
                         textEl.innerHTML = renderMd(answer);
                         scrollDown();

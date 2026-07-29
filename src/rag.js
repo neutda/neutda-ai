@@ -162,21 +162,37 @@ function cosine(a, b) {
     return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-async function ensureChunkEmbeddings(list) {
+/**
+ * 아직 벡터가 없는 청크만 배치 임베딩.
+ * @param {{ maxBatches?: number }} opts maxBatches 로 요청 경로에서 상한을 둘 수 있음
+ */
+async function ensureChunkEmbeddings(list, opts = {}) {
     if (!embedBatch) return false;
     const need = list.filter((c) => !Array.isArray(c.embedding));
     if (!need.length) return list.some((c) => Array.isArray(c.embedding));
     const BATCH = 8;
-    for (let i = 0; i < need.length; i += BATCH) {
+    const maxBatches =
+        Number.isFinite(opts.maxBatches) && opts.maxBatches >= 0
+            ? opts.maxBatches
+            : Infinity;
+    let batches = 0;
+    for (let i = 0; i < need.length && batches < maxBatches; i += BATCH) {
         const slice = need.slice(i, i + BATCH);
         const vectors = await embedBatch(slice.map((c) => c.text));
         if (!vectors?.length) return false;
         for (let j = 0; j < slice.length; j++) {
             if (Array.isArray(vectors[j])) slice[j].embedding = vectors[j];
         }
+        batches++;
     }
     await persist();
-    return true;
+    return list.some((c) => Array.isArray(c.embedding));
+}
+
+/** 업로드 직후·백그라운드용: 전체 청크 임베딩 (요청 경로에서 await 하지 말 것) */
+export async function warmEmbeddings() {
+    await load();
+    return ensureChunkEmbeddings(chunks);
 }
 
 export async function load() {
@@ -338,28 +354,36 @@ export function retrieve(query, k = 4) {
         .map((s) => hitFrom(s.c, s.score, "bm25"));
 }
 
-/** 임베딩 역할이 있으면 의미 검색, 없거나 실패 시 BM25 */
+/**
+ * 임베딩이 충분히 준비된 청크만 의미 검색, 아니면 즉시 BM25.
+ * 요청마다 전체 코퍼스 임베딩을 await 하지 않는다 (스트리밍 TTFT 보호).
+ */
 export async function retrieveAsync(query, k = 4) {
     await load();
     if (!chunks.length) return [];
-    if (embedBatch) {
-        try {
-            await ensureChunkEmbeddings(chunks);
-            const qVecs = await embedBatch([String(query)]);
-            const qv = qVecs?.[0];
-            if (Array.isArray(qv)) {
-                const scored = chunks
-                    .filter((c) => Array.isArray(c.embedding))
-                    .map((c) => ({ c, score: cosine(qv, c.embedding) }))
-                    .filter((s) => s.score > 0.05)
-                    .sort((a, b) => b.score - a.score)
-                    .slice(0, k)
-                    .map((s) => hitFrom(s.c, s.score, "embedding"));
-                if (scored.length) return scored;
-            }
-        } catch {
-            /* BM25 폴백 */
+    const embedded = chunks.filter((c) => Array.isArray(c.embedding));
+    const coverage = chunks.length ? embedded.length / chunks.length : 0;
+
+    // 벡터 커버리지 낮으면 BM25 즉시.
+    // 요청 경로에서 임베딩/워밍을 돌리지 않음 — 같은 GPU large 와 스트리밍이 경합함.
+    if (!embedBatch || coverage < 0.5 || !embedded.length) {
+        return retrieve(query, k);
+    }
+
+    try {
+        const qVecs = await embedBatch([String(query)]);
+        const qv = qVecs?.[0];
+        if (Array.isArray(qv)) {
+            const scored = embedded
+                .map((c) => ({ c, score: cosine(qv, c.embedding) }))
+                .filter((s) => s.score > 0.05)
+                .sort((a, b) => b.score - a.score)
+                .slice(0, k)
+                .map((s) => hitFrom(s.c, s.score, "embedding"));
+            if (scored.length) return scored;
         }
+    } catch {
+        /* BM25 폴백 */
     }
     return retrieve(query, k);
 }

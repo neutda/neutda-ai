@@ -2195,19 +2195,23 @@ async function chooseRagRoute({ q, hits, questionContent, body }) {
         hits.reduce((s, h) => s + h.text.length + 40, 0) +
         q.length +
         RAG_PROMPT_OVERHEAD;
-    if (promptChars <= config.maxPromptCharsSmall) {
+    // 해결 풀에 GPU large 가 있으면 우선(CPU medium 대비 TTFT↑). 없으면 medium 폴백.
+    const preferLarge = pool.backends.some(
+        (b) => b.tier === "large" && b.healthy && b.canChat,
+    );
+    if (preferLarge) {
         return {
-            tier: "medium",
+            tier: "large",
             device: null,
             allowOtherTiers: config.escalateTier,
-            reason: `텍스트 출처 ${hits.length}개, 프롬프트 ${promptChars}자 ≤ medium 예산(${config.maxPromptCharsSmall})`,
+            reason: `텍스트 출처 ${hits.length}개, 프롬프트 ${promptChars}자 → GPU large 우선(스트리밍)`,
         };
     }
     return {
-        tier: "large",
+        tier: "medium",
         device: null,
-        allowOtherTiers: false,
-        reason: `텍스트 출처 ${hits.length}개, 프롬프트 ${promptChars}자 > medium 예산(${config.maxPromptCharsSmall})`,
+        allowOtherTiers: config.escalateTier,
+        reason: `텍스트 출처 ${hits.length}개, 프롬프트 ${promptChars}자 → large 없음, medium`,
     };
 }
 
@@ -2219,7 +2223,7 @@ async function ragChat({ q, hits, strict, questionContent, system, temperature =
         temperature,
         maxTokens:
             tier === "large" ? config.defaultMaxTokens : config.maxTokensSmall,
-        enableThinking: config.enableThinking,
+        enableThinking: false,
         preferredTier: tier,
         preferredDevice: route?.device ?? null,
         allowOtherTiers: route?.allowOtherTiers ?? false,
@@ -2553,11 +2557,15 @@ app.post("/api/rag/ask/stream", async (req, res) => {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders?.();
     const send = (event, data) =>
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
     try {
+        // 검색·생성 전에 상태를 먼저 밀어 TTFT 체감 지연을 줄인다.
+        send("status", { phase: "retrieve", message: "문서 검색 중…" });
+
         await rag.load();
         const q =
             typeof req.body?.q === "string"
@@ -2587,6 +2595,7 @@ app.post("/api/rag/ask/stream", async (req, res) => {
 
         // 검색된 출처를 생성 시작 전에 먼저 보여준다.
         send("meta", { strict, sources });
+        send("status", { phase: "generate", message: "답변 생성 중…" });
 
         // strict 모드에서 관련 문서가 없으면 즉시 종료
         if (!hits.length && strict) {
@@ -2625,7 +2634,8 @@ app.post("/api/rag/ask/stream", async (req, res) => {
                 route.tier === "large"
                     ? config.defaultMaxTokens
                     : config.maxTokensSmall,
-            enableThinking: config.enableThinking,
+            // RAG 는 추론 토큰 대기 없이 바로 content 스트리밍
+            enableThinking: false,
             preferredTier: route.tier,
             preferredDevice: route.device ?? null,
             allowOtherTiers: route.allowOtherTiers,

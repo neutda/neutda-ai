@@ -1,11 +1,12 @@
 import { config } from "./config.js";
 
 class LlamaError extends Error {
-  constructor(message, { retryable = false, status } = {}) {
+  constructor(message, { retryable = false, status, notSupported = false } = {}) {
     super(message);
     this.name = "LlamaError";
     this.retryable = retryable;
     this.status = status;
+    this.notSupported = Boolean(notSupported);
   }
 }
 
@@ -225,9 +226,14 @@ export async function createEmbeddings({ baseUrl, input, model }) {
 
   const text = await response.text();
   if (!response.ok) {
+    // 미지원/설정 오류: 채팅 health 를 내리지 않음 (페일오버만)
+    const notSupported =
+      response.status === 501 ||
+      /not_supported|does not support embeddings|Pooling type/i.test(text);
     throw new LlamaError(`임베딩 오류 (${response.status}): ${text.slice(0, 300)}`, {
-      retryable: response.status >= 500,
+      retryable: response.status >= 500 && !notSupported,
       status: response.status,
+      notSupported,
     });
   }
   let data;
