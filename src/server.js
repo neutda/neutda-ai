@@ -6,6 +6,14 @@ import { config } from "./config.js";
 import { toImageUrl } from "./image.js";
 import { pool } from "./pool.js";
 import { chooseRoute } from "./router.js";
+import {
+    createPlan,
+    runWorkflow,
+    hasSecurityWorkflow,
+    runSecurityPreFinal,
+    isTrivialQuestion,
+} from "./workflow.js";
+import { needsLongPipeline, runLongContent, chunkText } from "./longContent.js";
 import { appendHistory, readHistory, clearHistory } from "./history.js";
 import { getMetrics } from "./metrics.js";
 import { logger, getLogs } from "./logger.js";
@@ -16,13 +24,114 @@ import { loadStats, getStats } from "./stats.js";
 import { parseRouterJson } from "./llmRouter.js";
 import {
     loadServerDefs,
+    loadModelConfig,
     serverStatus,
     startServer,
     stopServer,
     addServerDef,
     removeServerDef,
+    updateServerDef,
+    persistFixedRole,
+    persistSecurityPolicy,
+    sortDefsByPriority,
+    estimateVram,
+    getGpuFreeMb,
+    stripRoleIdFromServers,
+    stripSecurityIdFromServers,
+    enrichServerWithRoles,
 } from "./serverManager.js";
+import {
+    loadRoles,
+    createRole,
+    updateRole,
+    deleteRole,
+    resolveServerRoles,
+    rolesById,
+    loadRolesSync,
+} from "./roles.js";
+import {
+    loadSecurityPolicies,
+    createSecurityPolicy,
+    updateSecurityPolicy,
+    deleteSecurityPolicy,
+    resolveServerSecurity,
+} from "./securityPolicies.js";
+import { FIXED_ROLES, isFixedRole } from "./fixedRoles.js";
 import multer from "multer";
+
+/** 보안 게이트 이벤트 (파이프라인 step 과 분리) */
+function securityEventBridge(send) {
+    return (ev) => {
+        if (ev.type === "security_start" || ev.type === "security_done") {
+            send("security", ev);
+        } else if (ev.type === "token") {
+            send("token", { text: ev.text });
+        }
+    };
+}
+
+/**
+ * 최종 답변 보안 게이트. 파이프라인 steps 에 넣지 않는다.
+ * @returns {{ answer, traceExtra, allow, skipped }}
+ */
+async function withSecurityPreFinal(q, draft, opts = {}) {
+    if (!hasSecurityWorkflow() || isTrivialQuestion({ ROLE_USER: q })) {
+        return {
+            answer: draft,
+            traceExtra: [],
+            allow: true,
+            skipped: true,
+        };
+    }
+    const sec = await runSecurityPreFinal({
+        userQ: q,
+        draft,
+        onEvent: opts.onEvent,
+        stepIndex: opts.stepIndex ?? 0,
+    });
+    return {
+        answer: sec.answer,
+        traceExtra: sec.stepRec ? [sec.stepRec] : [],
+        allow: sec.allow,
+        skipped: Boolean(sec.skipped),
+    };
+}
+
+/** 파이프라인 steps 에서 보안 노드 제외 (배지·통계용) */
+function pipelineStepsOnly(steps) {
+    return (Array.isArray(steps) ? steps : []).filter(
+        (s) => s && s.role !== "security" && s.tier !== "security",
+    );
+}
+
+/** 서버 정의 → 풀 역할 반영 */
+function syncPoolRoles(def) {
+    const resolved = resolveServerRoles(def, rolesById(loadRolesSync()));
+    const url = `http://127.0.0.1:${def.port}`;
+    pool.setRoleAssignment(url, {
+        roleIds: resolved.roleIds,
+        customSkills: resolved.customSkills,
+        commonSkills: resolved.commonSkills,
+        skills: resolved.skills,
+    });
+    return enrichServerWithRoles(def);
+}
+
+/** roles.json 변경 후 전체 서버 풀 재동기화 */
+async function resyncAllPoolRoles() {
+    const defs = await loadServerDefs();
+    const map = rolesById(loadRolesSync());
+    for (const def of defs) {
+        const resolved = resolveServerRoles(def, map);
+        const url = `http://127.0.0.1:${def.port}`;
+        pool.setRoleAssignment(url, {
+            roleIds: resolved.roleIds,
+            customSkills: resolved.customSkills,
+            commonSkills: resolved.commonSkills,
+            skills: resolved.skills,
+        });
+    }
+}
 
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -81,8 +190,12 @@ async function buildMessages(body, promptCharBudget = Infinity) {
     const messages = [];
     const sysText =
         typeof system === "string" && system.trim() !== "" ? system : "";
-    if (sysText) {
-        messages.push({ role: "system", content: sysText });
+    // 사용자 시스템 지시 + 언어 정책(중국어 드리프트 방지)을 합쳐 시스템 메시지 구성
+    const sysParts = [];
+    if (sysText) sysParts.push(sysText);
+    if (config.enforceLanguage) sysParts.push(config.langDirective);
+    if (sysParts.length) {
+        messages.push({ role: "system", content: sysParts.join("\n\n") });
     }
 
     // 이전 대화(메모리)를 컨텍스트 초과가 나지 않도록 최신 순으로 예산만큼만 삽입한다.
@@ -106,11 +219,15 @@ async function buildMessages(body, promptCharBudget = Infinity) {
         messages.push({ role: turn.role, content: turn.content });
     }
 
+    // 약한 모델(0.5B/3B)은 시스템 지시만으론 언어가 흔들리므로,
+    // 질문이 한국어면 사용자 메시지 끝에 한국어 강제 문구를 덧붙인다(생성 직전 recency).
+    const userText = user + koreanReminder(user);
+
     const hasImage =
         content !== undefined && content !== null && content !== "";
     if (hasImage) {
         const images = Array.isArray(content) ? content : [content];
-        const parts = [{ type: "text", text: user }];
+        const parts = [{ type: "text", text: userText }];
         for (const img of images) {
             parts.push({
                 type: "image_url",
@@ -119,10 +236,18 @@ async function buildMessages(body, promptCharBudget = Infinity) {
         }
         messages.push({ role: "user", content: parts });
     } else {
-        messages.push({ role: "user", content: user });
+        messages.push({ role: "user", content: userText });
     }
 
     return messages;
+}
+
+// 한국어 질문이면 답변 언어를 못박는 짧은 리마인더 (약한 모델의 중국어 드리프트 방지)
+function koreanReminder(text) {
+    if (!config.enforceLanguage) return "";
+    return /[가-힣]/.test(String(text ?? ""))
+        ? "\n\n(답변은 반드시 한국어로만 작성하고, 중국어를 섞지 마세요.)"
+        : "";
 }
 
 app.get("/health", (_req, res) => {
@@ -151,12 +276,509 @@ app.get("/api/stats", (_req, res) => {
     res.json(getStats());
 });
 
+// ===== 파이프라인(멀티모델 워크플로우) ================================
+
+const TIERS = ["small", "medium", "large"];
+
+/** 긴 입력 맵리듀스 실행인지 (일반 파이프라인과 구분) */
+function isLongRun(entry) {
+    return String(entry?.routeReason ?? "").startsWith("긴 입력");
+}
+
+function planRouterMeta(plan) {
+    return {
+        backend: plan.routerBackend || null,
+        tier: plan.routerTier || null,
+        alias: plan.routerAlias || null,
+        device: plan.routerDevice || null,
+        model: plan.routerModel || null,
+    };
+}
+
+function planPlannerMeta(plan) {
+    return {
+        role: plan.plannerRole || null,
+        backend: plan.plannerBackend || null,
+        tier: plan.plannerTier || null,
+        alias: plan.plannerAlias || null,
+        device: plan.plannerDevice || null,
+        model: plan.plannerModel || null,
+    };
+}
+
+/**
+ * 답변을 생성하지 않고 라우터 분류 + 파이프라인 설계만 확인한다.
+ */
+app.post("/api/workflow/plan", async (req, res) => {
+    const q = typeof req.body?.ROLE_USER === "string" ? req.body.ROLE_USER : "";
+    if (!q.trim()) {
+        return res.status(400).json({ error: "ROLE_USER(질문)을 입력하세요." });
+    }
+    const body = {
+        ROLE_USER: q,
+        ROLE_SYSTEM:
+            typeof req.body?.ROLE_SYSTEM === "string" ? req.body.ROLE_SYSTEM : "",
+        THINKING: req.body?.THINKING === true,
+    };
+    const wanted = String(req.body?.WORKFLOW ?? "").toLowerCase();
+    if (wanted === "on" || wanted === "off") body.WORKFLOW = wanted;
+    const tier = String(req.body?.MODEL_TIER ?? "").toLowerCase();
+    if (TIERS.includes(tier)) body.MODEL_TIER = tier;
+
+    const base = {
+        requestedMode: wanted || "auto(config)",
+        configMode: config.workflowMode,
+        routerActive: pool.hasActiveRouter(),
+        plannerActive: pool.hasActivePlanner(),
+        inputChars: q.length + body.ROLE_SYSTEM.length,
+        skillOptions: pool.skillOptions(),
+    };
+
+    // 실제 요청은 createPlan 앞에서 긴 입력 파이프라인으로 갈라진다 — 미리보기도 동일하게.
+    if (needsLongPipeline(body)) {
+        const chunks = chunkText(q);
+        const steps = [
+            ...chunks.map((_, i) => ({
+                tier: config.longMapTier,
+                role: "extract",
+                instruction: `조각 ${i + 1}/${chunks.length} 핵심 추출`,
+            })),
+            {
+                tier: config.longReduceTier,
+                role: "synthesize",
+                instruction: "부분 결과 종합 → 최종 답",
+            },
+        ];
+        return res.json({
+            ...base,
+            ms: 0,
+            pipeline: "long",
+            mode: "workflow",
+            tier: config.longReduceTier,
+            difficulty: 100,
+            reason: `긴 입력 ${base.inputChars}자 > ${config.longTriggerChars}자 → ${chunks.length}청크 맵리듀스`,
+            router: null,
+            long: {
+                chunks: chunks.length,
+                chunkChars: config.longChunkChars,
+                overlap: config.longChunkOverlap,
+                mapTier: config.longMapTier,
+                reduceTier: config.longReduceTier,
+                mapConcurrency: config.longMapConcurrency,
+            },
+            steps,
+        });
+    }
+
+    const started = Date.now();
+    try {
+        const plan = await createPlan(body);
+        res.json({
+            ...base,
+            ms: Date.now() - started,
+            pipeline: plan.mode === "workflow" ? "workflow" : "direct",
+            mode: plan.mode,
+            tier: plan.tier,
+            skill: plan.skill ?? null,
+            difficulty: plan.difficulty,
+            device: plan.device,
+            deviceReason: plan.deviceReason,
+            reason: plan.reason,
+            router: planRouterMeta(plan),
+            planner: planPlannerMeta(plan),
+            steps: plan.steps ?? [],
+        });
+    } catch (err) {
+        logger.warn(`플랜 미리보기 실패: ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/** 평균값 계산용 누산기 */
+function bucket(map, key) {
+    let b = map.get(key);
+    if (!b) {
+        b = { key, runs: 0, steps: 0, totalMs: 0, skipped: 0 };
+        map.set(key, b);
+    }
+    return b;
+}
+
+function avg(b) {
+    return b.steps ? Math.round(b.totalMs / b.steps) : null;
+}
+
+/**
+ * 티어 흐름 라벨. 긴 입력은 같은 티어가 수십 번 반복되므로 연속 구간을 접는다.
+ * ["medium" x62, "large"] → "medium ×62 → large"
+ */
+function flowLabel(steps) {
+    const out = [];
+    for (const s of steps) {
+        const tier = s?.tier || "?";
+        const last = out[out.length - 1];
+        if (last?.tier === tier) last.n++;
+        else out.push({ tier, n: 1 });
+    }
+    return out.map((g) => (g.n > 1 ? `${g.tier} ×${g.n}` : g.tier)).join(" → ");
+}
+
+function meanOf(runs, pick) {
+    if (!runs.length) return null;
+    return runs.reduce((a, r) => a + pick(r), 0) / runs.length;
+}
+
+/**
+ * history.jsonl 의 파이프라인 실행을 집계한다.
+ * 단계별 지연은 workflowSteps[].ms 기준 (direct 실행은 소요시간을 저장하지 않아 건수만 비교).
+ * 단계 순번·흐름 통계는 긴 입력 맵리듀스(청크 수만큼 단계가 늘어남)와 분리해 계산한다.
+ */
+function summarizeWorkflowRuns(items) {
+    const byIndex = new Map();
+    const byTier = new Map();
+    const byRole = new Map();
+    const flows = new Map();
+    const runs = [];
+    let direct = 0;
+
+    for (const it of items) {
+        const steps = Array.isArray(it.workflowSteps) ? it.workflowSteps : null;
+        if (it.mode !== "workflow" || !steps?.length) {
+            direct++;
+            continue;
+        }
+        const longRun = isLongRun(it);
+
+        let totalMs = 0;
+        for (let i = 0; i < steps.length; i++) {
+            const s = steps[i];
+            const ms = Number(s?.ms) || 0;
+            totalMs += ms;
+            const targets = [
+                bucket(byTier, s?.tier || "unknown"),
+                bucket(byRole, s?.role || "step"),
+            ];
+            // 순번별 지연은 일반 파이프라인만 (긴 입력의 순번 = 청크 번호)
+            if (!longRun) targets.push(bucket(byIndex, i + 1));
+            for (const b of targets) {
+                b.steps++;
+                b.totalMs += ms;
+                if (ms === 0) b.skipped++;
+            }
+        }
+
+        const flow = flowLabel(steps);
+        if (!longRun) {
+            const f = bucket(flows, flow);
+            f.runs++;
+            f.totalMs += totalMs;
+            f.steps += steps.length;
+        }
+
+        runs.push({
+            id: it.id,
+            ts: it.ts,
+            kind: longRun ? "long" : "workflow",
+            question: String(it.user ?? "").slice(0, 120),
+            questionChars: String(it.user ?? "").length,
+            flow,
+            stepCount: steps.length,
+            totalMs,
+            difficulty: it.difficulty ?? null,
+            routerAlias: it.routerAlias || it.routerTier || null,
+            reason: it.routeReason || null,
+        });
+    }
+
+    const wf = runs.filter((r) => r.kind === "workflow");
+    const lg = runs.filter((r) => r.kind === "long");
+    const round1 = (n) => (n == null ? null : Math.round(n * 10) / 10);
+    const roundMs = (n) => (n == null ? null : Math.round(n));
+
+    return {
+        window: {
+            entries: items.length,
+            since: items[0]?.ts ?? null,
+            until: items[items.length - 1]?.ts ?? null,
+        },
+        counts: {
+            direct,
+            workflow: wf.length,
+            long: lg.length,
+            pipelineRuns: runs.length,
+            pipelinePct:
+                direct + runs.length > 0
+                    ? Math.round((runs.length / (direct + runs.length)) * 100)
+                    : null,
+        },
+        averages: {
+            workflow: {
+                steps: round1(meanOf(wf, (r) => r.stepCount)),
+                totalMs: roundMs(meanOf(wf, (r) => r.totalMs)),
+            },
+            long: {
+                steps: round1(meanOf(lg, (r) => r.stepCount)),
+                totalMs: roundMs(meanOf(lg, (r) => r.totalMs)),
+            },
+        },
+        byIndex: [...byIndex.values()]
+            .map((b) => ({ ...b, avgMs: avg(b) }))
+            .sort((a, b) => a.key - b.key),
+        byTier: TIERS.map((t) => {
+            const b = byTier.get(t) ?? {
+                key: t,
+                runs: 0,
+                steps: 0,
+                totalMs: 0,
+                skipped: 0,
+            };
+            return { ...b, avgMs: avg(b) };
+        }),
+        byRole: [...byRole.values()]
+            .map((b) => ({ ...b, avgMs: avg(b) }))
+            .sort((a, b) => b.steps - a.steps),
+        flows: [...flows.values()]
+            .map((b) => ({
+                flow: b.key,
+                runs: b.runs,
+                avgMs: b.runs ? Math.round(b.totalMs / b.runs) : null,
+            }))
+            .sort((a, b) => b.runs - a.runs)
+            .slice(0, 8),
+        runs: runs.reverse(),
+    };
+}
+
+// 파이프라인 실행 통계 (history.jsonl 집계)
+app.get("/api/workflow/stats", async (req, res) => {
+    try {
+        const limit = Number(req.query.limit);
+        const items = await readHistory(
+            Number.isFinite(limit) && limit > 0 ? limit : 300,
+        );
+        res.json({
+            configMode: config.workflowMode,
+            routerActive: pool.hasActiveRouter(),
+            ...summarizeWorkflowRuns(items),
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 파이프라인 실행 1건 상세 (라우터 계획 + 단계별 입출력)
+app.get("/api/workflow/runs/:id", async (req, res) => {
+    try {
+        const items = await readHistory();
+        const it = items.find((x) => x.id === req.params.id);
+        if (!it) return res.status(404).json({ error: "실행 기록이 없습니다." });
+        res.json({
+            id: it.id,
+            ts: it.ts,
+            kind: isLongRun(it) ? "long" : "workflow",
+            mode: it.mode,
+            question: it.user ?? "",
+            system: it.system ?? "",
+            answer: it.answer ?? "",
+            difficulty: it.difficulty ?? null,
+            reason: it.routeReason ?? null,
+            router: {
+                backend: it.routerBackend ?? null,
+                tier: it.routerTier ?? null,
+                alias: it.routerAlias ?? null,
+                device: it.routerDevice ?? null,
+                model: it.routerModel ?? null,
+            },
+            trace: Array.isArray(it.workflowTrace) ? it.workflowTrace : [],
+            steps: Array.isArray(it.workflowSteps) ? it.workflowSteps : [],
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ===== 공통 역할 카탈로그 (roles.json) ================================
+
+app.get("/api/roles", async (_req, res) => {
+    try {
+        const roles = await loadRoles();
+        res.json({ roles });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/api/roles", async (req, res) => {
+    try {
+        const role = await createRole({
+            name: req.body?.name,
+            description: req.body?.description,
+        });
+        logger.info(`공통 역할 추가 ＋ "${role.name}" (${role.id})`);
+        res.json({ ok: true, role });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.patch("/api/roles/:id", async (req, res) => {
+    try {
+        const patch = {};
+        const has = (k) =>
+            Object.prototype.hasOwnProperty.call(req.body ?? {}, k);
+        if (has("name")) patch.name = req.body.name;
+        if (has("description")) patch.description = req.body.description;
+        if (!Object.keys(patch).length) {
+            return res
+                .status(400)
+                .json({ error: "수정할 필드가 없습니다. (name, description)" });
+        }
+        const role = await updateRole(req.params.id, patch);
+        if (!role) {
+            return res.status(404).json({ error: "역할을 찾을 수 없습니다." });
+        }
+        await resyncAllPoolRoles();
+        logger.info(`공통 역할 수정 ✎ "${role.name}" (${role.id})`);
+        res.json({ ok: true, role });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.delete("/api/roles/:id", async (req, res) => {
+    try {
+        const ok = await deleteRole(req.params.id);
+        if (!ok) {
+            return res.status(404).json({ error: "역할을 찾을 수 없습니다." });
+        }
+        await stripRoleIdFromServers(req.params.id);
+        await resyncAllPoolRoles();
+        logger.info(`공통 역할 삭제 － ${req.params.id}`);
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ===== 보안 정책 카탈로그 (security.json) ==============================
+
+async function resyncAllPoolSecurity() {
+    const defs = await loadServerDefs();
+    for (const def of defs) {
+        const url = `http://127.0.0.1:${def.port}`;
+        const sec = resolveServerSecurity(def);
+        pool.setSecurityAssignment(url, {
+            securityIds: sec.securityIds,
+            securityPolicy: sec.securityPolicyText,
+        });
+        if (def.security === true) {
+            pool.setRoleEnabled(url, "security", true);
+        }
+    }
+}
+
+app.get("/api/security-policies", async (_req, res) => {
+    try {
+        const policies = await loadSecurityPolicies();
+        res.json({ policies });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/api/security-policies", async (req, res) => {
+    try {
+        const policy = await createSecurityPolicy({
+            name: req.body?.name,
+            description: req.body?.description,
+            body: req.body?.body ?? req.body?.policy,
+        });
+        logger.info(`보안 정책 추가 ＋ "${policy.name}" (${policy.id})`);
+        res.json({ ok: true, policy });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.patch("/api/security-policies/:id", async (req, res) => {
+    try {
+        const patch = {};
+        const has = (k) =>
+            Object.prototype.hasOwnProperty.call(req.body ?? {}, k);
+        if (has("name")) patch.name = req.body.name;
+        if (has("description")) patch.description = req.body.description;
+        if (has("body")) patch.body = req.body.body;
+        else if (has("policy")) patch.body = req.body.policy;
+        if (!Object.keys(patch).length) {
+            return res.status(400).json({
+                error: "수정할 필드가 없습니다. (name, description, body)",
+            });
+        }
+        const policy = await updateSecurityPolicy(req.params.id, patch);
+        if (!policy) {
+            return res
+                .status(404)
+                .json({ error: "보안 정책을 찾을 수 없습니다." });
+        }
+        await resyncAllPoolSecurity();
+        logger.info(`보안 정책 수정 ✎ "${policy.name}" (${policy.id})`);
+        res.json({ ok: true, policy });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.delete("/api/security-policies/:id", async (req, res) => {
+    try {
+        const ok = await deleteSecurityPolicy(req.params.id);
+        if (!ok) {
+            return res
+                .status(404)
+                .json({ error: "보안 정책을 찾을 수 없습니다." });
+        }
+        await stripSecurityIdFromServers(req.params.id);
+        await resyncAllPoolSecurity();
+        logger.info(`보안 정책 삭제 － ${req.params.id}`);
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ===== 모델 서버(llama-server) 프로세스 제어 ==========================
+
+// 티어별 모델 카탈로그 (modelconfig.json)
+app.get("/api/modelconfig", async (_req, res) => {
+    try {
+        res.json(await loadModelConfig());
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// VRAM 필요량 추정 (ngl·ctx 반영) — 추가 폼 미리보기용
+app.post("/api/servers/estimate-vram", async (req, res) => {
+    try {
+        const est = await estimateVram({
+            name: req.body?.name || "preview",
+            model: req.body?.model,
+            mmproj: req.body?.mmproj,
+            ngl: req.body?.ngl,
+            ctx: req.body?.ctx,
+            layers: req.body?.layers,
+            gpu: req.body?.gpu,
+        });
+        const freeMb = await getGpuFreeMb(req.body?.gpu);
+        res.json({ ...est, freeMb });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
 
 // servers.json 정의 + 실행 상태(PID/健康) 목록
 app.get("/api/servers", async (_req, res) => {
     try {
-        const defs = await loadServerDefs();
+        const defs = sortDefsByPriority(await loadServerDefs());
         const list = await serverStatus(defs);
         const byUrl = new Map(pool.backends.map((b) => [b.url, b]));
         res.json({
@@ -190,12 +812,38 @@ app.post("/api/servers", async (req, res) => {
         const def = await addServerDef({
             tier,
             model: req.body?.model,
+            modelId: req.body?.modelId,
             ctx: req.body?.ctx,
             ngl: req.body?.ngl,
             gpu: req.body?.gpu,
+            alias: req.body?.alias,
+            skill: req.body?.skill,
+            skills: req.body?.skills,
+            roleIds: req.body?.roleIds,
+            mmproj: req.body?.mmproj,
         });
         const url = `http://127.0.0.1:${def.port}`;
-        pool.addBackend(url, def.tier, Number(def.ngl) > 0 ? "gpu" : "cpu");
+        const resolved = resolveServerRoles(def, rolesById(loadRolesSync()));
+        const secAssign = resolveServerSecurity(def);
+        pool.addBackend(
+            url,
+            def.tier,
+            Number(def.ngl) > 0 ? "gpu" : "cpu",
+            def.alias,
+            def.router === true,
+            resolved.skills,
+            resolved.roleIds,
+            resolved.customSkills,
+            {
+                solve: def.solve !== false && def.chat !== false,
+                router: def.router === true,
+                planner: def.planner === true,
+                embedding: def.embedding === true,
+                security: def.security === true,
+                securityIds: secAssign.securityIds,
+                securityPolicy: secAssign.securityPolicyText,
+            },
+        );
         let r;
         try {
             r = await startServer(def);
@@ -212,6 +860,59 @@ app.post("/api/servers", async (req, res) => {
     } catch (err) {
         logger.error(`모델 서버 추가 실패: ${err.message}`);
         res.status(400).json({ error: err.message });
+    }
+});
+
+// 모델 서버 정의 수정 (별칭·공통역할·커스텀역할) — servers.json 영속
+app.patch("/api/servers/:name", async (req, res) => {
+    try {
+        const patch = {};
+        const has = (k) =>
+            Object.prototype.hasOwnProperty.call(req.body ?? {}, k);
+        if (has("alias")) patch.alias = req.body.alias;
+        if (has("roleIds")) patch.roleIds = req.body.roleIds;
+        if (has("skills")) patch.skills = req.body.skills; // 커스텀 역할
+        else if (has("skill")) patch.skill = req.body.skill;
+        if (has("securityIds")) patch.securityIds = req.body.securityIds;
+        if (!Object.keys(patch).length) {
+            return res.status(400).json({
+                error: "수정할 필드가 없습니다. (alias, roleIds, skills, securityIds)",
+            });
+        }
+        const def = await updateServerDef(req.params.name, patch);
+        if (!def) {
+            return res.status(404).json({
+                error: `servers.json 에 "${req.params.name}" 정의가 없습니다.`,
+            });
+        }
+        const url = `http://127.0.0.1:${def.port}`;
+        if (has("alias")) {
+            pool.setAlias(url, def.alias);
+            logger.info(`모델 서버 별칭 변경 ✎ ${def.name} → "${def.alias}"`);
+        }
+        let server = enrichServerWithRoles(def);
+        if (has("roleIds") || has("skills") || has("skill")) {
+            server = syncPoolRoles(def);
+            logger.info(
+                `모델 서버 역할 변경 ✎ ${def.name} · 공통 ${server.roleIds.length} · 커스텀 ${server.customSkills.length}`,
+            );
+        }
+        if (has("securityIds")) {
+            const sec = resolveServerSecurity(def);
+            pool.setSecurityAssignment(url, {
+                securityIds: sec.securityIds,
+                securityPolicy: sec.securityPolicyText,
+            });
+            server = enrichServerWithRoles(def);
+            logger.info(
+                `모델 서버 보안 정책 배정 ✎ ${def.name} · ${sec.securityIds.length}개`,
+            );
+        }
+        res.json({ ok: true, server });
+    } catch (err) {
+        logger.error(`모델 서버 수정 실패 (${req.params.name}): ${err.message}`);
+        const status = /보안검증 기능이 꺼져/.test(err.message) ? 400 : 500;
+        res.status(status).json({ error: err.message });
     }
 });
 
@@ -270,8 +971,12 @@ app.post("/api/servers/:name/start", async (req, res) => {
                 .json({ error: `servers.json 에 "${req.params.name}" 정의가 없습니다.` });
         }
         const r = await startServer(def);
+        // 기동 후에도 servers.json 의 router 플래그 복원 (풀 상태 동기화)
+        if (def.router === true) {
+            pool.setRoleEnabled(`http://127.0.0.1:${def.port}`, "router", true);
+        }
         logger.info(
-            `모델 서버 기동 ▶ ${def.name} [${def.tier}] :${def.port}${r.alreadyRunning ? " (이미 실행 중)" : ` (PID ${r.pid}, 모델 로딩 중)`}`,
+            `모델 서버 기동 ▶ ${def.name} [${def.tier}] :${def.port}${r.alreadyRunning ? " (이미 실행 중)" : ` (PID ${r.pid}, 모델 로딩 중)`}${def.router ? " [router]" : ""}`,
         );
         res.json({ ok: true, name: def.name, ...r });
     } catch (err) {
@@ -280,18 +985,69 @@ app.post("/api/servers/:name/start", async (req, res) => {
     }
 });
 
-// 백엔드 역할(채팅 / 라우터) 개별 on·off
-app.post("/api/backends/role", (req, res) => {
+// 백엔드 고정 역할 개별 on·off (해결·라우터·파이프라인설계·임베딩·보안검증)
+// 모두 servers.json 에 저장 ("chat"→solve, "pipeline"→planner 별칭)
+app.post("/api/backends/role", async (req, res) => {
     const url = typeof req.body?.url === "string" ? req.body.url.trim() : "";
     const role = String(req.body?.role ?? "").toLowerCase();
     const enabled = req.body?.enabled;
-    if (!url || (role !== "chat" && role !== "router") || typeof enabled !== "boolean") {
+    if (!url || !isFixedRole(role) || typeof enabled !== "boolean") {
         return res.status(400).json({
-            error: '"url"(string), "role"("chat"|"router"), "enabled"(boolean) 이 필요합니다.',
+            error: `"url"(string), "role"(${FIXED_ROLES.map((r) => `"${r}"`).join("|")}|\"chat\"), "enabled"(boolean) 이 필요합니다.`,
         });
     }
     if (!pool.setRoleEnabled(url, role, enabled)) {
         return res.status(404).json({ error: "해당 URL 의 백엔드를 찾을 수 없습니다." });
+    }
+    try {
+        await persistFixedRole(url, role, enabled);
+        // 보안검증 토글 후 배정 정책 본문 동기화
+        if (String(role).toLowerCase() === "security" || role === "보안검증") {
+            await resyncAllPoolSecurity();
+        }
+        logger.info(
+            `고정 역할 ${role === "chat" ? "solve" : role} servers.json 저장 ✓ ${enabled ? "ON" : "OFF"} @ ${url}`,
+        );
+    } catch (e) {
+        logger.error(`고정 역할 저장 실패 (${role}): ${e.message}`);
+        return res.status(500).json({
+            error: `역할은 반영됐지만 저장 실패(재시작 시 풀릴 수 있음): ${e.message}`,
+            ...pool.status(),
+        });
+    }
+    res.json({ ok: true, ...pool.status() });
+});
+
+// 보안검증 정책 텍스트 저장
+app.post("/api/backends/security-policy", async (req, res) => {
+    const url = typeof req.body?.url === "string" ? req.body.url.trim() : "";
+    const policy =
+        typeof req.body?.policy === "string"
+            ? req.body.policy
+            : typeof req.body?.securityPolicy === "string"
+              ? req.body.securityPolicy
+              : null;
+    if (!url || policy === null) {
+        return res.status(400).json({
+            error: `"url"(string), "policy"(string) 이 필요합니다.`,
+        });
+    }
+    if (!pool.setSecurityPolicy(url, policy)) {
+        return res
+            .status(404)
+            .json({ error: "해당 URL 의 백엔드를 찾을 수 없습니다." });
+    }
+    try {
+        await persistSecurityPolicy(url, policy);
+        logger.info(
+            `보안 정책 저장 ✓ (${String(policy).trim().length}자) @ ${url}`,
+        );
+    } catch (e) {
+        logger.error(`보안 정책 저장 실패: ${e.message}`);
+        return res.status(500).json({
+            error: `메모리에는 반영됐지만 저장 실패: ${e.message}`,
+            ...pool.status(),
+        });
     }
     res.json({ ok: true, ...pool.status() });
 });
@@ -580,6 +1336,7 @@ app.get("/api/ask", async (req, res) => {
 });
 
 // 스트리밍(SSE) 채팅: 토큰을 실시간 전송하고, 마지막에 TTFT/tokens-per-sec 지표를 보낸다.
+// WORKFLOW_MODE=auto/on 이면 라우터가 파이프라인을 짜고 모델끼리 결과를 넘긴다.
 app.post("/api/chat/stream", async (req, res) => {
     const started = Date.now();
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -590,45 +1347,248 @@ app.post("/api/chat/stream", async (req, res) => {
         res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
     try {
-        const q =
-            typeof req.body?.ROLE_USER === "string" ? req.body.ROLE_USER : "";
+        const body = req.body ?? {};
+        const q = typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
         logger.info(
-            `요청 수신 [chat/stream] "${q.slice(0, 60)}" (len=${q.length}, memory=${Array.isArray(req.body?.HISTORY) ? req.body.HISTORY.length : 0}턴)`,
+            `요청 수신 [chat/stream] "${q.slice(0, 60)}" (len=${q.length}, memory=${Array.isArray(body.HISTORY) ? body.HISTORY.length : 0}턴)`,
         );
+        const rawTemp = Number(body.TEMPERATURE);
+        const temperature = Number.isFinite(rawTemp)
+            ? rawTemp
+            : config.defaultTemperature;
+        const enableThinking =
+            body.THINKING === undefined
+                ? config.enableThinking
+                : Boolean(body.THINKING);
 
-        const route = await chooseRoute(req.body ?? {});
-        const isLarge = route.tier === "large";
+        // 긴 입력(컨텍스트 초과) → 청크 맵리듀스 파이프라인으로 처리
+        if (needsLongPipeline(body)) {
+            logger.info(
+                `긴 입력 감지 [chat/stream] ${q.length}자 → 맵리듀스 파이프라인`,
+            );
+            const holdFinal =
+                hasSecurityWorkflow() && !isTrivialQuestion({ ROLE_USER: q });
+            const out = await runLongContent({
+                body,
+                temperature,
+                onEvent: (ev) => {
+                    if (ev.type === "plan") {
+                        send("meta", {
+                            mode: "workflow",
+                            reason: ev.reason,
+                            workflow: ev.steps,
+                        });
+                        send("workflow", ev);
+                    } else if (ev.type === "step_start")
+                        send("step", { ...ev, status: "start" });
+                    else if (ev.type === "step_done")
+                        send("step", { ...ev, status: "done" });
+                    else if (ev.type === "step_meta") send("meta", ev);
+                    else if (ev.type === "token" && !holdFinal)
+                        send("token", { text: ev.text });
+                },
+            });
+
+            const sec = await withSecurityPreFinal(q, out.answer, {
+                onEvent: securityEventBridge(send),
+                stepIndex: Array.isArray(out.steps) ? out.steps.length : 0,
+            });
+            const answer = sec.answer;
+            if (holdFinal) send("token", { text: answer });
+            const workflowSteps = pipelineStepsOnly(out.steps);
+            const workflowTrace = [
+                ...(out.trace || []),
+                ...sec.traceExtra,
+            ];
+
+            const genMs =
+                out.ttftMs != null
+                    ? Math.max((out.totalMs ?? 0) - out.ttftMs, 1)
+                    : out.totalMs;
+            const tokens = out.tokens;
+            const tokensPerSec =
+                tokens && genMs
+                    ? Number((tokens / (genMs / 1000)).toFixed(1))
+                    : null;
+
+            send("done", {
+                answer,
+                reasoning: out.reasoning || undefined,
+                model: out.model ?? config.modelName,
+                tier: out.tier,
+                device: out.device,
+                alias: out.alias || undefined,
+                difficulty: 100,
+                backend: out.backend,
+                ttftMs: out.ttftMs,
+                totalMs: Date.now() - started,
+                tokens,
+                tokensPerSec,
+                usage: out.usage ?? null,
+                mode: "workflow",
+                routeReason: out.plan.reason,
+                workflowSteps,
+                workflowTrace,
+            });
+
+            appendHistory({
+                id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+                ts: new Date().toISOString(),
+                system: typeof body.ROLE_SYSTEM === "string" ? body.ROLE_SYSTEM : "",
+                user: body.ROLE_USER,
+                hasImage: false,
+                temperature,
+                thinking: enableThinking,
+                tier: out.tier,
+                routedTier: out.tier,
+                routeReason: out.plan.reason,
+                device: out.device,
+                alias: out.alias || null,
+                difficulty: 100,
+                backend: out.backend,
+                model: out.model ?? config.modelName,
+                answer,
+                reasoning: out.reasoning || "",
+                usage: out.usage ?? null,
+                mode: "workflow",
+                workflowSteps,
+                workflowTrace,
+            }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+
+            logger.info(
+                `chat(stream/long) ${out.trace.filter((n) => n.kind === "model").length}단계 ${Date.now() - started}ms`,
+            );
+            return res.end();
+        }
+
+        const plan = await createPlan(body);
+        const useWorkflow = plan.mode === "workflow" && plan.steps?.length > 1;
+
+        send("meta", {
+            mode: useWorkflow ? "workflow" : "direct",
+            routedTier: plan.tier,
+            routedDevice: plan.device,
+            difficulty: plan.difficulty,
+            reason: plan.reason,
+            deviceReason: plan.deviceReason,
+            routerBackend: plan.routerBackend || null,
+            routerTier: plan.routerTier || null,
+            routerAlias: plan.routerAlias || null,
+            routerDevice: plan.routerDevice || null,
+            routerModel: plan.routerModel || null,
+            workflow: useWorkflow
+                ? plan.steps.map((s, i) => ({
+                      i,
+                      tier: s.tier,
+                      role: s.role,
+                      instruction: s.instruction,
+                  }))
+                : undefined,
+        });
+
+        if (useWorkflow) {
+            logger.info(
+                `워크플로우 [chat/stream] → ${plan.steps.map((s) => s.tier).join("→")} (${plan.reason})`,
+            );
+            const out = await runWorkflow({
+                plan,
+                body,
+                temperature,
+                enableThinking,
+                onEvent: (ev) => {
+                    if (ev.type === "plan") send("workflow", ev);
+                    else if (ev.type === "step_start") send("step", { ...ev, status: "start" });
+                    else if (ev.type === "step_done") send("step", { ...ev, status: "done" });
+                    else if (ev.type === "step_meta") send("meta", ev);
+                    else if (ev.type === "token") send("token", { text: ev.text });
+                },
+            });
+
+            const genMs =
+                out.ttftMs != null
+                    ? Math.max((out.totalMs ?? 0) - out.ttftMs, 1)
+                    : out.totalMs;
+            const tokens = out.tokens;
+            const tokensPerSec =
+                tokens && genMs
+                    ? Number((tokens / (genMs / 1000)).toFixed(1))
+                    : null;
+
+            send("done", {
+                answer: out.answer,
+                reasoning: out.reasoning || undefined,
+                model: out.model ?? config.modelName,
+                tier: out.tier,
+                device: out.device,
+                alias: out.alias || undefined,
+                difficulty: plan.difficulty,
+                backend: out.backend,
+                ttftMs: out.ttftMs,
+                totalMs: Date.now() - started,
+                tokens,
+                tokensPerSec,
+                usage: out.usage ?? null,
+                mode: "workflow",
+                routeReason: plan.reason,
+                routerBackend: plan.routerBackend || null,
+                routerTier: plan.routerTier || null,
+                routerAlias: plan.routerAlias || null,
+                routerDevice: plan.routerDevice || null,
+                routerModel: plan.routerModel || null,
+                workflowSteps: pipelineStepsOnly(out.steps),
+                workflowTrace: out.trace,
+            });
+
+            appendHistory({
+                id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+                ts: new Date().toISOString(),
+                system: typeof body.ROLE_SYSTEM === "string" ? body.ROLE_SYSTEM : "",
+                user: body.ROLE_USER,
+                hasImage: !!(body.content !== undefined && body.content !== null && body.content !== ""),
+                temperature,
+                thinking: enableThinking,
+                tier: out.tier,
+                routedTier: plan.tier,
+                routeReason: plan.reason,
+                device: out.device,
+                alias: out.alias || null,
+                difficulty: plan.difficulty,
+                backend: out.backend,
+                model: out.model ?? config.modelName,
+                answer: out.answer,
+                reasoning: out.reasoning || "",
+                usage: out.usage ?? null,
+                mode: "workflow",
+                routerBackend: plan.routerBackend || null,
+                routerTier: plan.routerTier || null,
+                routerAlias: plan.routerAlias || null,
+                routerDevice: plan.routerDevice || null,
+                routerModel: plan.routerModel || null,
+                workflowSteps: pipelineStepsOnly(out.steps),
+                workflowTrace: out.trace,
+            }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+
+            logger.info(
+                `chat(stream/workflow) ${plan.steps.map((s) => s.tier).join("→")} ${Date.now() - started}ms`,
+            );
+            return res.end();
+        }
+
+        // ---- 단일 모델 (direct) ----
+        const isLarge = plan.tier === "large";
         const promptCharBudget = isLarge
             ? config.maxPromptCharsLarge
             : config.maxPromptCharsSmall;
         const maxTokens = isLarge
             ? config.defaultMaxTokens
             : config.maxTokensSmall;
+        const holdFinal =
+            hasSecurityWorkflow() && !isTrivialQuestion({ ROLE_USER: q });
         logger.info(
-            `라우팅 [chat/stream] → tier=${route.tier} device=${route.device} 난이도=${route.difficulty}${route.routerBackend ? ` router@${route.routerBackend}` : ""} (티어사유: ${route.reason} / 장치사유: ${route.deviceReason})`,
+            `라우팅 [chat/stream] → tier=${plan.tier}${plan.skill ? ` skill="${plan.skill}"` : ""} device=${plan.device} 난이도=${plan.difficulty}${plan.routerBackend ? ` router@${plan.routerBackend}` : ""} (${plan.reason})`,
         );
 
-        const messages = await buildMessages(req.body ?? {}, promptCharBudget);
-        logger.debug(
-            `메시지 구성 [chat/stream] 총 ${messages.length}개, maxTokens=${maxTokens}, 프롬프트예산=${promptCharBudget}자`,
-        );
-
-        const rawTemp = Number(req.body?.TEMPERATURE);
-        const temperature = Number.isFinite(rawTemp)
-            ? rawTemp
-            : config.defaultTemperature;
-        const enableThinking =
-            req.body?.THINKING === undefined
-                ? config.enableThinking
-                : Boolean(req.body.THINKING);
-
-        send("meta", {
-            routedTier: route.tier,
-            routedDevice: route.device,
-            difficulty: route.difficulty,
-            reason: route.reason,
-            deviceReason: route.deviceReason,
-        });
+        const messages = await buildMessages(body, promptCharBudget);
 
         let firstLogged = false;
         const out = await pool.chatStream({
@@ -636,8 +1596,9 @@ app.post("/api/chat/stream", async (req, res) => {
             temperature,
             maxTokens,
             enableThinking,
-            preferredTier: route.tier,
-            preferredDevice: route.device,
+            preferredTier: plan.tier,
+            preferredDevice: plan.device,
+            preferredSkill: plan.skill ?? null,
             onMeta: (m) => {
                 send("meta", m);
                 logger.info(
@@ -651,9 +1612,32 @@ app.post("/api/chat/stream", async (req, res) => {
                         `첫 토큰 수신 [chat/stream] (${Date.now() - started}ms)`,
                     );
                 }
-                send("token", { text: t });
+                if (!holdFinal) send("token", { text: t });
             },
         });
+
+        const sec = await withSecurityPreFinal(q, out.content, {
+            onEvent: securityEventBridge(send),
+            stepIndex: 1,
+        });
+        const answer = sec.answer;
+        if (holdFinal) send("token", { text: answer });
+        // 보안은 파이프라인 steps 에 넣지 않음 — trace 에만 기록
+        const workflowTrace = [
+            {
+                kind: "model",
+                i: 1,
+                role: "answer",
+                tier: out.tier,
+                device: out.device,
+                alias: out.alias || null,
+                backend: out.backendUrl,
+                model: out.model,
+                output: out.content,
+                isLast: true,
+            },
+            ...sec.traceExtra,
+        ];
 
         const genMs =
             out.ttftMs != null
@@ -666,21 +1650,29 @@ app.post("/api/chat/stream", async (req, res) => {
                 : null;
 
         send("done", {
-            answer: out.content,
+            answer,
             reasoning: out.reasoning || undefined,
             model: out.model ?? config.modelName,
             tier: out.tier,
             device: out.device,
-            difficulty: route.difficulty,
+            alias: out.alias || undefined,
+            difficulty: plan.difficulty,
             backend: out.backendUrl,
             ttftMs: out.ttftMs,
             totalMs: out.totalMs,
             tokens,
             tokensPerSec,
             usage: out.usage ?? null,
+            mode: "direct",
+            routeReason: plan.reason,
+            routerBackend: plan.routerBackend || null,
+            routerTier: plan.routerTier || null,
+            routerAlias: plan.routerAlias || null,
+            routerDevice: plan.routerDevice || null,
+            routerModel: plan.routerModel || null,
+            workflowTrace,
         });
 
-        const body = req.body ?? {};
         appendHistory({
             id:
                 Date.now().toString(36) +
@@ -693,13 +1685,22 @@ app.post("/api/chat/stream", async (req, res) => {
             temperature,
             thinking: enableThinking,
             tier: out.tier,
-            routedTier: route.tier,
+            routedTier: plan.tier,
             device: out.device,
+            alias: out.alias || null,
             backend: out.backendUrl,
             model: out.model ?? config.modelName,
-            answer: out.content,
+            answer,
             reasoning: out.reasoning || "",
             usage: out.usage ?? null,
+            mode: "direct",
+            routeReason: plan.reason,
+            routerBackend: plan.routerBackend || null,
+            routerTier: plan.routerTier || null,
+            routerAlias: plan.routerAlias || null,
+            routerDevice: plan.routerDevice || null,
+            routerModel: plan.routerModel || null,
+            workflowTrace,
         }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
 
         logger.info(
@@ -710,7 +1711,11 @@ app.post("/api/chat/stream", async (req, res) => {
         logger.error(
             `chat(stream) 실패 (${Date.now() - started}ms): ${err.message}`,
         );
-        send("error", { error: err.message });
+        send("error", {
+            error: err.message,
+            status: err.status || 502,
+            security: err.security || undefined,
+        });
         res.end();
     }
 });
@@ -718,17 +1723,175 @@ app.post("/api/chat/stream", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
     const started = Date.now();
     try {
-        const q =
-            typeof req.body?.ROLE_USER === "string" ? req.body.ROLE_USER : "";
+        const body = req.body ?? {};
+        const q = typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
         logger.info(
-            `요청 수신 [chat] "${q.slice(0, 60)}" (len=${q.length}, memory=${Array.isArray(req.body?.HISTORY) ? req.body.HISTORY.length : 0}턴)`,
+            `요청 수신 [chat] "${q.slice(0, 60)}" (len=${q.length}, memory=${Array.isArray(body.HISTORY) ? body.HISTORY.length : 0}턴)`,
         );
+        const rawTemp = Number(body.TEMPERATURE);
+        const temperature = Number.isFinite(rawTemp)
+            ? rawTemp
+            : config.defaultTemperature;
+        const enableThinking =
+            body.THINKING === undefined
+                ? config.enableThinking
+                : Boolean(body.THINKING);
 
-        const { tier, reason, device, difficulty, deviceReason, routerBackend } = await chooseRoute(
-            req.body ?? {},
-        );
+        // 긴 입력(컨텍스트 초과) → 청크 맵리듀스 파이프라인
+        if (needsLongPipeline(body)) {
+            logger.info(`긴 입력 감지 [chat] ${q.length}자 → 맵리듀스 파이프라인`);
+            const out = await runLongContent({ body, temperature });
+            const sec = await withSecurityPreFinal(q, out.answer, {
+                stepIndex: Array.isArray(out.steps) ? out.steps.length : 0,
+            });
+            const workflowSteps = pipelineStepsOnly(out.steps);
+            const workflowTrace = [
+                ...(out.trace || []),
+                ...sec.traceExtra,
+            ];
+            const entry = {
+                id:
+                    Date.now().toString(36) +
+                    Math.random().toString(36).slice(2, 8),
+                ts: new Date().toISOString(),
+                system:
+                    typeof body.ROLE_SYSTEM === "string" ? body.ROLE_SYSTEM : "",
+                user: body.ROLE_USER,
+                hasImage: false,
+                temperature,
+                thinking: enableThinking,
+                tier: out.tier,
+                routedTier: out.tier,
+                routeReason: out.plan.reason,
+                device: out.device,
+                alias: out.alias || null,
+                difficulty: 100,
+                backend: out.backend,
+                model: out.model ?? config.modelName,
+                answer: sec.answer,
+                reasoning: out.reasoning || "",
+                usage: out.usage ?? null,
+                mode: "workflow",
+                workflowSteps,
+                workflowTrace,
+            };
+            appendHistory(entry).catch((e) =>
+                logger.error(`history 저장 실패: ${e.message}`),
+            );
+            logger.info(
+                `chat(long) ${out.steps.length}단계 ${Date.now() - started}ms`,
+            );
+            return res.json({
+                id: entry.id,
+                ts: entry.ts,
+                answer: sec.answer,
+                reasoning: out.reasoning || undefined,
+                model: entry.model,
+                tier: out.tier,
+                routedTier: out.tier,
+                routeReason: out.plan.reason,
+                device: out.device,
+                alias: out.alias || undefined,
+                difficulty: 100,
+                backend: out.backend,
+                usage: out.usage ?? null,
+                mode: "workflow",
+                workflowSteps,
+                workflowTrace,
+            });
+        }
+
+        const plan = await createPlan(body);
+        const useWorkflow = plan.mode === "workflow" && plan.steps?.length > 1;
+
+        if (useWorkflow) {
+            logger.info(
+                `워크플로우 [chat] → ${plan.steps.map((s) => s.tier).join("→")} (${plan.reason})`,
+            );
+            const out = await runWorkflow({
+                plan,
+                body,
+                temperature,
+                enableThinking,
+            });
+            const entry = {
+                id:
+                    Date.now().toString(36) +
+                    Math.random().toString(36).slice(2, 8),
+                ts: new Date().toISOString(),
+                system:
+                    typeof body.ROLE_SYSTEM === "string" ? body.ROLE_SYSTEM : "",
+                user: body.ROLE_USER,
+                hasImage: !!(
+                    body.content !== undefined &&
+                    body.content !== null &&
+                    body.content !== ""
+                ),
+                temperature,
+                thinking: enableThinking,
+                tier: out.tier,
+                routedTier: plan.tier,
+                routeReason: plan.reason,
+                device: out.device,
+                alias: out.alias || null,
+                difficulty: plan.difficulty,
+                backend: out.backend,
+                model: out.model ?? config.modelName,
+                answer: out.answer,
+                reasoning: out.reasoning || "",
+                usage: out.usage ?? null,
+                mode: "workflow",
+                routeReason: plan.reason,
+                routerBackend: plan.routerBackend || null,
+                routerTier: plan.routerTier || null,
+                routerAlias: plan.routerAlias || null,
+                routerDevice: plan.routerDevice || null,
+                routerModel: plan.routerModel || null,
+                workflowSteps: pipelineStepsOnly(out.steps),
+                workflowTrace: out.trace,
+            };
+            appendHistory(entry).catch((e) =>
+                logger.error(`history 저장 실패: ${e.message}`),
+            );
+            logger.info(
+                `chat(workflow) ${plan.steps.map((s) => s.tier).join("→")} ${Date.now() - started}ms`,
+            );
+            return res.json({
+                id: entry.id,
+                ts: entry.ts,
+                answer: out.answer,
+                reasoning: out.reasoning || undefined,
+                model: entry.model,
+                tier: out.tier,
+                routedTier: plan.tier,
+                routeReason: plan.reason,
+                device: out.device,
+                alias: out.alias || undefined,
+                difficulty: plan.difficulty,
+                backend: out.backend,
+                usage: out.usage ?? null,
+                mode: "workflow",
+                routerBackend: plan.routerBackend || null,
+                routerTier: plan.routerTier || null,
+                routerAlias: plan.routerAlias || null,
+                routerDevice: plan.routerDevice || null,
+                routerModel: plan.routerModel || null,
+                workflowSteps: pipelineStepsOnly(out.steps),
+                workflowTrace: out.trace,
+            });
+        }
+
+        const { tier, reason, device, difficulty, deviceReason, routerBackend } =
+            {
+                tier: plan.tier,
+                reason: plan.reason,
+                device: plan.device,
+                difficulty: plan.difficulty,
+                deviceReason: plan.deviceReason,
+                routerBackend: plan.routerBackend,
+            };
         logger.info(
-            `라우팅 [chat] → tier=${tier} device=${device} 난이도=${difficulty}${routerBackend ? ` router@${routerBackend}` : ""} (티어사유: ${reason} / 장치사유: ${deviceReason})`,
+            `라우팅 [chat] → tier=${tier}${plan.skill ? ` skill="${plan.skill}"` : ""} device=${device} 난이도=${difficulty}${routerBackend ? ` router@${routerBackend}` : ""} (티어사유: ${reason} / 장치사유: ${deviceReason})`,
         );
 
         // 티어별 컨텍스트 예산/출력 토큰 (large 만 큰 ctx 가정)
@@ -740,23 +1903,15 @@ app.post("/api/chat", async (req, res) => {
             ? config.defaultMaxTokens
             : config.maxTokensSmall;
 
-        const messages = await buildMessages(req.body ?? {}, promptCharBudget);
-
-        const rawTemp = Number(req.body?.TEMPERATURE);
-        const temperature = Number.isFinite(rawTemp)
-            ? rawTemp
-            : config.defaultTemperature;
-
-        const enableThinking =
-            req.body?.THINKING === undefined
-                ? config.enableThinking
-                : Boolean(req.body.THINKING);
+        const messages = await buildMessages(body, promptCharBudget);
 
         const {
             result,
             backendUrl,
             tier: usedTier,
             device: usedDevice,
+            alias: usedAlias,
+            skill: usedSkill,
         } = await pool.chat({
             messages,
             temperature,
@@ -764,9 +1919,28 @@ app.post("/api/chat", async (req, res) => {
             enableThinking,
             preferredTier: tier,
             preferredDevice: device,
+            preferredSkill: plan.skill ?? null,
         });
 
-        const body = req.body ?? {};
+        const sec = await withSecurityPreFinal(q, result.content, {
+            stepIndex: 1,
+        });
+        const workflowTrace = [
+            {
+                kind: "model",
+                i: 1,
+                role: "answer",
+                tier: usedTier,
+                device: usedDevice,
+                alias: usedAlias || null,
+                backend: backendUrl,
+                model: result.raw?.model,
+                output: result.content,
+                isLast: true,
+            },
+            ...sec.traceExtra,
+        ];
+
         const entry = {
             id:
                 Date.now().toString(36) +
@@ -787,13 +1961,23 @@ app.post("/api/chat", async (req, res) => {
             routeReason: reason,
             device: usedDevice,
             routedDevice: device,
+            alias: usedAlias || null,
+            skill: usedSkill || null,
+            routedSkill: plan.skill ?? null,
             difficulty,
             deviceReason,
             backend: backendUrl,
             model: result.raw?.model ?? config.modelName,
-            answer: result.content,
+            answer: sec.answer,
             reasoning: result.reasoning || "",
             usage: result.raw?.usage ?? null,
+            mode: "direct",
+            routerBackend: plan.routerBackend || routerBackend || null,
+            routerTier: plan.routerTier || null,
+            routerAlias: plan.routerAlias || null,
+            routerDevice: plan.routerDevice || null,
+            routerModel: plan.routerModel || null,
+            workflowTrace,
         };
         logger.info(
             `chat 성공 tier=${usedTier} device=${usedDevice ?? "-"} diff=${difficulty} backend=${backendUrl} ${Date.now() - started}ms`,
@@ -813,7 +1997,7 @@ app.post("/api/chat", async (req, res) => {
         res.json({
             id: entry.id,
             ts: entry.ts,
-            answer: result.content,
+            answer: sec.answer,
             reasoning: result.reasoning || undefined,
             model: entry.model,
             tier: usedTier,
@@ -821,10 +2005,20 @@ app.post("/api/chat", async (req, res) => {
             routeReason: reason,
             device: usedDevice,
             routedDevice: device,
+            alias: usedAlias || undefined,
+            skill: usedSkill || undefined,
+            routedSkill: plan.skill ?? undefined,
             difficulty,
             deviceReason,
             backend: backendUrl,
             usage: result.raw?.usage ?? null,
+            mode: "direct",
+            routerBackend: plan.routerBackend || routerBackend || null,
+            routerTier: plan.routerTier || null,
+            routerAlias: plan.routerAlias || null,
+            routerDevice: plan.routerDevice || null,
+            routerModel: plan.routerModel || null,
+            workflowTrace,
         });
     } catch (err) {
         if (/exceed_context_size|context size/.test(err.message)) {
@@ -832,6 +2026,12 @@ app.post("/api/chat", async (req, res) => {
             return res.status(413).json({
                 error: "입력/대화가 모델 컨텍스트 한도를 초과했습니다. 대화를 초기화하거나 질문을 줄여주세요.",
                 detail: err.message,
+            });
+        }
+        if (err.status === 403) {
+            return res.status(403).json({
+                error: err.message,
+                security: err.security || undefined,
             });
         }
         const isClientError =
@@ -1050,6 +2250,7 @@ function persistRagHistory(q, payload) {
         model: payload.model ?? null,
         tier: payload.tier ?? null,
         device: payload.device ?? null,
+        alias: payload.alias ?? null,
         sources: payload.sources || [],
     }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
 }
@@ -1259,7 +2460,7 @@ app.post("/api/rag/ask", async (req, res) => {
                 : undefined;
         const persist = (payload) => persistRagHistory(q, payload);
 
-        const hits = rag.retrieve(q, topK);
+        const hits = await rag.retrieveAsync(q, topK);
         logger.info(
             `RAG 질문 "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색`,
         );
@@ -1283,7 +2484,7 @@ app.post("/api/rag/ask", async (req, res) => {
                 body: req.body,
             });
             logger.info(`RAG 라우팅 → tier=${route.tier} (${route.reason})`);
-            const { result, backendUrl, tier, device } = await ragChat({
+            const { result, backendUrl, tier, device, alias } = await ragChat({
                 q,
                 hits: [],
                 strict: false,
@@ -1299,6 +2500,7 @@ app.post("/api/rag/ask", async (req, res) => {
                 model: result.raw?.model ?? config.modelName,
                 tier,
                 device,
+                alias: alias || undefined,
                 backend: backendUrl,
                 elapsedMs: Date.now() - started,
             };
@@ -1313,7 +2515,7 @@ app.post("/api/rag/ask", async (req, res) => {
             body: req.body,
         });
         logger.info(`RAG 라우팅 → tier=${route.tier} (${route.reason})`);
-        const { result, backendUrl, tier, device } = await ragChat({
+        const { result, backendUrl, tier, device, alias } = await ragChat({
             q,
             hits,
             strict,
@@ -1333,6 +2535,7 @@ app.post("/api/rag/ask", async (req, res) => {
             model: result.raw?.model ?? config.modelName,
             tier,
             device,
+            alias: alias || undefined,
             backend: backendUrl,
             elapsedMs: Date.now() - started,
         };
@@ -1376,7 +2579,7 @@ app.post("/api/rag/ask/stream", async (req, res) => {
                 ? req.body.ROLE_SYSTEM
                 : undefined;
 
-        const hits = rag.retrieve(q, topK);
+        const hits = await rag.retrieveAsync(q, topK);
         const sources = ragSources(hits);
         logger.info(
             `RAG 질문(stream) "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색`,
@@ -1437,6 +2640,7 @@ app.post("/api/rag/ask/stream", async (req, res) => {
             model: out.model ?? config.modelName,
             tier: out.tier,
             device: out.device,
+            alias: out.alias || undefined,
             backend: out.backendUrl,
             ttftMs: out.ttftMs,
             totalMs: out.totalMs,
@@ -1461,20 +2665,34 @@ app.use((_req, res) => res.status(404).json({ error: "Not Found" }));
 
 loadStats();
 pool.startHealthChecks();
+rag.setEmbedder(async (texts) => {
+    const out = await pool.embed(texts);
+    return out?.vectors ?? null;
+});
 
 app.listen(config.port, () => {
+    const routers = pool.backends.filter((b) => b.routerEnabled);
+    const routerLabel = routers.length
+        ? routers.map((b) => `${b.alias || b.tier}@${b.url}`).join(", ")
+        : "없음";
     logger.info(
-        `Express 서버 시작 (port ${config.port}, 백엔드 ${config.backends.length}개)`,
+        `Express 서버 시작 (port ${config.port}, 백엔드 ${config.backends.length}개, ROUTING_MODE=${config.routingMode}, routers=${routerLabel})`,
     );
     console.log(
         `[neutda-ai] Express 서버 실행: http://localhost:${config.port}`,
     );
     console.log(`[neutda-ai] 테스트 페이지: http://localhost:${config.port}/`);
     console.log(
-        `[neutda-ai] 모니터링: http://localhost:${config.port}/monitor.html`,
+        `[neutda-ai] 모델 관리: http://localhost:${config.port}/models.html`,
+    );
+    console.log(
+        `[neutda-ai] 서버 모니터링: http://localhost:${config.port}/monitor.html`,
     );
     console.log(
         `[neutda-ai] LLM 백엔드 ${config.backends.length}개: ${config.backends.map((b) => `${b.tier}@${b.url}`).join(", ")}`,
+    );
+    console.log(
+        `[neutda-ai] 라우터: ${routers.length ? routerLabel : "없음 (servers.json 에 router:true 또는 모델 관리에서 켜세요)"}`,
     );
     console.log(
         `[neutda-ai] POST /api/chat 로 ROLE_SYSTEM/ROLE_USER/TEMPERATURE/content 전송`,

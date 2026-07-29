@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · 역할 관리</title>
+        <link rel="stylesheet" href="/dashboard.css" />
+        <style>
+            html,
+            body {
+                height: 100%;
+                overflow: hidden;
+            }
+            body {
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap.roles-page {
+                flex: 1;
+                min-height: 0;
+                width: 100%;
+                box-sizing: border-box;
+                display: flex;
+                flex-direction: column;
+                padding: 14px 20px 14px;
+            }
+            .roles-page > header {
+                margin-bottom: 8px;
+                flex-shrink: 0;
+            }
+            .roles-page > header h1 {
+                margin: 0;
+                font-size: 20px;
+            }
+            .roles-page > .lead {
+                margin: 0 0 12px;
+                flex-shrink: 0;
+                font-size: 13px;
+            }
+            .layout {
+                flex: 1;
+                min-height: 0;
+                display: grid;
+                grid-template-columns: minmax(260px, 0.9fr) minmax(340px, 1.4fr);
+                gap: 14px;
+                align-items: stretch;
+            }
+            @media (max-width: 900px) {
+                html,
+                body {
+                    overflow: auto;
+                    height: auto;
+                }
+                .wrap.roles-page {
+                    height: auto;
+                    flex: none;
+                }
+                .layout {
+                    grid-template-columns: 1fr;
+                    flex: none;
+                    min-height: 0;
+                }
+                .role-list,
+                .assign-grid {
+                    max-height: 50vh;
+                }
+            }
+            .panel {
+                display: flex;
+                flex-direction: column;
+                min-height: 0;
+                overflow: hidden;
+            }
+            .panel-head {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 10px;
+                flex-shrink: 0;
+            }
+            .panel-head .k {
+                margin: 0;
+                flex: 1;
+            }
+            .btn-row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+            .btn {
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                background: transparent;
+                color: var(--text);
+                padding: 8px 14px;
+                font-size: 12px;
+                font-weight: 700;
+                cursor: pointer;
+                font-family: inherit;
+            }
+            .btn.primary {
+                background: var(--accent);
+                border-color: var(--accent);
+                color: #fff;
+            }
+            .btn.primary:hover {
+                background: #5570e6;
+            }
+            .btn.danger {
+                color: #ff9c95;
+                border-color: rgba(248, 81, 73, 0.35);
+            }
+            .btn.ghost {
+                padding: 5px 10px;
+                font-size: 11px;
+            }
+            .btn:disabled {
+                opacity: 0.55;
+                cursor: wait;
+            }
+            .role-list,
+            .assign-grid {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                flex: 1;
+                min-height: 0;
+                overflow: auto;
+            }
+            .role-item {
+                display: grid;
+                grid-template-columns: 1fr auto;
+                gap: 8px;
+                align-items: start;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 12px 14px;
+                background: #0d0f15;
+                cursor: pointer;
+            }
+            .role-item:hover {
+                border-color: rgba(108, 140, 255, 0.45);
+            }
+            .role-item.active {
+                border-color: var(--accent);
+                background: rgba(108, 140, 255, 0.08);
+            }
+            .role-item .name {
+                font-size: 14px;
+                font-weight: 700;
+            }
+            .role-item .desc {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 4px;
+                white-space: pre-wrap;
+            }
+            .role-item .meta {
+                font-size: 11px;
+                color: var(--muted);
+                margin-top: 6px;
+            }
+            .role-item .actions {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+            .assign-row {
+                display: grid;
+                grid-template-columns: auto 1fr;
+                gap: 10px 12px;
+                align-items: start;
+                padding: 12px 14px;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                background: #0d0f15;
+                font-size: 13px;
+            }
+            .assign-row:has(.assign-cb:checked) {
+                border-color: rgba(108, 140, 255, 0.45);
+                background: rgba(108, 140, 255, 0.06);
+            }
+            .assign-row > label.check {
+                display: flex;
+                align-items: center;
+                padding-top: 2px;
+                cursor: pointer;
+            }
+            .assign-row .body {
+                min-width: 0;
+            }
+            .assign-row .top {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 8px;
+            }
+            .assign-row .alias {
+                font-weight: 700;
+                font-size: 14px;
+            }
+            .assign-row .name {
+                font-size: 11px;
+                color: var(--muted);
+            }
+            .assign-row .badges {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+                margin-left: auto;
+            }
+            .assign-row .meta {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px 14px;
+                margin-top: 8px;
+                font-size: 12px;
+                color: var(--muted);
+            }
+            .assign-row .meta b {
+                color: var(--text);
+                font-weight: 600;
+            }
+            .assign-row .model {
+                margin-top: 6px;
+                font-size: 12px;
+                color: var(--muted);
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .assign-foot {
+                margin-top: 10px;
+                padding-top: 10px;
+                border-top: 1px solid var(--border);
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-shrink: 0;
+            }
+            .assign-foot .hint {
+                flex: 1;
+                font-size: 12px;
+                color: var(--muted);
+            }
+            .empty {
+                color: var(--muted);
+                font-size: 13px;
+                padding: 16px 4px;
+            }
+            /* modal */
+            .modal-backdrop {
+                position: fixed;
+                inset: 0;
+                background: rgba(6, 8, 14, 0.72);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                z-index: 200;
+                padding: 20px;
+            }
+            .modal-backdrop.open {
+                display: flex;
+            }
+            .modal {
+                width: min(440px, 100%);
+                background: #12151d;
+                border: 1px solid var(--border);
+                border-radius: 14px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+                padding: 20px 22px;
+            }
+            .modal h2 {
+                margin: 0 0 14px;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            .modal label {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                font-size: 11px;
+                color: var(--muted);
+                font-weight: 600;
+                margin-bottom: 12px;
+            }
+            .modal input,
+            .modal textarea {
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                color: var(--text);
+                padding: 9px 11px;
+                font-size: 13px;
+                font-family: inherit;
+            }
+            .modal textarea {
+                min-height: 80px;
+                resize: vertical;
+            }
+            .modal input:focus,
+            .modal textarea:focus {
+                outline: none;
+                border-color: var(--accent);
+            }
+            .modal-actions {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-top: 4px;
+            }
+            .modal-actions .spacer {
+                flex: 1;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap roles-page">
+            <header>
+                <h1>역할 관리</h1>
+                <div><span id="updated" class="updated"></span></div>
+            </header>
+            <p class="muted lead">
+                역할은 모델이 잘 맡는 작업 유형입니다 (예: 요약·번역·보고서).
+                공통 역할을 만들어 모델에 입히면 라우터·파이프라인이 그 특기로
+                요청을 나눕니다. 라우터·파이프라인 설계·임베딩·보안검증 같은
+                인프라 기능은 모델 관리의 고정 기능에서 켭니다.
+            </p>
+
+            <div class="layout">
+                <div class="card panel">
+                    <div class="panel-head">
+                        <div class="k">
+                            역할
+                            <span
+                                class="muted"
+                                id="roleCount"
+                                style="font-weight: 400"
+                            ></span>
+                        </div>
+                        <button id="btnNew" class="btn primary" type="button">
+                            + 새 역할
+                        </button>
+                    </div>
+                    <div id="roleList" class="role-list">
+                        <div class="empty">불러오는 중…</div>
+                    </div>
+                </div>
+
+                <div class="card panel">
+                    <div class="panel-head">
+                        <div class="k" id="assignTitle">
+                            모델을 입히려면 역할을 선택하세요
+                        </div>
+                    </div>
+                    <div id="assignGrid" class="assign-grid"></div>
+                    <div class="assign-foot">
+                        <span class="hint" id="assignHint"
+                            >왼쪽 역할 목록에서 역할을 선택하세요.</span
+                        >
+                        <button id="btnAssign" class="btn primary" disabled>
+                            배정 저장
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div
+            id="roleModal"
+            class="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="formTitle"
+        >
+            <div class="modal">
+                <h2 id="formTitle">새 역할 만들기</h2>
+                <input type="hidden" id="editId" value="" />
+                <label>
+                    역할 이름
+                    <input
+                        id="roleName"
+                        type="text"
+                        maxlength="40"
+                        placeholder="예: 요약"
+                    />
+                </label>
+                <label>
+                    설명 (선택)
+                    <textarea
+                        id="roleDesc"
+                        maxlength="200"
+                        placeholder="예: 회의록·문서 압축, 불릿 5줄 이내"
+                    ></textarea>
+                </label>
+                <div class="modal-actions">
+                    <button
+                        id="btnDelete"
+                        class="btn danger"
+                        type="button"
+                        hidden
+                    >
+                        삭제
+                    </button>
+                    <span class="spacer"></span>
+                    <button id="btnCancel" class="btn" type="button">
+                        취소
+                    </button>
+                    <button id="btnSave" class="btn primary" type="button">
+                        역할 저장
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+
+            let roles = [];
+            let servers = [];
+            let selectedId = null;
+
+            function openModal({ id = "", name = "", description = "" } = {}) {
+                $("editId").value = id;
+                $("roleName").value = name;
+                $("roleDesc").value = description;
+                if (id) {
+                    $("formTitle").textContent = `역할 수정 · ${name}`;
+                    $("btnDelete").hidden = false;
+                    $("btnSave").textContent = "변경 저장";
+                } else {
+                    $("formTitle").textContent = "새 역할 만들기";
+                    $("btnDelete").hidden = true;
+                    $("btnSave").textContent = "역할 저장";
+                }
+                $("roleModal").classList.add("open");
+                setTimeout(() => $("roleName").focus(), 30);
+            }
+
+            function closeModal() {
+                $("roleModal").classList.remove("open");
+            }
+
+            function clearSelection() {
+                selectedId = null;
+                $("assignTitle").textContent =
+                    "모델을 입히려면 역할을 선택하세요";
+                $("assignHint").textContent =
+                    "왼쪽 역할 목록에서 역할을 선택하세요.";
+                $("btnAssign").disabled = true;
+                renderRoleList();
+                renderAssign();
+            }
+
+            function selectRole(id) {
+                const role = roles.find((r) => r.id === id);
+                if (!role) return clearSelection();
+                selectedId = id;
+                $("assignTitle").textContent =
+                    `"${role.name}" 을(를) 입힐 모델`;
+                $("assignHint").textContent =
+                    "체크한 모델에 이 공통 역할이 배정됩니다.";
+                $("btnAssign").disabled = false;
+                renderRoleList();
+                renderAssign();
+            }
+
+            function renderRoleList() {
+                $("roleCount").textContent = `(${roles.length})`;
+                if (!roles.length) {
+                    $("roleList").innerHTML =
+                        '<div class="empty">아직 역할이 없습니다. «새 역할»로 만들어 보세요.</div>';
+                    return;
+                }
+                $("roleList").innerHTML = roles
+                    .map((r) => {
+                        const n = servers.filter((s) =>
+                            (s.roleIds || []).includes(r.id),
+                        ).length;
+                        return `
+        <div class="role-item ${r.id === selectedId ? "active" : ""}" data-id="${esc(r.id)}">
+          <div>
+            <div class="name">${esc(r.name)}</div>
+            <div class="desc">${esc(r.description || "(설명 없음)")}</div>
+            <div class="meta">배정 ${n}대</div>
+          </div>
+          <div class="actions">
+            <button type="button" class="btn ghost role-edit" data-id="${esc(r.id)}">수정</button>
+          </div>
+        </div>`;
+                    })
+                    .join("");
+            }
+
+            function renderAssign() {
+                if (!servers.length) {
+                    $("assignGrid").innerHTML =
+                        '<div class="empty">등록된 모델 서버가 없습니다.</div>';
+                    return;
+                }
+                if (!selectedId) {
+                    $("assignGrid").innerHTML =
+                        '<div class="empty">왼쪽에서 역할을 선택하면 모델 목록이 나타납니다.</div>';
+                    return;
+                }
+                $("assignGrid").innerHTML = servers
+                    .map((s) => {
+                        const on = (s.roleIds || []).includes(selectedId);
+                        const alias = s.alias || s.name;
+                        const modelFile = s.model
+                            ? String(s.model).split(/[\\/]/).pop()
+                            : "–";
+                        const device =
+                            s.device || (Number(s.ngl) > 0 ? "gpu" : "cpu");
+                        const deviceLabel = device.toUpperCase();
+                        const gpuLabel =
+                            device === "gpu"
+                                ? s.gpu !== undefined && s.gpu !== ""
+                                    ? `GPU ${s.gpu}`
+                                    : "GPU"
+                                : "CPU";
+                        const status = s.healthy
+                            ? '<span class="pill up"><span class="dot"></span>정상</span>'
+                            : s.running
+                              ? '<span class="pill down"><span class="dot"></span>로딩</span>'
+                              : '<span class="pill down"><span class="dot"></span>OFF</span>';
+                        const commonN = (s.roleIds || []).length;
+                        const customN = (s.customSkills || []).length;
+                        return `<div class="assign-row">
+          <label class="check">
+            <input type="checkbox" class="assign-cb" data-name="${esc(s.name)}" ${on ? "checked" : ""}>
+          </label>
+          <div class="body">
+            <div class="top">
+              <span class="alias">${esc(alias)}</span>
+              ${alias !== s.name ? `<span class="name">${esc(s.name)}</span>` : ""}
+              <div class="badges">
+                <span class="tier tier-${esc(s.tier || "")}">${esc(s.tier || "–")}</span>
+                <span class="dev dev-${esc(device)}">${esc(deviceLabel)}</span>
+                ${status}
+              </div>
+            </div>
+            <div class="meta">
+              <span><b>${esc(gpuLabel)}</b>${device === "gpu" && s.ngl != null ? ` · ngl ${esc(s.ngl)}` : ""}</span>
+              <span>ctx <b>${esc(s.ctx ?? "–")}</b></span>
+              <span>port <b>${esc(s.port ?? "–")}</b></span>
+              <span>${esc(s.url || "")}</span>
+              <span>역할 공통 <b>${commonN}</b> · 커스텀 <b>${customN}</b></span>
+            </div>
+            <div class="model" title="${esc(s.model || "")}">모델 ${esc(modelFile)}</div>
+          </div>
+        </div>`;
+                    })
+                    .join("");
+            }
+
+            async function refresh() {
+                const [rr, rs] = await Promise.all([
+                    fetch("/api/roles"),
+                    fetch("/api/servers"),
+                ]);
+                const rd = await rr.json();
+                const sd = await rs.json();
+                if (!rr.ok) throw new Error(rd.error || "역할 로드 실패");
+                if (!rs.ok) throw new Error(sd.error || "서버 로드 실패");
+                roles = rd.roles || [];
+                servers = sd.servers || [];
+                if (selectedId && !roles.some((r) => r.id === selectedId)) {
+                    clearSelection();
+                } else {
+                    renderRoleList();
+                    renderAssign();
+                }
+                $("updated").textContent =
+                    "갱신 " + new Date().toLocaleTimeString();
+            }
+
+            $("roleList").addEventListener("click", (e) => {
+                const edit = e.target.closest(".role-edit");
+                if (edit) {
+                    e.stopPropagation();
+                    const role = roles.find((r) => r.id === edit.dataset.id);
+                    if (!role) return;
+                    openModal({
+                        id: role.id,
+                        name: role.name,
+                        description: role.description || "",
+                    });
+                    return;
+                }
+                const item = e.target.closest(".role-item");
+                if (!item) return;
+                selectRole(item.dataset.id);
+            });
+
+            $("btnNew").addEventListener("click", () => openModal());
+            $("btnCancel").addEventListener("click", closeModal);
+            $("roleModal").addEventListener("click", (e) => {
+                if (e.target === $("roleModal")) closeModal();
+            });
+            document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" && $("roleModal").classList.contains("open")) {
+                    closeModal();
+                }
+            });
+
+            $("btnSave").addEventListener("click", async () => {
+                const name = $("roleName").value.trim();
+                if (!name) {
+                    $("roleName").focus();
+                    return;
+                }
+                const body = {
+                    name,
+                    description: $("roleDesc").value.trim(),
+                };
+                const id = $("editId").value;
+                const btn = $("btnSave");
+                btn.disabled = true;
+                try {
+                    const r = await fetch(
+                        id
+                            ? "/api/roles/" + encodeURIComponent(id)
+                            : "/api/roles",
+                        {
+                            method: id ? "PATCH" : "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body),
+                        },
+                    );
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(d.error || "저장 실패");
+                    closeModal();
+                    await refresh();
+                    selectRole(d.role.id);
+                } catch (e) {
+                    alert(e.message);
+                } finally {
+                    btn.disabled = false;
+                }
+            });
+
+            $("btnDelete").addEventListener("click", async () => {
+                const id = $("editId").value;
+                if (!id) return;
+                if (
+                    !confirm(
+                        "이 공통 역할을 삭제할까요?\n모델에 입혀진 배정도 함께 해제됩니다.",
+                    )
+                )
+                    return;
+                try {
+                    const r = await fetch(
+                        "/api/roles/" + encodeURIComponent(id),
+                        { method: "DELETE" },
+                    );
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(d.error || "삭제 실패");
+                    closeModal();
+                    if (selectedId === id) clearSelection();
+                    await refresh();
+                } catch (e) {
+                    alert(e.message);
+                }
+            });
+
+            $("btnAssign").addEventListener("click", async () => {
+                if (!selectedId) return;
+                const btn = $("btnAssign");
+                btn.disabled = true;
+                btn.textContent = "저장 중…";
+                try {
+                    const checks = [
+                        ...document.querySelectorAll(".assign-cb"),
+                    ];
+                    for (const cb of checks) {
+                        const name = cb.dataset.name;
+                        const sv = servers.find((s) => s.name === name);
+                        if (!sv) continue;
+                        const set = new Set(sv.roleIds || []);
+                        if (cb.checked) set.add(selectedId);
+                        else set.delete(selectedId);
+                        const next = [...set];
+                        const prev = sv.roleIds || [];
+                        if (
+                            next.length === prev.length &&
+                            next.every((x) => prev.includes(x))
+                        )
+                            continue;
+                        const r = await fetch(
+                            "/api/servers/" + encodeURIComponent(name),
+                            {
+                                method: "PATCH",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ roleIds: next }),
+                            },
+                        );
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) throw new Error(d.error || "배정 실패");
+                    }
+                    await refresh();
+                    selectRole(selectedId);
+                } catch (e) {
+                    alert(e.message);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = "배정 저장";
+                }
+            });
+
+            refresh().catch((e) => {
+                $("roleList").innerHTML =
+                    `<div class="empty" style="color:var(--err)">${esc(e.message)}</div>`;
+            });
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>

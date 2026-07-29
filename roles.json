@@ -1,0 +1,25 @@
+{
+    "roles": [
+        {
+            "id": "r_ms5efylr85h28d",
+            "name": "보고서 작성",
+            "description": "1. 개요 2. 참여자 3. 본문 4. 결과",
+            "createdAt": "2026-07-29T01:21:45.711Z",
+            "updatedAt": null
+        },
+        {
+            "id": "r_ms5emhdfsj7jcf",
+            "name": "간단한 인사",
+            "description": "10글자 이하 간단한 인사",
+            "createdAt": "2026-07-29T01:26:49.971Z",
+            "updatedAt": null
+        },
+        {
+            "id": "r_summary_default",
+            "name": "요약",
+            "description": "긴 문서·회의록 압축, 핵심만 빠짐없이. 맵리듀스·파이프라인 extract 단계에 선호됩니다.",
+            "createdAt": "2026-07-29T01:42:00.000Z",
+            "updatedAt": null
+        }
+    ]
+}

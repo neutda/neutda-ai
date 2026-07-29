@@ -5,10 +5,12 @@
     "type": "module",
     "main": "src/server.js",
     "scripts": {
-        "start": "node src/server.js",
+        "start": "node -e \"console.error('\\n  \\u274c \\uBAA8\\uB378 \\uC11C\\uBC84\\uAC00 \\uD568\\uAED8 \\uAE30\\uB3D9\\uB418\\uC9C0 \\uC54A\\uC2B5\\uB2C8\\uB2E4.\\n     \\uC804\\uCCB4 \\uAE30\\uB3D9\\uC740  npm run up  \\uC744 \\uC0AC\\uC6A9\\uD558\\uC138\\uC694 (Express\\uB9CC \\uD544\\uC694\\uD558\\uBA74  npm run serve ).\\n'); process.exit(1)\"",
+        "serve": "node src/server.js",
         "dev": "node --watch src/server.js",
         "up": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-all.ps1",
         "down": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-all.ps1",
+        "restart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restart-express.ps1",
         "llama": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-llama-server.ps1",
         "cluster": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-llama-cluster.ps1"
     },

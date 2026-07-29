@@ -18,6 +18,7 @@ Node.js + Express API 게이트웨이. 요청을 받아 로컬 **llama-server**(
 **주요 기능**
 
 - **멀티 티어 라우팅**: `small` / `medium` / `large` — LLM 라우터(`ROUTING_MODE=llm`) 또는 휴리스틱(글자수·키워드)으로 자동 선택
+- **멀티모델 워크플로우**: 라우터가 파이프라인을 짜고(small→large→small 등) 단계별 결과를 다음 모델에 전달 (`WORKFLOW_MODE`)
 - **시스템 지시문 보호**: `ROLE_SYSTEM`(페르소나·출력형식 등)이 있으면 최소 `medium` 으로 라우팅 — 0.5B small 모델의 지시 미준수 방지
 - **GPU/CPU 선호**: 같은 티어 안에서 난이도 점수에 따라 GPU 또는 CPU 백엔드 우선
 - **로드밸런싱**: 헬스체크 + least-connections + 장애 시 failover (선호 티어 부재 시 **상위 티어 우선** 폴백)
@@ -76,7 +77,7 @@ npm run down    # Express + 모든 llama-server 종료
 
 ### 런타임 서버 관리
 
-Express 가 이미 떠 있는 상태에서 [모니터링 대시보드](http://localhost:3000/monitor.html) 또는 `/api/servers` 로
+Express 가 이미 떠 있는 상태에서 [모델 관리 페이지](http://localhost:3000/models.html) 또는 `/api/servers` 로
 개별 llama-server 를 추가·삭제·기동·종료할 수 있습니다. 변경 사항은 `servers.json` 에 즉시 반영됩니다.
 
 ### 수동 실행
@@ -105,7 +106,9 @@ npm run dev     # 파일 변경 시 자동 재시작
 | 페이지 | URL | 설명 |
 | --- | --- | --- |
 | 테스트 콘솔 | `http://localhost:3000/` | 채팅·이미지·스트리밍·대화 기억 테스트. 하단 컴포저(Enter 전송·Shift+Enter 줄바꿈), 좌측 패널에 RAG 문서 관리, 답변 마크다운 렌더링(코드박스+복사 버튼), 라우팅 사유 배지 |
-| 모니터링 | `http://localhost:3000/monitor.html` | 백엔드 상태, **모델 서버 추가/삭제·전원 토글**, 라우터 역할 토글, 티어 라우팅 효과(절감률·티어 분포), GPU/CPU 지표 |
+| 파이프라인 | `http://localhost:3000/pipeline.html` | **플랜 미리보기**(답변 생성 없이 라우터 계획만 확인), 단계 순번·티어·역할별 평균 지연, 자주 쓰인 흐름, 최근 실행의 단계별 입·출력 추적 |
+| 모델 관리 | `http://localhost:3000/models.html` | **모델 서버 추가/삭제·전원 토글**, 별칭 편집, 고정 기능(해결/라우터/파이프라인설계/임베딩/보안검증) 토글 |
+| 서버 모니터링 | `http://localhost:3000/monitor.html` | 백엔드 상태·처리량·지연·오류 통계, 티어 라우팅 효과(절감률·티어 분포), GPU/CPU/RAM 실시간 지표 |
 | 로그 | `http://localhost:3000/logs.html` | 서버 로그 실시간 조회 |
 | 외부 API | `http://localhost:3000/api.html` | `/api/ask` 호출 예시 |
 | RAG | `http://localhost:3000/rag.html` | 문서 업로드·문서 기반 질의(스트리밍). 문서 요약·예상 질문 칩 표시 |
@@ -134,6 +137,24 @@ npm run dev     # 파일 변경 시 자동 재시작
 }
 ```
 
+### 파이프라인 API (`/api/workflow`)
+
+파이프라인 페이지가 사용합니다.
+
+| 메서드 | 경로 | 설명 |
+| --- | --- | --- |
+| `POST` | `/api/workflow/plan` | 답변을 만들지 않고 라우터 계획만 반환 (라우터 LLM 1회 호출) |
+| `GET` | `/api/workflow/stats?limit=300` | `history.jsonl` 집계 — 단계 순번·티어·역할별 평균 지연, 흐름 분포, 최근 실행 목록 |
+| `GET` | `/api/workflow/runs/:id` | 실행 1건의 라우터 계획 + 단계별 입·출력(`workflowTrace`) |
+
+`POST /api/workflow/plan` 은 `/api/chat` 과 같은 판정 경로(`createPlan`)를 타므로
+`WORKFLOW`(`on`/`off`/생략=auto)·`MODEL_TIER`·`THINKING` 을 그대로 받습니다.
+입력이 `LONG_TRIGGER_CHARS` 를 넘으면 실제 요청과 동일하게 맵리듀스 계획(청크 수 포함)을 돌려줍니다.
+
+```json
+{ "ROLE_USER": "회의록 요약하고 리스크 분석해줘", "WORKFLOW": "on" }
+```
+
 ### `POST /api/backends/role`
 
 백엔드의 `chat` / `router` 역할을 개별 on·off.
@@ -145,12 +166,14 @@ npm run dev     # 파일 변경 시 자동 재시작
 ### 모델 서버 API (`/api/servers`)
 
 `servers.json` 에 정의된 llama-server 프로세스를 조회·추가·삭제·기동·종료합니다.
-모니터링 대시보드에서도 동일 기능을 UI 로 제공합니다.
+모델 관리 페이지에서도 동일 기능을 UI 로 제공합니다.
 
 | 메서드 | 경로 | 설명 |
 | --- | --- | --- |
-| `GET` | `/api/servers` | 정의 목록 + PID·헬스·풀 등록 여부 |
+| `GET` | `/api/modelconfig` | 티어별 모델 카탈로그 (`modelconfig.json`) |
+| `GET` | `/api/servers` | 정의 목록 + PID·헬스·풀 등록 여부·별칭 |
 | `POST` | `/api/servers` | 서버 추가 + 즉시 기동 (이름·포트 자동 할당) |
+| `PATCH` | `/api/servers/:name` | 정의 수정 (`alias` 별칭) |
 | `DELETE` | `/api/servers/:name` | 프로세스 종료 + `servers.json` 에서 정의 제거 |
 | `POST` | `/api/servers/:name/start` | 정의대로 기동 |
 | `POST` | `/api/servers/:name/stop` | 프로세스 종료 (VRAM/메모리 해제) |
@@ -160,7 +183,10 @@ npm run dev     # 파일 변경 시 자동 재시작
 | 필드 | 필수 | 설명 |
 | --- | --- | --- |
 | `tier` | O | `small` \| `medium` \| `large` |
-| `model` | X | 모델 경로 (미지정 시 같은 티어 템플릿 사용) |
+| `modelId` | X | `modelconfig.json` 모델 id (권장) |
+| `model` | X | 모델 경로 (미지정 시 modelconfig / 같은 티어 템플릿) |
+| `alias` | X | 표시용 별칭 (미지정 시 모델 label) |
+| `mmproj` | X | 비전 projector 경로 |
 | `ctx` | X | 컨텍스트 길이 |
 | `ngl` | X | GPU 레이어 수 (`0` = CPU 전용) |
 | `gpu` | X | `CUDA_VISIBLE_DEVICES` 값 |
@@ -333,10 +359,43 @@ LLAMA_BACKENDS=large@http://127.0.0.1:8080@gpu,medium@http://127.0.0.1:8085@gpu,
 선택 티어가 전부 다운이면 `ESCALATE_TIER=true` 일 때 다른 티어로 폴백합니다.
 폴백 시 **가까운 상위 티어를 우선**합니다 (예: medium 요청이 small 로 떨어지지 않음).
 
-## 7. servers.json
+## 7. servers.json / modelconfig.json
 
-`npm run up` 이 읽는 LLM 서버 정의 파일입니다.
-모니터·`POST/DELETE /api/servers` 로 런타임에 추가·삭제하면 파일에 영속됩니다.
+### modelconfig.json
+
+티어별 **사용 가능 모델 카탈로그**입니다. 모델 관리 페이지의 «모델 서버 추가»에서
+티어를 고르면 여기 등록된 모델 목록이 선택됩니다.
+
+- 모델이 **1개**면 자동 선택
+- **여러 개**면 드롭다운에서 선택
+- `mmproj`·`ctx`·`ngl` 기본값도 모델 항목에서 가져옵니다
+
+```json
+{
+  "tiers": {
+    "medium": {
+      "defaults": { "ctx": 4096, "ngl": 99 },
+      "models": [
+        {
+          "id": "qwen2.5-3b-gpu",
+          "label": "Qwen2.5 3B Instruct (GPU)",
+          "path": "models/qwen2.5-3b-instruct-q4_k_m.gguf",
+          "ngl": 99
+        }
+      ]
+    }
+  }
+}
+```
+
+API: `GET /api/modelconfig`
+
+### servers.json
+
+LLM 클러스터의 **기준 설정**(실제 기동 인스턴스)입니다.
+- `npm run up` 이 여기 정의된 **전부**를 기동하고
+- Express 풀도 기동 시 이 목록 전체를 백엔드로 등록합니다 (`.env` 의 `LLAMA_BACKENDS` 보다 우선)
+- 모델 관리 페이지·`POST/DELETE /api/servers` 로 런타임에 추가·삭제하면 파일에 영속됩니다.
 이름(`small-1` …)과 포트(8080~8199 중 빈 값)는 자동 할당됩니다.
 
 각 항목:
@@ -344,6 +403,7 @@ LLAMA_BACKENDS=large@http://127.0.0.1:8080@gpu,medium@http://127.0.0.1:8085@gpu,
 ```json
 {
   "name": "small-1",
+  "alias": "소형-1 (0.5B CPU)",
   "tier": "small",
   "port": 8081,
   "model": "models/qwen2.5-0.5b-instruct-q5_k_m.gguf",
@@ -353,6 +413,7 @@ LLAMA_BACKENDS=large@http://127.0.0.1:8080@gpu,medium@http://127.0.0.1:8085@gpu,
 }
 ```
 
+- `alias`: UI 표시용 별칭 (`name` 과 별개, 모델 관리 페이지에서 바로 수정 가능)
 - `ngl`: GPU 레이어 수 (`0` = CPU 전용)
 - `mmproj`: large 비전 모델에만 필요
 - `gpu`: `CUDA_VISIBLE_DEVICES` 값 (빈 문자열이면 기본 GPU)
@@ -365,7 +426,7 @@ LLAMA_BACKENDS=large@http://127.0.0.1:8080@gpu,medium@http://127.0.0.1:8085@gpu,
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
 | `PORT` | 3000 | Express 포트 |
-| `LLAMA_BACKENDS` | large@8080,small@8081 | `tier@url@device` 콤마 구분 |
+| `LLAMA_BACKENDS` | (servers.json 우선) | `tier@url@device` 콤마 구분. **`servers.json` 이 있으면 무시** |
 | `LLAMA_SERVERS` | http://127.0.0.1:8080 | (호환) 태그 없는 평면 목록 → 전부 large |
 | `LLAMA_SERVER_URL` | http://127.0.0.1:8080 | (호환) 단일 백엔드 |
 | `API_KEY` | tw-demo-key-2026 | `/api/ask` 인증 키 |
@@ -378,6 +439,7 @@ LLAMA_BACKENDS=large@http://127.0.0.1:8080@gpu,medium@http://127.0.0.1:8085@gpu,
 | `LARGE_MIN_CHARS` | 600 | large 하한 글자수 |
 | `GPU_MIN_DIFFICULTY` | 50 | GPU 선호 난이도 임계값 |
 | `ESCALATE_TIER` | true | 선택 티어 전부 다운 시 폴백 |
+| `WORKFLOW_MODE` | auto | `auto` \| `on` \| `off` — 멀티모델 파이프라인. 요청 body `WORKFLOW` 로 덮어쓰기 가능 |
 | `MODEL_NAME` | qwen | 응답 모델 라벨 |
 | `DEFAULT_TEMPERATURE` | 0.7 | 기본 온도 |
 | `DEFAULT_MAX_TOKENS` | 2048 | large 티어 최대 토큰 |

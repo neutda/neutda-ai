@@ -79,7 +79,15 @@ export async function chatCompletion({ baseUrl, messages, temperature, maxTokens
  */
 export async function chatCompletionStream({ baseUrl, messages, temperature, maxTokens, enableThinking, onToken }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  // 전체 시간 캡이 아니라 유휴 타임아웃: 데이터가 올 때마다 리셋한다.
+  // (긴 답변을 정상 생성 중인데도 중단되던 문제 방지)
+  const idleMs = config.streamIdleTimeoutMs;
+  let timeout;
+  const armIdle = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort(), idleMs);
+  };
+  armIdle();
 
   let response;
   try {
@@ -125,6 +133,7 @@ export async function chatCompletionStream({ baseUrl, messages, temperature, max
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      armIdle(); // 데이터 수신 → 유휴 타이머 리셋
       buffer += decoder.decode(value, { stream: true });
       let nl;
       while ((nl = buffer.indexOf("\n")) >= 0) {
@@ -153,6 +162,9 @@ export async function chatCompletionStream({ baseUrl, messages, temperature, max
       }
     }
   } catch (err) {
+    if (err.name === "AbortError" || /abort/i.test(err.message)) {
+      throw new LlamaError(`모델 응답 유휴 타임아웃 (${idleMs}ms 무응답)`, { retryable: false });
+    }
     throw new LlamaError(`스트리밍 중 오류: ${err.message}`, { retryable: false });
   } finally {
     clearTimeout(timeout);
@@ -177,6 +189,64 @@ export async function fetchModel(baseUrl, timeoutMs = 3000) {
   } finally {
     clearTimeout(t);
   }
+}
+
+/**
+ * OpenAI 호환 /v1/embeddings 호출.
+ * @returns {Promise<{ vectors: number[][], model?: string, raw: object }>}
+ */
+export async function createEmbeddings({ baseUrl, input, model }) {
+  const texts = (Array.isArray(input) ? input : [input]).map((t) =>
+    String(t ?? ""),
+  );
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/v1/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: model || config.modelName,
+        input: texts.length === 1 ? texts[0] : texts,
+      }),
+    });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new LlamaError(`임베딩 타임아웃 (${config.requestTimeoutMs}ms 초과)`, {
+        retryable: true,
+      });
+    }
+    throw new LlamaError(`임베딩 연결 실패: ${err.message}`, { retryable: true });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new LlamaError(`임베딩 오류 (${response.status}): ${text.slice(0, 300)}`, {
+      retryable: response.status >= 500,
+      status: response.status,
+    });
+  }
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new LlamaError(`임베딩 응답 파싱 실패: ${text.slice(0, 300)}`, {
+      retryable: true,
+    });
+  }
+  const rows = Array.isArray(data?.data) ? data.data : [];
+  const vectors = rows
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+    .map((r) => r.embedding)
+    .filter((v) => Array.isArray(v));
+  if (!vectors.length) {
+    throw new LlamaError("임베딩 벡터가 비어 있습니다.", { retryable: true });
+  }
+  return { vectors, model: data?.model, raw: data };
 }
 
 /** 특정 백엔드가 떠 있는지 확인 (응답시간 ms 포함) */

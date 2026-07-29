@@ -1,0 +1,64 @@
+{
+    "tiers": {
+        "small": {
+            "defaults": {
+                "ctx": 4096,
+                "ngl": 0,
+                "gpu": ""
+            },
+            "models": [
+                {
+                    "id": "qwen2.5-0.5b",
+                    "label": "Qwen2.5 0.5B Instruct (Q5_K_M)",
+                    "path": "models/qwen2.5-0.5b-instruct-q5_k_m.gguf",
+                    "layers": 24,
+                    "ctx": 4096,
+                    "ngl": 0
+                }
+            ]
+        },
+        "medium": {
+            "defaults": {
+                "ctx": 4096,
+                "ngl": 99,
+                "gpu": ""
+            },
+            "models": [
+                {
+                    "id": "qwen2.5-3b-gpu",
+                    "label": "Qwen2.5 3B Instruct (GPU)",
+                    "path": "models/qwen2.5-3b-instruct-q4_k_m.gguf",
+                    "layers": 36,
+                    "ctx": 4096,
+                    "ngl": 99
+                },
+                {
+                    "id": "qwen2.5-3b-cpu",
+                    "label": "Qwen2.5 3B Instruct (CPU)",
+                    "path": "models/qwen2.5-3b-instruct-q4_k_m.gguf",
+                    "layers": 36,
+                    "ctx": 4096,
+                    "ngl": 0
+                }
+            ]
+        },
+        "large": {
+            "defaults": {
+                "ctx": 8192,
+                "ngl": 99,
+                "gpu": ""
+            },
+            "models": [
+                {
+                    "id": "qwen3.6-27b-vision",
+                    "label": "Qwen3.6 27B Vision (Q4_K_M)",
+                    "path": "models/Qwen3.6-27B-Q4_K_M.gguf",
+                    "mmproj": "models/mmproj-Qwen3.6-27B-BF16.gguf",
+                    "layers": 64,
+                    "ctx": 8192,
+                    "ngl": 99
+                }
+            ]
+        }
+    }
+}

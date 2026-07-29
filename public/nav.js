@@ -7,8 +7,28 @@
             match: (p) => p === "/" || p.endsWith("/index.html"),
         },
         {
+            href: "/pipeline.html",
+            label: "파이프라인",
+            match: (p) => p.includes("pipeline"),
+        },
+        {
+            href: "/roles.html",
+            label: "역할 관리",
+            match: (p) => p.includes("roles"),
+        },
+        {
+            href: "/security.html",
+            label: "보안 관리",
+            match: (p) => p.includes("security"),
+        },
+        {
+            href: "/models.html",
+            label: "모델 관리",
+            match: (p) => p.includes("models"),
+        },
+        {
             href: "/monitor.html",
-            label: "모니터링",
+            label: "서버 모니터링",
             match: (p) => p.includes("monitor"),
         },
         { href: "/logs.html", label: "로그", match: (p) => p.includes("logs") },

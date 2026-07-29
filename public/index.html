@@ -233,6 +233,38 @@
                 flex-direction: column;
                 height: auto;
                 overflow: hidden;
+                position: relative;
+            }
+            /* 채팅 맨 아래로 가기 플로팅 버튼 (위로 스크롤했을 때만 표시) */
+            .scroll-bottom-btn {
+                position: absolute;
+                right: 20px;
+                bottom: 72px;
+                width: 38px;
+                height: 38px;
+                margin: 0;
+                padding: 0;
+                border-radius: 50%;
+                background: var(--accent-2);
+                color: #fff;
+                border: 1px solid var(--border);
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+                font-size: 18px;
+                line-height: 1;
+                cursor: pointer;
+                display: none;
+                align-items: center;
+                justify-content: center;
+                z-index: 5;
+                opacity: 0.92;
+                transition: opacity 0.15s;
+            }
+            .scroll-bottom-btn:hover {
+                background: var(--accent);
+                opacity: 1;
+            }
+            .scroll-bottom-btn.show {
+                display: flex;
             }
             .chat-head {
                 display: flex;
@@ -389,6 +421,153 @@
             .route-why {
                 font-style: italic;
                 cursor: help;
+            }
+            .wf-acc {
+                margin-top: 10px;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                background: rgba(108, 140, 255, 0.05);
+                overflow: hidden;
+            }
+            .wf-acc > summary {
+                cursor: pointer;
+                list-style: none;
+                padding: 6px 12px;
+                font-size: 12px;
+                font-weight: 700;
+                color: var(--accent);
+                user-select: none;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+            .wf-acc > summary::-webkit-details-marker {
+                display: none;
+            }
+            .wf-acc > summary::before {
+                content: "▸";
+                display: inline-block;
+                transition: transform 0.15s;
+            }
+            .wf-acc[open] > summary::before {
+                transform: rotate(90deg);
+            }
+            .wf-acc-body {
+                padding: 0 12px 8px;
+                border-top: 1px solid var(--border);
+            }
+            .wf-close {
+                margin: 10px 0 2px;
+                width: 100%;
+                padding: 6px;
+                font-size: 12px;
+                font-weight: 600;
+                color: var(--muted);
+                background: #222634;
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                cursor: pointer;
+            }
+            .wf-close:hover {
+                background: #2c3142;
+                color: var(--text);
+            }
+            .wf-step-card {
+                margin-top: 6px;
+                padding: 5px 10px;
+                border-radius: 7px;
+                background: var(--panel, #12141c);
+                border: 1px solid var(--border);
+            }
+            .wf-step-head {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+                align-items: center;
+                margin-bottom: 3px;
+                font-size: 12px;
+            }
+            .wf-step-inst {
+                font-size: 11px;
+                color: var(--muted);
+                margin-bottom: 3px;
+            }
+            .wf-handoff {
+                font-size: 11px;
+                color: var(--muted);
+                margin: 4px 0;
+                padding: 4px 8px;
+                border-left: 3px solid var(--accent);
+                background: rgba(108, 140, 255, 0.08);
+                border-radius: 0 6px 6px 0;
+            }
+            .wf-label {
+                font-size: 10px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: var(--muted);
+                margin: 4px 0 2px;
+            }
+            .wf-router-banner {
+                margin: 0 0 10px;
+                padding: 8px 10px;
+                border-radius: 8px;
+                border: 1px solid rgba(210, 153, 34, 0.45);
+                background: rgba(210, 153, 34, 0.1);
+                font-size: 12px;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+                align-items: center;
+            }
+            .wf-router-banner strong {
+                color: #e3b341;
+            }
+            .wf-step-out {
+                font-size: 12px;
+                white-space: pre-wrap;
+                word-break: break-word;
+                max-height: 200px;
+                overflow-y: auto;
+                color: var(--text);
+                opacity: 0.92;
+            }
+            .wf-flow {
+                font-weight: 600;
+                letter-spacing: 0.02em;
+            }
+            .wf-box {
+                margin: 0 0 8px;
+                padding: 8px 10px;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                background: rgba(108, 140, 255, 0.06);
+                font-size: 12px;
+            }
+            .wf-title {
+                font-weight: 700;
+                color: var(--accent);
+                margin-bottom: 6px;
+            }
+            .wf-step {
+                display: flex;
+                gap: 8px;
+                align-items: flex-start;
+                padding: 1px 0;
+                color: var(--muted);
+                flex-wrap: wrap;
+            }
+            .wf-step.on {
+                color: var(--text);
+            }
+            .wf-step.done {
+                color: var(--ok);
+            }
+            .wf-role {
+                font-weight: 700;
+                min-width: 72px;
             }
             /* 봇 답변 마크다운 렌더링 */
             .md {
@@ -816,6 +995,24 @@
                                 />
                                 <span>스트리밍</span>
                             </label>
+                            <label
+                                style="
+                                    margin: 0;
+                                    display: flex;
+                                    align-items: center;
+                                    gap: 6px;
+                                    cursor: pointer;
+                                    font-size: 12px;
+                                "
+                                title="켜면 파이프라인 강제. 끄면 일반(라우터가 단일/파이프라인 중 알아서 선택)"
+                            >
+                                <input
+                                    id="workflow"
+                                    type="checkbox"
+                                    style="width: auto"
+                                />
+                                <span>파이프라인 강제사용</span>
+                            </label>
                             <button id="clear" class="btn-sm">초기화</button>
                         </div>
                     </div>
@@ -825,6 +1022,15 @@
                             대화 내역이 여기에 표시됩니다.
                         </div>
                     </div>
+
+                    <button
+                        id="scrollBottom"
+                        class="scroll-bottom-btn"
+                        title="맨 아래로"
+                        aria-label="맨 아래로"
+                    >
+                        ↓
+                    </button>
 
                     <div class="composer">
                         <textarea
@@ -932,6 +1138,19 @@
                 return `<div class="md">${marked.parse(String(text ?? ""))}</div>`;
             }
 
+            // 파이프라인 아코디언 닫기 버튼 (이벤트 위임)
+            document.addEventListener("click", (e) => {
+                const close = e.target.closest(".wf-close");
+                if (!close) return;
+                const acc = close.closest(".wf-acc");
+                if (acc) {
+                    acc.open = false;
+                    acc.querySelector("summary")?.scrollIntoView({
+                        block: "nearest",
+                    });
+                }
+            });
+
             // 코드박스 복사 버튼 (이벤트 위임)
             document.addEventListener("click", (e) => {
                 const btn = e.target.closest(".copy-btn");
@@ -954,6 +1173,19 @@
             function scrollDown() {
                 log.scrollTop = log.scrollHeight;
             }
+
+            // 맨 아래로 가기 플로팅 버튼: 위로 스크롤했을 때만 표시
+            const scrollBtn = $("scrollBottom");
+            function updateScrollBtn() {
+                const nearBottom =
+                    log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+                scrollBtn.classList.toggle("show", !nearBottom);
+            }
+            log.addEventListener("scroll", updateScrollBtn);
+            scrollBtn.addEventListener("click", () => {
+                scrollDown();
+                updateScrollBtn();
+            });
 
             function addUser(text, imgSrc) {
                 clearEmpty();
@@ -983,18 +1215,147 @@
                 return el;
             }
 
+            // 라우터·파이프라인설계·모델 노드 카드 (단일·파이프라인 공통)
+            function renderTraceNodeHtml(node, flow, routerTierFallback) {
+                if (node.kind === "router" || node.kind === "planner") {
+                    const isPlanner = node.kind === "planner";
+                    const rTier =
+                        (isPlanner ? node.plannerTier : node.routerTier) ||
+                        routerTierFallback ||
+                        (isPlanner ? "design" : "router");
+                    const alias = isPlanner
+                        ? node.plannerAlias
+                        : node.routerAlias;
+                    const model = isPlanner
+                        ? node.plannerModel
+                        : node.routerModel;
+                    const planList = (node.stepsPlan || [])
+                        .map(
+                            (s) =>
+                                `<div class="wf-step done"><span class="wf-role">${s.i}. ${esc(s.role)}</span>` +
+                                `<span class="tier-badge tier-${esc(s.tier)}">${esc(s.tier)}</span>` +
+                                `<span>${esc(s.instruction || "")}</span></div>`,
+                        )
+                        .join("");
+                    const decision = node.decision
+                        ? `<span class="dev-badge dev-cpu">${esc(node.decision)}</span>`
+                        : "";
+                    const title = isPlanner
+                        ? "0. 파이프라인 설계"
+                        : "0. 라우터 (분류)";
+                    const labelMain = isPlanner ? "설계" : "분류";
+                    return `<div class="wf-step-card ${isPlanner ? "wf-planner" : "wf-router"}">
+              <div class="wf-step-head"><strong>${title}</strong>
+                <span class="tier-badge tier-${esc(rTier)}">${esc(rTier)}</span>
+                ${alias ? `<span class="dev-badge dev-cpu">${esc(alias)}</span>` : ""}
+                ${model ? `<span class="muted">${esc(String(model).split(/[\\/]/).pop())}</span>` : ""}
+                ${decision}
+              </div>
+              <div class="wf-step-inst">${esc(node.planner || (isPlanner ? "파이프라인 설계" : "라우터"))}</div>
+              <div class="wf-label">${labelMain}</div>
+              <div class="wf-step-out">${esc(node.reason || "")}</div>
+              ${
+                  planList
+                      ? `<div class="wf-label">진행 경로 · ${esc(node.flow || flow)}</div>${planList}`
+                      : node.flow
+                        ? `<div class="wf-label">핸드오프 · ${esc(node.flow || flow)}</div>`
+                        : ""
+              }
+            </div>`;
+                }
+                if (node.kind === "security") {
+                    const pass = node.allow !== false;
+                    return `<div class="wf-step-card wf-security">
+              <div class="wf-step-head">
+                <strong>보안검증</strong>
+                <span class="tier-badge tier-medium">gate</span>
+                ${node.alias ? `<span class="dev-badge dev-cpu">${esc(node.alias)}</span>` : ""}
+                <span class="dev-badge ${pass ? "dev-gpu" : "dev-cpu"}">${pass ? "통과" : "차단"}</span>
+                ${node.ms != null ? `<span class="muted">${node.ms}ms</span>` : ""}
+              </div>
+              <div class="wf-step-inst">파이프라인과 별개 · 최종 답변 게이트</div>
+              <div class="wf-label">${pass ? "허용" : "거절"} · ${esc(node.reason || "")}</div>
+              <div class="wf-step-out">${esc(node.output || "")}</div>
+              ${node.backend ? `<div class="wf-step-inst">${esc(node.backend)}</div>` : ""}
+            </div>`;
+                }
+                // model step
+                const who =
+                    node.alias ||
+                    `${node.tier}${node.device ? "/" + node.device : ""}`;
+                const from = node.receivedFrom;
+                return `<div class="wf-step-card">
+              <div class="wf-step-head">
+                <strong>${node.i}. ${esc(node.role || "step")}</strong>
+                <span class="tier-badge tier-${esc(node.tier)}">${esc(node.tier)}</span>
+                ${node.device ? `<span class="dev-badge dev-${esc(node.device)}">${esc(String(node.device).toUpperCase())}</span>` : ""}
+                ${node.alias ? `<span class="dev-badge dev-cpu">${esc(node.alias)}</span>` : ""}
+                ${node.ms != null ? `<span class="muted">${node.ms}ms</span>` : ""}
+              </div>
+              ${node.instruction ? `<div class="wf-step-inst">지시: ${esc(node.instruction)}</div>` : ""}
+              ${
+                  from
+                      ? `<div class="wf-handoff"><strong>← 받은 입력</strong> (${esc(from.label || "")})${from.text || from.preview ? `<div class="wf-step-out" style="max-height:100px;margin-top:4px">${esc(from.text || from.preview || "")}</div>` : ""}</div>`
+                      : ""
+              }
+              <div class="wf-label">${esc(who)} 의 답변${node.isLast ? " (최종)" : ""}</div>
+              <div class="wf-step-out">${esc(node.output || "")}</div>
+              ${node.backend ? `<div class="wf-step-inst">${esc(node.backend)}</div>` : ""}
+            </div>`;
+            }
+
+            function traceBodyHtml(trace, flow, routerTier) {
+                return trace
+                    .map((n) => renderTraceNodeHtml(n, flow, routerTier))
+                    .join("");
+            }
+
             function fillAssistant(el, data, ms) {
                 el.classList.remove("err");
                 const tier = data.tier
                     ? `<span class="tier-badge tier-${data.tier}">${data.tier}</span>`
                     : "";
+                const aliasBit = data.alias ? ` · ${esc(data.alias)}` : "";
                 const dev = data.device
-                    ? `<span class="dev-badge dev-${data.device}">${data.device.toUpperCase()}${data.difficulty != null ? " " + data.difficulty : ""}</span>`
-                    : "";
-                // 라우팅 판단 근거 (호버 시 장치 선택 사유까지 표시)
+                    ? `<span class="dev-badge dev-${data.device}" title="${esc(data.alias || "")}">${data.device.toUpperCase()}${data.difficulty != null ? " " + data.difficulty : ""}${aliasBit}</span>`
+                    : data.alias
+                      ? `<span class="dev-badge dev-cpu">${esc(data.alias)}</span>`
+                      : "";
                 const why = data.routeReason
                     ? `<span class="route-why" title="${esc(data.deviceReason || "")}">🧭 ${esc(data.routeReason)}</span>`
                     : "";
+                const steps = (
+                    Array.isArray(data.workflowSteps) ? data.workflowSteps : []
+                ).filter(
+                    (s) => s && s.role !== "security" && s.tier !== "security",
+                );
+                const trace = Array.isArray(data.workflowTrace)
+                    ? data.workflowTrace
+                    : null;
+                const isPipeline =
+                    data.mode === "workflow" && steps.length > 1;
+                const modeBadge = isPipeline
+                    ? '<span class="tier-badge tier-large">pipeline</span>'
+                    : "";
+                const routerAlias =
+                    data.routerAlias ||
+                    trace?.find((n) => n.kind === "router")?.routerAlias ||
+                    null;
+                const routerTier =
+                    data.routerTier ||
+                    trace?.find((n) => n.kind === "router")?.routerTier ||
+                    null;
+                const routerBackend =
+                    data.routerBackend ||
+                    trace?.find((n) => n.kind === "router")?.routerBackend ||
+                    null;
+                const routerModelRaw =
+                    data.routerModel ||
+                    trace?.find((n) => n.kind === "router")?.routerModel ||
+                    null;
+                const routerModel = routerModelRaw
+                    ? String(routerModelRaw).split(/[\\/]/).pop()
+                    : null;
                 const u = data.usage;
                 const metaParts = [
                     data.model ? `model: ${esc(data.model)}` : null,
@@ -1009,11 +1370,131 @@
                           : null,
                     ms != null ? `${ms} ms` : null,
                 ].filter(Boolean);
+
                 let html = renderMd(data.answer || "(빈 응답)");
                 if (data.reasoning) {
                     html += `<details><summary>추론 과정 보기</summary><div class="reason">${renderMd(data.reasoning)}</div></details>`;
                 }
-                html += `<div class="msg-meta">${tier}${dev}${why}<span>${metaParts.join(" · ")}</span></div>`;
+                html += `<div class="msg-meta">${modeBadge}${tier}${dev}${why}<span>${metaParts.join(" · ")}</span></div>`;
+
+                // 라우터 도착 → 각 모델 → 결과 경로를 항상 아코디언으로
+                // (단일 모델이든 파이프라인이든 거쳐간 경로를 보여준다)
+                {
+                    const flow = isPipeline
+                        ? steps.map((s) => s.tier).join(" → ")
+                        : data.tier || "?";
+                    const plannerNode = trace?.find((n) => n.kind === "planner");
+                    const routerNode = trace?.find((n) => n.kind === "router");
+                    const pathBits = [];
+                    if (routerNode || routerTier) {
+                        pathBits.push(
+                            routerTier
+                                ? `라우터 ${routerTier}`
+                                : /heuristic|휴리스틱/i.test(
+                                        data.routeReason || "",
+                                    )
+                                  ? "라우터(휴리스틱)"
+                                  : "라우터",
+                        );
+                    }
+                    if (plannerNode || isPipeline) {
+                        const pAlias =
+                            data.plannerAlias ||
+                            plannerNode?.plannerAlias ||
+                            null;
+                        pathBits.push(
+                            pAlias ? `설계 ${pAlias}` : "파이프라인 설계",
+                        );
+                    }
+                    if (!pathBits.length) {
+                        pathBits.push(
+                            /heuristic|휴리스틱/i.test(data.routeReason || "")
+                                ? "휴리스틱"
+                                : "경로",
+                        );
+                    }
+                    const pathText = `${pathBits.join(" → ")} → ${esc(flow)}`;
+                    const accLabel = isPipeline
+                        ? "파이프라인 구성 보기"
+                        : "경로 보기";
+                    const countText = isPipeline
+                        ? `${steps.length}모델`
+                        : "단일 모델";
+
+                    let bodyHtml;
+                    if (trace?.length) {
+                        // 파이프라인(또는 trace 포함): 라우터 노드 + 각 모델 노드
+                        bodyHtml = traceBodyHtml(trace, flow, routerTier);
+                    } else if (isPipeline) {
+                        // 구형 데이터 폴백 (trace 없음)
+                        bodyHtml = steps
+                            .map((s, i) => {
+                                const out = s.output || s.preview || "";
+                                return `<div class="wf-step-card">
+              <div class="wf-step-head">
+                <strong>${i + 1}. ${esc(s.role || "step")}</strong>
+                <span class="tier-badge tier-${esc(s.tier)}">${esc(s.tier)}</span>
+                ${s.alias ? `<span class="dev-badge dev-cpu">${esc(s.alias)}</span>` : ""}
+              </div>
+              ${s.instruction ? `<div class="wf-step-inst">지시: ${esc(s.instruction)}</div>` : ""}
+              ${out ? `<div class="wf-step-out">${esc(out)}</div>` : ""}
+            </div>`;
+                            })
+                            .join("");
+                    } else {
+                        // 단일 모델(direct): 라우터 분류 → 단일 모델 답변
+                        const directTrace = [
+                            {
+                                kind: "router",
+                                title: "라우터 분류",
+                                planner: routerAlias
+                                    ? `LLM 라우터${routerModel ? ` · ${routerModel}` : ""}`
+                                    : /heuristic|휴리스틱/i.test(
+                                            data.routeReason || "",
+                                        )
+                                      ? "휴리스틱 분류 (LLM 라우터 미사용)"
+                                      : "라우터",
+                                routerTier,
+                                routerAlias,
+                                routerModel,
+                                routerBackend,
+                                reason: data.routeReason,
+                                flow,
+                                decision: data.tier
+                                    ? `단일 · ${data.tier}`
+                                    : "단일 모델",
+                                stepsPlan: [],
+                            },
+                            {
+                                kind: "model",
+                                i: 1,
+                                role: "answer",
+                                tier: data.tier,
+                                device: data.device,
+                                alias: data.alias,
+                                backend: data.backend,
+                                model: data.model,
+                                output: data.answer,
+                                isLast: true,
+                                receivedFrom: {
+                                    kind: "user",
+                                    label: "사용자 질문",
+                                },
+                            },
+                        ];
+                        bodyHtml = traceBodyHtml(directTrace, flow, routerTier);
+                    }
+
+                    html += `<details class="wf-acc">
+                      <summary>
+                        <span>${accLabel}</span>
+                        <span class="wf-flow">${pathText}</span>
+                        <span class="muted" style="font-weight:500">${countText}</span>
+                      </summary>
+                      <div class="wf-acc-body">${bodyHtml}<button type="button" class="wf-close">닫기 ▲</button></div>
+                    </details>`;
+                }
+
                 el.innerHTML = html;
                 scrollDown();
             }
@@ -1045,6 +1526,7 @@
                                     model: it.model,
                                     tier: it.tier,
                                     device: it.device,
+                                    alias: it.alias,
                                 },
                                 null,
                             );
@@ -1056,7 +1538,20 @@
                                     reasoning: it.reasoning,
                                     model: it.model,
                                     tier: it.tier,
+                                    device: it.device,
+                                    alias: it.alias,
+                                    difficulty: it.difficulty,
+                                    routeReason: it.routeReason,
+                                    deviceReason: it.deviceReason,
                                     usage: it.usage,
+                                    mode: it.mode,
+                                    routerBackend: it.routerBackend,
+                                    routerTier: it.routerTier,
+                                    routerAlias: it.routerAlias,
+                                    routerDevice: it.routerDevice,
+                                    routerModel: it.routerModel,
+                                    workflowSteps: it.workflowSteps,
+                                    workflowTrace: it.workflowTrace,
                                 },
                                 null,
                             );
@@ -1125,6 +1620,8 @@
                 if ($("memory").checked && convo.length > 0) {
                     body.HISTORY = convo.slice(-12);
                 }
+                // 체크=파이프라인 강제(on). 미체크=일반(auto, body에 안 넣음)
+                if ($("workflow").checked) body.WORKFLOW = true;
 
                 addUser(user, content);
                 const el = addAssistant();
@@ -1240,7 +1737,43 @@
                 let answer = "";
                 let meta = {};
                 let done = null;
+                let wfSteps = [];
                 const textEl = startStreamText(el);
+                // 스트리밍 중 파이프라인 상태 표시용
+                const wfHost = document.createElement("div");
+                wfHost.className = "wf-box";
+                wfHost.style.display = "none";
+                el.insertBefore(wfHost, el.firstChild);
+
+                function renderWfLive() {
+                    if (!wfSteps.length) {
+                        wfHost.style.display = "none";
+                        return;
+                    }
+                    wfHost.style.display = "";
+                    const flow = wfSteps.map((s) => s.tier).join(" → ");
+                    wfHost.innerHTML =
+                        `<div class="wf-title">파이프라인 진행 중 · ${esc(flow)}</div>` +
+                        wfSteps
+                            .map((s) => {
+                                const cls =
+                                    s.status === "done"
+                                        ? "done"
+                                        : s.status === "start"
+                                          ? "on"
+                                          : "";
+                                const mark =
+                                    s.status === "done"
+                                        ? "✓"
+                                        : s.status === "start"
+                                          ? "…"
+                                          : "·";
+                                return `<div class="wf-step ${cls}"><span class="wf-role">${mark} ${s.i + 1}. ${esc(s.role)}</span>` +
+                                    `<span class="tier-badge tier-${s.tier}">${esc(s.tier)}</span>` +
+                                    `<span>${esc(s.instruction || "")}</span></div>`;
+                            })
+                            .join("");
+                }
 
                 await readSse(r, (event, data) => {
                     if (event === "token") {
@@ -1249,6 +1782,33 @@
                         scrollDown();
                     } else if (event === "meta") {
                         meta = { ...meta, ...data };
+                        if (data.workflow?.length && !wfSteps.length) {
+                            wfSteps = data.workflow.map((s) => ({
+                                ...s,
+                                status: "",
+                            }));
+                            renderWfLive();
+                        }
+                    } else if (event === "workflow") {
+                        if (data.steps?.length) {
+                            wfSteps = data.steps.map((s) => ({
+                                ...s,
+                                status: "",
+                            }));
+                            renderWfLive();
+                        }
+                    } else if (event === "step") {
+                        const cur = wfSteps.find((s) => s.i === data.i);
+                        if (cur) {
+                            cur.status = data.status;
+                            if (data.alias) cur.alias = data.alias;
+                            if (data.ms != null) cur.ms = data.ms;
+                            if (data.preview) cur.preview = data.preview;
+                            if (data.instruction) cur.instruction = data.instruction;
+                        } else if (data.status === "start") {
+                            wfSteps.push({ ...data, status: "start" });
+                        }
+                        renderWfLive();
                     } else if (event === "done") {
                         done = data;
                     } else if (event === "error") {
@@ -1266,6 +1826,7 @@
                             model: done.model,
                             tier: done.tier,
                             device: done.device,
+                            alias: done.alias || meta.alias,
                             difficulty: done.difficulty,
                             routeReason: meta.reason,
                             deviceReason: meta.deviceReason,
@@ -1273,6 +1834,27 @@
                             tokensPerSec: done.tokensPerSec,
                             tokens: done.tokens,
                             usage: done.usage,
+                            mode: done.mode || meta.mode,
+                            routeReason: done.routeReason || meta.reason,
+                            routerBackend:
+                                done.routerBackend || meta.routerBackend,
+                            routerTier: done.routerTier || meta.routerTier,
+                            routerAlias: done.routerAlias || meta.routerAlias,
+                            routerDevice:
+                                done.routerDevice || meta.routerDevice,
+                            routerModel: done.routerModel || meta.routerModel,
+                            workflowSteps:
+                                done.workflowSteps ||
+                                wfSteps.map((s) => ({
+                                    tier: s.tier,
+                                    role: s.role,
+                                    alias: s.alias,
+                                    ms: s.ms,
+                                    instruction: s.instruction,
+                                    preview: s.preview,
+                                    device: s.device,
+                                })),
+                            workflowTrace: done.workflowTrace,
                         },
                         ms,
                     );
@@ -1374,9 +1956,12 @@
                 const tier = data.tier
                     ? `<span class="tier-badge tier-${data.tier}">${data.tier}</span>`
                     : "";
+                const aliasBit = data.alias ? ` · ${esc(data.alias)}` : "";
                 const dev = data.device
-                    ? `<span class="dev-badge dev-${data.device}">${data.device.toUpperCase()}</span>`
-                    : "";
+                    ? `<span class="dev-badge dev-${data.device}" title="${esc(data.alias || "")}">${data.device.toUpperCase()}${aliasBit}</span>`
+                    : data.alias
+                      ? `<span class="dev-badge dev-cpu">${esc(data.alias)}</span>`
+                      : "";
                 const mode = data.strict
                     ? '<span class="tier-badge tier-small">문서만</span>'
                     : '<span class="tier-badge tier-medium">문서기반</span>';

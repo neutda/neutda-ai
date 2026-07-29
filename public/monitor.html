@@ -3,513 +3,11 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>neutda-ai · LLM 모니터링</title>
+        <title>neutda-ai · 서버 모니터링</title>
+        <link rel="stylesheet" href="/dashboard.css" />
         <style>
-            :root {
-                --bg: #0f1117;
-                --panel: #171a23;
-                --border: #272b38;
-                --text: #e7e9ee;
-                --muted: #9aa3b2;
-                --accent: #6c8cff;
-                --ok: #3fb950;
-                --err: #f85149;
-                --warn: #d29922;
-            }
-            * {
-                box-sizing: border-box;
-            }
-            body {
-                margin: 0;
-                font-family:
-                    ui-sans-serif, system-ui, "Segoe UI", "Malgun Gothic",
-                    sans-serif;
-                background: var(--bg);
-                color: var(--text);
-            }
-            .wrap {
-                max-width: 1500px;
-                margin: 0 auto;
-                padding: 24px 20px 64px;
-            }
-            .table-scroll {
-                width: 100%;
-                overflow-x: auto;
-            }
-            header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: 12px;
-                margin-bottom: 18px;
-                flex-wrap: wrap;
-            }
-            h1 {
-                font-size: 18px;
-                margin: 0;
-            }
-            a {
-                color: var(--accent);
-                text-decoration: none;
-                font-size: 13px;
-            }
-            .summary {
-                display: grid;
-                grid-template-columns: repeat(6, 1fr);
-                gap: 12px;
-                margin-bottom: 20px;
-            }
-            @media (max-width: 760px) {
-                .summary {
-                    grid-template-columns: repeat(2, 1fr);
-                }
-            }
-            .card {
-                background: var(--panel);
-                border: 1px solid var(--border);
-                border-radius: 12px;
-                padding: 14px 16px;
-            }
-            .card .k {
-                font-size: 12px;
-                color: var(--muted);
-            }
-            .card .v {
-                font-size: 24px;
-                font-weight: 700;
-                margin-top: 4px;
-                font-variant-numeric: tabular-nums;
-            }
             table {
-                width: 100%;
-                min-width: 1180px;
-                border-collapse: collapse;
-                background: var(--panel);
-                border: 1px solid var(--border);
-                border-radius: 12px;
-                overflow: hidden;
-            }
-            th,
-            td {
-                text-align: left;
-                padding: 11px 14px;
-                font-size: 14px;
-                border-bottom: 1px solid var(--border);
-                white-space: nowrap;
-            }
-            th {
-                color: var(--muted);
-                font-weight: 600;
-                font-size: 12px;
-                text-transform: uppercase;
-                letter-spacing: 0.04em;
-            }
-            tr:last-child td {
-                border-bottom: 0;
-            }
-            th.num,
-            td.num {
-                text-align: right;
-                font-variant-numeric: tabular-nums;
-            }
-            .pill {
-                display: inline-flex;
-                align-items: center;
-                gap: 6px;
-                font-size: 12px;
-                padding: 3px 9px;
-                border-radius: 999px;
-                white-space: nowrap;
-            }
-            .model {
-                max-width: 320px;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-            }
-            .pill .dot {
-                width: 8px;
-                height: 8px;
-                border-radius: 50%;
-            }
-            .up {
-                background: rgba(63, 185, 80, 0.12);
-                color: var(--ok);
-            }
-            .up .dot {
-                background: var(--ok);
-            }
-            .down {
-                background: rgba(248, 81, 73, 0.12);
-                color: var(--err);
-            }
-            .down .dot {
-                background: var(--err);
-            }
-            .bar {
-                height: 6px;
-                background: #0d0f15;
-                border-radius: 4px;
-                overflow: hidden;
-                margin-top: 6px;
-            }
-            .bar > span {
-                display: block;
-                height: 100%;
-                background: var(--accent);
-            }
-            .muted {
-                color: var(--muted);
-                font-size: 12px;
-            }
-            .err {
-                color: var(--err);
-                font-size: 12px;
-                max-width: 280px;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-            }
-            .updated {
-                font-size: 12px;
-                color: var(--muted);
-            }
-            .tier {
-                font-size: 11px;
-                font-weight: 700;
-                padding: 2px 8px;
-                border-radius: 999px;
-                text-transform: uppercase;
-            }
-            .tier-large {
-                background: rgba(108, 140, 255, 0.15);
-                color: var(--accent);
-            }
-            .tier-medium {
-                background: rgba(63, 185, 80, 0.15);
-                color: var(--ok);
-            }
-            .tier-small {
-                background: rgba(210, 153, 34, 0.15);
-                color: var(--warn);
-            }
-            .role-switch {
-                position: relative;
-                display: inline-block;
-                width: 36px;
-                height: 20px;
-                vertical-align: middle;
-            }
-            .role-switch input {
-                opacity: 0;
-                width: 0;
-                height: 0;
-            }
-            .role-slider {
-                position: absolute;
-                cursor: pointer;
-                inset: 0;
-                background: #2a2f3d;
-                border-radius: 999px;
-                transition: 0.2s;
-            }
-            .role-slider::before {
-                content: "";
-                position: absolute;
-                height: 14px;
-                width: 14px;
-                left: 3px;
-                bottom: 3px;
-                background: var(--muted);
-                border-radius: 50%;
-                transition: 0.2s;
-            }
-            .role-switch input:checked + .role-slider {
-                background: rgba(63, 185, 80, 0.35);
-            }
-            .role-switch input:checked + .role-slider::before {
-                transform: translateX(16px);
-                background: var(--ok);
-            }
-            .role-switch input:disabled + .role-slider {
-                opacity: 0.45;
-                cursor: wait;
-            }
-            .role-tag {
-                font-size: 11px;
-                color: var(--muted);
-                margin-left: 6px;
-                vertical-align: middle;
-            }
-            .role-pair {
-                display: inline-flex;
-                align-items: center;
-                gap: 4px;
-            }
-            .route-badge {
-                font-size: 11px;
-                padding: 3px 10px;
-                border-radius: 999px;
-                background: rgba(108, 140, 255, 0.12);
-                color: var(--accent);
-                margin-left: 10px;
-            }
-            .route-badge.heuristic {
-                background: rgba(210, 153, 34, 0.12);
-                color: var(--warn);
-            }
-            .dev {
-                font-size: 11px;
-                font-weight: 700;
-                padding: 2px 8px;
-                border-radius: 6px;
-            }
-            .dev-gpu {
-                background: rgba(63, 185, 80, 0.15);
-                color: var(--ok);
-            }
-            .dev-cpu {
-                background: rgba(210, 153, 34, 0.15);
-                color: var(--warn);
-            }
-            .dev-na {
-                background: rgba(154, 163, 178, 0.15);
-                color: var(--muted);
-            }
-            h2 {
-                font-size: 15px;
-                margin: 28px 0 12px;
-            }
-            .res-grid {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 12px;
-            }
-            @media (max-width: 760px) {
-                .res-grid {
-                    grid-template-columns: 1fr;
-                }
-            }
-            .res {
-                background: var(--panel);
-                border: 1px solid var(--border);
-                border-radius: 12px;
-                padding: 14px 16px;
-            }
-            .res .top {
-                display: flex;
-                align-items: baseline;
-                justify-content: space-between;
-                gap: 8px;
-            }
-            .res .name {
-                font-size: 13px;
-                font-weight: 600;
-            }
-            .res .name small {
-                color: var(--muted);
-                font-weight: 400;
-                font-size: 11px;
-            }
-            .res .pct {
-                font-size: 20px;
-                font-weight: 700;
-                font-variant-numeric: tabular-nums;
-            }
-            .meter {
-                height: 9px;
-                background: #0d0f15;
-                border-radius: 5px;
-                overflow: hidden;
-                margin: 9px 0 8px;
-            }
-            .meter > span {
-                display: block;
-                height: 100%;
-                background: var(--ok);
-                transition: width 0.4s ease;
-            }
-            .meter.warn > span {
-                background: var(--warn);
-            }
-            .meter.crit > span {
-                background: var(--err);
-            }
-            .res .sub {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 4px 14px;
-                font-size: 12px;
-                color: var(--muted);
-                font-variant-numeric: tabular-nums;
-            }
-            .chart-wrap {
-                background: var(--panel);
-                border: 1px solid var(--border);
-                border-radius: 12px;
-                padding: 14px 16px;
-                margin-top: 12px;
-            }
-            .chart-legend {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 16px;
-                margin-bottom: 10px;
-                font-size: 12px;
-                color: var(--muted);
-            }
-            .chart-legend .lg {
-                display: inline-flex;
-                align-items: center;
-                gap: 6px;
-            }
-            .chart-legend .sw {
-                width: 11px;
-                height: 11px;
-                border-radius: 2px;
-                display: inline-block;
-            }
-            .chart-legend b {
-                color: var(--text);
-                font-variant-numeric: tabular-nums;
-            }
-            canvas#resChart {
-                width: 100%;
-                height: 220px;
-                display: block;
-            }
-            .savings-grid {
-                display: grid;
-                grid-template-columns: 1fr 1fr 2fr;
-                gap: 12px;
-                margin-bottom: 20px;
-            }
-            @media (max-width: 760px) {
-                .savings-grid {
-                    grid-template-columns: 1fr;
-                }
-            }
-            .tier-dist {
-                display: flex;
-                height: 16px;
-                border-radius: 8px;
-                overflow: hidden;
-                background: #0d0f15;
-                margin-top: 10px;
-            }
-            .tier-dist > span {
-                display: block;
-                height: 100%;
-                transition: width 0.4s ease;
-            }
-            .tier-dist .seg-small {
-                background: var(--warn);
-            }
-            .tier-dist .seg-medium {
-                background: var(--ok);
-            }
-            .tier-dist .seg-large {
-                background: var(--accent);
-            }
-            .tier-legend {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 6px 16px;
-                margin-top: 9px;
-                font-size: 12px;
-                color: var(--muted);
-                font-variant-numeric: tabular-nums;
-            }
-            .tier-legend b {
-                color: var(--text);
-            }
-            .tier-legend .sw {
-                width: 10px;
-                height: 10px;
-                border-radius: 2px;
-                display: inline-block;
-                margin-right: 5px;
-                vertical-align: -1px;
-            }
-            /* 모델 서버 추가 폼 */
-            .add-server {
-                margin-bottom: 14px;
-            }
-            .as-row {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 10px;
-                align-items: flex-end;
-            }
-            .as-row label {
-                display: flex;
-                flex-direction: column;
-                gap: 4px;
-                font-size: 11px;
-                color: var(--muted);
-                font-weight: 600;
-            }
-            .as-row input,
-            .as-row select {
-                background: #0d0f15;
-                border: 1px solid var(--border);
-                border-radius: 7px;
-                color: var(--text);
-                padding: 7px 9px;
-                font-size: 13px;
-                font-family: inherit;
-            }
-            .as-row .grow {
-                flex: 1;
-                min-width: 260px;
-            }
-            .as-row .grow input {
-                width: 100%;
-            }
-            .as-add-btn {
-                background: var(--accent);
-                color: #fff;
-                border: 0;
-                border-radius: 7px;
-                padding: 8px 18px;
-                font-size: 13px;
-                font-weight: 700;
-                cursor: pointer;
-            }
-            .as-add-btn:hover {
-                background: #5570e6;
-            }
-            .as-add-btn:disabled {
-                opacity: 0.55;
-                cursor: wait;
-            }
-            .del-btn {
-                background: rgba(248, 81, 73, 0.12);
-                color: #ff9c95;
-                border: 0;
-                border-radius: 6px;
-                padding: 3px 8px;
-                font-size: 10px;
-                font-weight: 700;
-                cursor: pointer;
-                margin-left: 6px;
-                vertical-align: middle;
-            }
-            .del-btn:hover {
-                background: rgba(248, 81, 73, 0.26);
-                color: #fff;
-            }
-            /* 모델 서버 전원 토글 */
-            .pw-loading {
-                font-size: 11px;
-                color: var(--warn);
-                margin-left: 6px;
-            }
-            .pw-state {
-                font-size: 11px;
-                color: var(--muted);
-                margin-left: 6px;
-                vertical-align: middle;
+                min-width: 1280px;
             }
         </style>
     </head>
@@ -517,7 +15,7 @@
         <div class="wrap">
             <header>
                 <h1>
-                    LLM 백엔드 모니터링
+                    서버 모니터링
                     <span id="routeBadge" class="route-badge">–</span>
                 </h1>
                 <div><span id="updated" class="updated"></span></div>
@@ -556,7 +54,17 @@
                 </div>
             </div>
 
-            <h2 style="margin-top: 4px">
+            <h2 style="margin-top: 4px">실시간 시스템 자원</h2>
+            <div class="res-grid" id="resGrid">
+                <div class="res"><div class="muted">불러오는 중…</div></div>
+            </div>
+
+            <div class="chart-wrap">
+                <div class="chart-legend" id="chartLegend"></div>
+                <canvas id="resChart"></canvas>
+            </div>
+
+            <h2>
                 티어 라우팅 효과
                 <span class="muted" id="svSince" style="font-weight: 400"></span>
             </h2>
@@ -578,54 +86,19 @@
                 </div>
             </div>
 
-            <div class="card add-server">
-                <div class="k" style="margin-bottom: 9px">
-                    모델 서버 추가
-                    <span class="muted" style="font-weight: 400">
-                        — 티어 선택 시 servers.json 의 같은 티어 정의가 기본값으로 채워집니다. 이름·포트는 자동 할당.</span
-                    >
-                </div>
-                <div class="as-row">
-                    <label>
-                        티어
-                        <select id="asTier">
-                            <option value="small">small</option>
-                            <option value="medium">medium</option>
-                            <option value="large">large</option>
-                        </select>
-                    </label>
-                    <label class="grow">
-                        모델 파일
-                        <input id="asModel" type="text" placeholder="models/....gguf" />
-                    </label>
-                    <label>
-                        컨텍스트(ctx)
-                        <input id="asCtx" type="number" style="width: 90px" />
-                    </label>
-                    <label title="0 = CPU 전용, 99 = 전체 레이어 GPU">
-                        GPU 레이어(ngl)
-                        <input id="asNgl" type="number" style="width: 90px" />
-                    </label>
-                    <label title="CUDA_VISIBLE_DEVICES 값. 비우면 기본 GPU">
-                        GPU ID
-                        <input id="asGpu" type="text" style="width: 70px" placeholder="(기본)" />
-                    </label>
-                    <button id="asAdd" class="as-add-btn">추가 + 기동</button>
-                </div>
-            </div>
-
+            <h2>백엔드 상태</h2>
             <div class="table-scroll">
                 <table>
                     <thead>
                         <tr>
                             <th>백엔드</th>
+                            <th>별칭</th>
                             <th>티어</th>
                             <th>장치</th>
-                            <th>채팅</th>
-                            <th>라우터</th>
+                            <th>역할</th>
                             <th>모델</th>
                             <th>상태</th>
-                            <th>전원</th>
+                            <th>프로세스</th>
                             <th class="num">진행 중</th>
                             <th class="num">라우팅</th>
                             <th class="num">채팅</th>
@@ -643,24 +116,11 @@
                 </table>
             </div>
             <p class="muted" id="hint" style="margin-top: 14px"></p>
-
-            <h2>실시간 시스템 자원</h2>
-            <div class="res-grid" id="resGrid">
-                <div class="res"><div class="muted">불러오는 중…</div></div>
-            </div>
-
-            <div class="chart-wrap">
-                <div class="chart-legend" id="chartLegend"></div>
-                <canvas id="resChart"></canvas>
-            </div>
         </div>
 
         <script>
             const $ = (id) => document.getElementById(id);
-            let roleBusy = false;
-            let powerBusy = false;
-            let serversCache = [];
-            let addFormInit = false;
+            const COLS = 15;
 
             function escAttr(s) {
                 return String(s ?? "")
@@ -668,32 +128,28 @@
                     .replace(/"/g, "&quot;");
             }
 
-            function roleToggle(b, role, enabled) {
-                const label = role === "chat" ? "채팅" : "라우터";
-                const hint =
-                    role === "chat"
-                        ? "채팅 응답 풀에 포함"
-                        : "티어·난이도 LLM 분류에 사용";
-                return `<span class="role-pair" title="${hint}">
-      <label class="role-switch">
-        <input type="checkbox" class="role-toggle" data-url="${escAttr(b.url)}" data-role="${role}" ${enabled ? "checked" : ""} ${roleBusy ? "disabled" : ""}>
-        <span class="role-slider"></span>
-      </label>
-      <span class="role-tag">${label}</span>
-    </span>`;
-            }
-
-            function roleCells(b) {
-                const chat = b.roles?.chat ?? b.chatEnabled ?? false;
-                const router = b.roles?.router ?? b.routerEnabled ?? false;
-                return {
-                    chat: roleToggle(b, "chat", chat),
-                    router: roleToggle(b, "router", router),
-                };
+            function roleBadges(b) {
+                const r = b.roles || {};
+                const items = [
+                    [
+                        "solve",
+                        "해결",
+                        r.solve ?? r.chat ?? b.solveEnabled ?? b.chatEnabled,
+                    ],
+                    ["router", "라우터", r.router ?? b.routerEnabled],
+                    ["planner", "설계", r.planner ?? b.plannerEnabled],
+                    ["embedding", "임베딩", r.embedding ?? b.embeddingEnabled],
+                    ["security", "보안검증", r.security ?? b.securityEnabled],
+                ];
+                return items
+                    .map(
+                        ([, label, on]) =>
+                            `<span class="role-ro ${on ? "on" : ""}">${label}</span>`,
+                    )
+                    .join("");
             }
 
             async function refresh() {
-                if (powerBusy) return; // 전원 조작 중엔 재렌더 보류
                 try {
                     const [r, rs] = await Promise.all([
                         fetch("/api/status"),
@@ -705,11 +161,7 @@
                         servers = (await rs?.json())?.servers ?? [];
                     } catch {}
                     const svByUrl = new Map(servers.map((x) => [x.url, x]));
-                    serversCache = servers;
-                    if (!addFormInit && servers.length) {
-                        addFormInit = true;
-                        prefillAddForm();
-                    }
+
                     $("sBackends").textContent = s.totalBackends;
                     $("sHealthy").textContent = s.healthyBackends;
                     $("sInflight").textContent = s.totalInFlight;
@@ -732,33 +184,39 @@
                         1,
                         ...s.backends.map((b) => b.inFlight),
                     );
-                    $("rows").innerHTML = s.backends
+                    const tierRank = { large: 0, medium: 1, small: 2 };
+                    const backends = [...s.backends].sort((a, b) => {
+                        const ta = tierRank[a.tier] ?? 9;
+                        const tb = tierRank[b.tier] ?? 9;
+                        if (ta !== tb) return ta - tb;
+                        const ga = a.device === "gpu" ? 0 : 1;
+                        const gb = b.device === "gpu" ? 0 : 1;
+                        if (ga !== gb) return ga - gb;
+                        return String(a.url).localeCompare(String(b.url));
+                    });
+                    $("rows").innerHTML = backends
                         .map((b) => {
-                            const roles = roleCells(b);
                             const sv = svByUrl.get(b.url);
-                            let power = '<span class="muted">–</span>';
+                            let proc = '<span class="muted">–</span>';
                             if (sv) {
-                                const state =
+                                proc =
                                     sv.running && !b.healthy
                                         ? '<span class="pw-loading">로딩중…</span>'
-                                        : `<span class="pw-state">${sv.running ? "ON" : "OFF"}</span>`;
-                                power = `<span class="role-pair" title="모델 서버 프로세스 기동/종료 (OFF 시 VRAM/메모리 해제)">
-      <label class="role-switch">
-        <input type="checkbox" class="pw-toggle" data-name="${escAttr(sv.name)}" ${sv.running ? "checked" : ""} ${powerBusy ? "disabled" : ""}>
-        <span class="role-slider"></span>
-      </label>${state}<button class="del-btn" data-name="${escAttr(sv.name)}" title="서버 정의 삭제 (실행 중이면 종료 후 servers.json 에서 제거)">삭제</button>
-    </span>`;
+                                        : `<span class="pw-state" style="margin-left:0">${sv.running ? "ON" : "OFF"}</span>`;
+                                if (!sv.running && sv.startError) {
+                                    proc += `<span class="start-err" title="${escAttr(sv.startError)}">${escAttr(sv.startError)}</span>`;
+                                }
                             }
                             return `
           <tr>
             <td>${b.url}</td>
+            <td>${escAttr(sv?.alias || sv?.name || b.alias || "–")}</td>
             <td><span class="tier tier-${b.tier}">${b.tier ?? "–"}</span></td>
             <td><span class="dev dev-${b.device || "na"}">${b.device ? b.device.toUpperCase() : "–"}</span></td>
-            <td>${roles.chat}</td>
-            <td>${roles.router}</td>
+            <td>${roleBadges(b)}</td>
             <td class="model" title="${b.model ?? ""}">${b.model ? b.model.split(/[\\/]/).pop() : '<span class="muted">–</span>'}</td>
             <td><span class="pill ${b.healthy ? "up" : "down"}"><span class="dot"></span>${b.healthy ? "정상" : "다운"}</span></td>
-            <td>${power}</td>
+            <td>${proc}</td>
             <td class="num">${b.inFlight}<div class="bar"><span style="width:${(b.inFlight / maxLoad) * 100}%"></span></div></td>
             <td class="num">${b.routerRequests ?? 0}</td>
             <td class="num">${b.chatRequests ?? 0}</td>
@@ -770,120 +228,19 @@
                         })
                         .join("");
 
-                    $("hint").textContent =
+                    $("hint").innerHTML =
                         s.healthyBackends === 0
-                            ? "정상 백엔드가 없습니다. llama-server 를 실행하세요 (npm run llama / run-llama-cluster.ps1)."
+                            ? '정상 백엔드가 없습니다. <a href="/models.html">모델 관리</a> 에서 모델 서버를 추가하거나 전원을 켜세요.'
                             : eff === "heuristic"
-                              ? "라우터 역할이 모두 꺼져 있어 글자수·키워드 휴리스틱으로 티어를 판정합니다. 모니터에서 원하는 모델에 라우터 토글을 켜세요."
+                              ? '라우터 역할이 모두 꺼져 있어 글자수·키워드 휴리스틱으로 티어를 판정합니다. <a href="/models.html">모델 관리</a> 에서 라우터 토글을 켜세요.'
                               : "";
                     $("updated").textContent =
                         "갱신 " + new Date().toLocaleTimeString();
                 } catch (e) {
                     $("rows").innerHTML =
-                        `<tr><td colspan="15" class="err">상태 조회 실패: ${e.message}</td></tr>`;
+                        `<tr><td colspan="${COLS}" class="err">상태 조회 실패: ${e.message}</td></tr>`;
                 }
             }
-
-            // ===== 모델 서버 추가/삭제 =====
-            function prefillAddForm() {
-                const tier = $("asTier").value;
-                const t = serversCache.find((s) => s.tier === tier);
-                if (!t) return;
-                $("asModel").value = t.model ?? "";
-                $("asCtx").value = t.ctx ?? 4096;
-                $("asNgl").value = t.ngl ?? 0;
-                $("asGpu").value = t.gpu ?? "";
-            }
-            $("asTier").addEventListener("change", prefillAddForm);
-
-            $("asAdd").addEventListener("click", async () => {
-                const btn = $("asAdd");
-                btn.disabled = true;
-                btn.textContent = "추가 중…";
-                try {
-                    const body = {
-                        tier: $("asTier").value,
-                        model: $("asModel").value.trim(),
-                        ctx: Number($("asCtx").value),
-                        ngl: Number($("asNgl").value),
-                        gpu: $("asGpu").value.trim(),
-                    };
-                    const r = await fetch("/api/servers", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(body),
-                    });
-                    const d = await r.json().catch(() => ({}));
-                    if (!r.ok) throw new Error(d.error || "추가 실패");
-                } catch (e) {
-                    alert(e.message);
-                } finally {
-                    btn.disabled = false;
-                    btn.textContent = "추가 + 기동";
-                    refresh();
-                }
-            });
-
-            // 서버 정의 삭제 버튼
-            document.querySelector("table").addEventListener("click", async (e) => {
-                const btn = e.target.closest(".del-btn");
-                if (!btn || powerBusy) return;
-                const name = btn.dataset.name;
-                if (
-                    !confirm(
-                        `"${name}" 서버를 삭제할까요?\n실행 중이면 종료되고 servers.json 정의에서도 제거됩니다.`,
-                    )
-                )
-                    return;
-                powerBusy = true;
-                try {
-                    const r = await fetch(
-                        "/api/servers/" + encodeURIComponent(name),
-                        { method: "DELETE" },
-                    );
-                    const d = await r.json().catch(() => ({}));
-                    if (!r.ok) alert(d.error || "삭제 실패");
-                } catch (err) {
-                    alert(err.message);
-                } finally {
-                    powerBusy = false;
-                    refresh();
-                }
-            });
-
-            // 모델 서버 전원 토글 (ON=기동, OFF=종료)
-            document.querySelector("table").addEventListener("change", async (e) => {
-                const inp = e.target;
-                if (!inp.matches(".pw-toggle") || powerBusy) return;
-                const name = inp.dataset.name;
-                const turnOn = inp.checked;
-                if (
-                    !turnOn &&
-                    !confirm(`"${name}" 모델 서버를 종료할까요?\nVRAM/메모리가 해제되고, 해당 백엔드는 다운 상태가 됩니다.`)
-                ) {
-                    inp.checked = true;
-                    return;
-                }
-                powerBusy = true;
-                inp.disabled = true;
-                try {
-                    const r = await fetch(
-                        `/api/servers/${encodeURIComponent(name)}/${turnOn ? "start" : "stop"}`,
-                        { method: "POST" },
-                    );
-                    const d = await r.json().catch(() => ({}));
-                    if (!r.ok) {
-                        inp.checked = !turnOn;
-                        alert(d.error || "요청 실패");
-                    }
-                } catch (err) {
-                    inp.checked = !turnOn;
-                    alert(err.message);
-                } finally {
-                    powerBusy = false;
-                    refresh();
-                }
-            });
 
             // ===== 티어 라우팅 효과 (절감 통계) =====
             const TIER_COLORS = {
@@ -934,37 +291,6 @@
                     })
                     .join("");
             }
-
-            document.querySelector("table").addEventListener("change", async (e) => {
-                const inp = e.target;
-                if (!inp.matches(".role-toggle")) return;
-                if (roleBusy) return;
-                const url = inp.dataset.url;
-                const role = inp.dataset.role;
-                const enabled = inp.checked;
-                roleBusy = true;
-                inp.disabled = true;
-                try {
-                    const r = await fetch("/api/backends/role", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ url, role, enabled }),
-                    });
-                    if (!r.ok) {
-                        inp.checked = !enabled;
-                        const err = await r.json().catch(() => ({}));
-                        alert(err.error || "역할 변경에 실패했습니다.");
-                    } else {
-                        await refresh();
-                    }
-                } catch (err) {
-                    inp.checked = !enabled;
-                    alert(err.message);
-                } finally {
-                    roleBusy = false;
-                    inp.disabled = false;
-                }
-            });
 
             refresh();
             setInterval(refresh, 1000);

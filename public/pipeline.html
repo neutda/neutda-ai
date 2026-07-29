@@ -1,0 +1,994 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · 파이프라인</title>
+        <link rel="stylesheet" href="/dashboard.css" />
+        <style>
+            html,
+            body {
+                height: 100%;
+                overflow: hidden;
+            }
+            body {
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap.pipe-page {
+                flex: 1;
+                min-height: 0;
+                width: 100%;
+                box-sizing: border-box;
+                display: flex;
+                flex-direction: column;
+                padding: 12px 20px 12px;
+                gap: 10px;
+            }
+            .pipe-page > header {
+                margin: 0;
+                flex-shrink: 0;
+            }
+            .pipe-page > header h1 {
+                margin: 0;
+                font-size: 20px;
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 8px;
+            }
+            .summary.mini {
+                flex-shrink: 0;
+                grid-template-columns: repeat(5, 1fr);
+                gap: 8px;
+                margin: 0;
+            }
+            .summary.mini .card {
+                padding: 10px 12px;
+            }
+            .summary.mini .k {
+                font-size: 10px;
+            }
+            .summary.mini .v {
+                font-size: 18px;
+                margin-top: 2px;
+            }
+            .workspace {
+                flex: 1;
+                min-height: 0;
+                display: grid;
+                grid-template-columns: minmax(340px, 1.15fr) minmax(320px, 0.95fr);
+                gap: 12px;
+            }
+            .panel {
+                display: flex;
+                flex-direction: column;
+                min-height: 0;
+                overflow: hidden;
+                margin: 0;
+            }
+            .panel-head {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 10px;
+                flex-shrink: 0;
+            }
+            .panel-head .k {
+                margin: 0;
+                flex: 1;
+            }
+            .panel-head .sub {
+                font-size: 11px;
+                color: var(--muted);
+                font-weight: 400;
+            }
+            .tabs {
+                display: flex;
+                gap: 4px;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 3px;
+            }
+            .tab {
+                border: 0;
+                background: transparent;
+                color: var(--muted);
+                font-size: 12px;
+                font-weight: 700;
+                padding: 6px 12px;
+                border-radius: 6px;
+                cursor: pointer;
+                font-family: inherit;
+            }
+            .tab:hover {
+                color: var(--text);
+            }
+            .tab.active {
+                background: rgba(108, 140, 255, 0.18);
+                color: var(--accent);
+            }
+            .panel-body {
+                flex: 1;
+                min-height: 0;
+                overflow: auto;
+            }
+            .plan-form {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                flex-shrink: 0;
+            }
+            .plan-form textarea {
+                width: 100%;
+                box-sizing: border-box;
+                resize: vertical;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                color: var(--text);
+                padding: 9px 11px;
+                font-size: 13px;
+                font-family: inherit;
+                line-height: 1.5;
+            }
+            #pqUser {
+                min-height: 72px;
+                max-height: 160px;
+            }
+            #pqSystem {
+                min-height: 36px;
+                max-height: 80px;
+            }
+            .plan-form textarea:focus {
+                outline: none;
+                border-color: var(--accent);
+            }
+            .plan-opts {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                align-items: flex-end;
+            }
+            .plan-opts label {
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+                font-size: 11px;
+                color: var(--muted);
+                font-weight: 600;
+            }
+            .plan-opts select {
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                color: var(--text);
+                padding: 7px 9px;
+                font-size: 12px;
+                font-family: inherit;
+            }
+            .plan-opts .chk {
+                flex-direction: row;
+                align-items: center;
+                gap: 6px;
+                padding-bottom: 7px;
+                cursor: pointer;
+            }
+            .plan-btn {
+                background: var(--accent);
+                color: #fff;
+                border: 0;
+                border-radius: 7px;
+                padding: 8px 16px;
+                font-size: 12px;
+                font-weight: 700;
+                cursor: pointer;
+                font-family: inherit;
+                margin-left: auto;
+            }
+            .plan-btn:hover {
+                background: #5570e6;
+            }
+            .plan-btn:disabled {
+                opacity: 0.55;
+                cursor: wait;
+            }
+            .plan-result {
+                margin-top: 10px;
+                padding-top: 10px;
+                border-top: 1px solid var(--border);
+                flex: 1;
+                min-height: 0;
+                overflow: auto;
+            }
+            .plan-empty {
+                color: var(--muted);
+                font-size: 13px;
+                padding: 18px 4px;
+            }
+            .plan-head {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 7px;
+                align-items: center;
+                margin-bottom: 8px;
+            }
+            .mode-badge {
+                font-size: 11px;
+                font-weight: 700;
+                padding: 3px 10px;
+                border-radius: 999px;
+                background: rgba(108, 140, 255, 0.15);
+                color: var(--accent);
+            }
+            .mode-badge.direct {
+                background: rgba(154, 163, 178, 0.15);
+                color: var(--muted);
+            }
+            .mode-badge.long {
+                background: rgba(210, 153, 34, 0.15);
+                color: var(--warn);
+            }
+            .chain {
+                display: flex;
+                flex-direction: column;
+                gap: 0;
+            }
+            .step-card {
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 10px 12px;
+            }
+            .step-card .sc-top {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 6px;
+            }
+            .step-card .sc-i {
+                font-size: 11px;
+                font-weight: 700;
+                color: var(--muted);
+                width: 18px;
+            }
+            .step-card .sc-role {
+                font-size: 11px;
+                color: var(--muted);
+                margin-left: auto;
+            }
+            .step-card .sc-inst {
+                font-size: 12px;
+                line-height: 1.45;
+                color: var(--text);
+            }
+            .arrow {
+                display: flex;
+                justify-content: center;
+                color: var(--muted);
+                font-size: 12px;
+                padding: 4px 0;
+            }
+            .stat-block {
+                margin-bottom: 16px;
+            }
+            .stat-block:last-child {
+                margin-bottom: 0;
+            }
+            .stat-block .sk {
+                font-size: 11px;
+                font-weight: 700;
+                color: var(--muted);
+                margin-bottom: 8px;
+                text-transform: none;
+            }
+            .stat-list {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .stat-item .si-top {
+                display: flex;
+                justify-content: space-between;
+                gap: 8px;
+                font-size: 12px;
+            }
+            .stat-item .si-k {
+                color: var(--text);
+                font-weight: 600;
+            }
+            .stat-item .si-v {
+                color: var(--muted);
+                font-variant-numeric: tabular-nums;
+                white-space: nowrap;
+            }
+            .flow-txt {
+                font-size: 12px;
+                font-variant-numeric: tabular-nums;
+            }
+            .window-note {
+                font-size: 11px;
+                color: var(--muted);
+                margin: 0 0 10px;
+                line-height: 1.45;
+            }
+            .runs-hint {
+                font-size: 11px;
+                color: var(--muted);
+                margin: 0 0 8px;
+            }
+            table {
+                min-width: 720px;
+            }
+            tr.run-row {
+                cursor: pointer;
+            }
+            tr.run-row:hover td {
+                background: #1c202b;
+            }
+            tr.run-row.open td {
+                background: rgba(108, 140, 255, 0.08);
+            }
+            td.detail {
+                white-space: normal;
+                background: #0d0f15;
+                padding: 14px 16px;
+            }
+            .trace-node {
+                border-left: 2px solid var(--border);
+                padding: 0 0 14px 14px;
+                position: relative;
+            }
+            .trace-node:last-child {
+                padding-bottom: 0;
+            }
+            .trace-node::before {
+                content: "";
+                position: absolute;
+                left: -5px;
+                top: 3px;
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: var(--accent);
+            }
+            .trace-node.router::before {
+                background: var(--warn);
+            }
+            .tn-top {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 7px;
+                align-items: center;
+                margin-bottom: 5px;
+            }
+            .tn-title {
+                font-size: 12px;
+                font-weight: 700;
+            }
+            .tn-meta {
+                font-size: 11px;
+                color: var(--muted);
+                font-variant-numeric: tabular-nums;
+            }
+            .tn-body {
+                font-size: 12px;
+                line-height: 1.5;
+                color: var(--muted);
+                white-space: pre-wrap;
+                word-break: break-word;
+                max-height: 160px;
+                overflow: auto;
+                background: #171a23;
+                border: 1px solid var(--border);
+                border-radius: 7px;
+                padding: 8px 10px;
+                margin-top: 5px;
+            }
+            .tn-label {
+                font-size: 10px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: var(--muted);
+                margin-top: 7px;
+            }
+            .left-stack {
+                display: flex;
+                flex-direction: column;
+                min-height: 0;
+                flex: 1;
+            }
+            @media (max-width: 980px) {
+                html,
+                body {
+                    overflow: auto;
+                    height: auto;
+                }
+                .wrap.pipe-page {
+                    height: auto;
+                    flex: none;
+                    overflow: visible;
+                }
+                .summary.mini {
+                    grid-template-columns: repeat(2, 1fr);
+                }
+                .workspace {
+                    grid-template-columns: 1fr;
+                    flex: none;
+                    min-height: 0;
+                }
+                .panel {
+                    min-height: 360px;
+                }
+                .panel-body {
+                    max-height: 55vh;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap pipe-page">
+            <header>
+                <h1>
+                    파이프라인
+                    <span id="modeBadge" class="route-badge">–</span>
+                    <span id="routerBadge" class="route-badge">–</span>
+                </h1>
+                <div><span id="updated" class="updated"></span></div>
+            </header>
+
+            <div class="summary mini">
+                <div class="card">
+                    <div class="k">파이프라인 실행</div>
+                    <div class="v" id="sWorkflow" style="color: var(--accent)">
+                        –
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="k">단일(direct) 실행</div>
+                    <div class="v" id="sDirect">–</div>
+                </div>
+                <div class="card">
+                    <div class="k">파이프라인 비율</div>
+                    <div class="v" id="sPct">–</div>
+                </div>
+                <div class="card">
+                    <div class="k">평균 단계 수</div>
+                    <div class="v" id="sSteps">–</div>
+                </div>
+                <div class="card">
+                    <div class="k">평균 총 지연</div>
+                    <div class="v" id="sMs">–</div>
+                </div>
+            </div>
+
+            <div class="workspace">
+                <div class="card panel">
+                    <div class="panel-head">
+                        <div class="k">
+                            플랜 미리보기
+                            <span class="sub"
+                                >— 답변 없이 라우터 판정만 확인 · Ctrl+Enter</span
+                            >
+                        </div>
+                    </div>
+                    <div class="left-stack">
+                        <div class="plan-form">
+                            <textarea
+                                id="pqUser"
+                                placeholder="질문을 입력하세요. (예: 아래 회의록을 요약하고 리스크를 분석해줘 …)"
+                            ></textarea>
+                            <textarea
+                                id="pqSystem"
+                                placeholder="시스템 지시 (선택)"
+                            ></textarea>
+                            <div class="plan-opts">
+                                <label>
+                                    파이프라인 모드
+                                    <select id="pqMode">
+                                        <option value="">
+                                            auto (서버 설정)
+                                        </option>
+                                        <option value="on">on (강제)</option>
+                                        <option value="off">
+                                            off (단일 모델)
+                                        </option>
+                                    </select>
+                                </label>
+                                <label>
+                                    티어 지정
+                                    <select id="pqTier">
+                                        <option value="">(라우터 판단)</option>
+                                        <option value="small">small</option>
+                                        <option value="medium">medium</option>
+                                        <option value="large">large</option>
+                                    </select>
+                                </label>
+                                <label class="chk">
+                                    <input id="pqThinking" type="checkbox" />
+                                    <span>THINKING</span>
+                                </label>
+                                <button id="pqRun" class="plan-btn">
+                                    플랜 확인
+                                </button>
+                            </div>
+                        </div>
+                        <div id="planOut" class="plan-result">
+                            <div class="plan-empty">
+                                질문을 넣고 «플랜 확인»을 누르면 단계 체인이
+                                여기에 표시됩니다.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card panel">
+                    <div class="panel-head">
+                        <div class="k">분석</div>
+                        <div class="tabs" role="tablist">
+                            <button
+                                type="button"
+                                class="tab active"
+                                data-tab="stats"
+                                id="tabStats"
+                            >
+                                통계
+                            </button>
+                            <button
+                                type="button"
+                                class="tab"
+                                data-tab="runs"
+                                id="tabRuns"
+                            >
+                                최근 실행
+                            </button>
+                        </div>
+                    </div>
+                    <div
+                        id="paneStats"
+                        class="panel-body"
+                        data-pane="stats"
+                    >
+                        <p class="window-note" id="statWindow"></p>
+                        <div class="stat-block">
+                            <div class="sk">
+                                단계 순번별 평균 지연 · 일반 파이프라인
+                            </div>
+                            <div class="stat-list" id="stIndex">
+                                <div class="muted">불러오는 중…</div>
+                            </div>
+                        </div>
+                        <div class="stat-block">
+                            <div class="sk">티어별 단계 처리 · 긴 입력 포함</div>
+                            <div class="stat-list" id="stTier">
+                                <div class="muted">불러오는 중…</div>
+                            </div>
+                        </div>
+                        <div class="stat-block">
+                            <div class="sk">역할(role)별 단계 · 긴 입력 포함</div>
+                            <div class="stat-list" id="stRole">
+                                <div class="muted">불러오는 중…</div>
+                            </div>
+                        </div>
+                        <div class="stat-block">
+                            <div class="sk">자주 쓰인 흐름 · 맵리듀스 제외</div>
+                            <div class="stat-list" id="stFlow">
+                                <div class="muted">불러오는 중…</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div
+                        id="paneRuns"
+                        class="panel-body"
+                        data-pane="runs"
+                        hidden
+                    >
+                        <p class="runs-hint">
+                            행을 클릭하면 라우터 계획과 단계별 입·출력을 펼칩니다.
+                        </p>
+                        <div class="table-scroll">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>시각</th>
+                                        <th>종류</th>
+                                        <th>질문</th>
+                                        <th>흐름</th>
+                                        <th class="num">단계</th>
+                                        <th class="num">지연</th>
+                                        <th>라우터</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="runs">
+                                    <tr>
+                                        <td colspan="7" class="muted">
+                                            불러오는 중…
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const COLS = 7;
+            const fmt = (n) => Number(n ?? 0).toLocaleString("ko-KR");
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+
+            let openRunId = null;
+            const detailCache = new Map();
+            let activeTab = "stats";
+
+            function tierPill(t) {
+                return `<span class="tier tier-${t || "na"}">${t || "–"}</span>`;
+            }
+
+            function setTab(tab) {
+                activeTab = tab;
+                document.querySelectorAll(".tab").forEach((b) => {
+                    b.classList.toggle("active", b.dataset.tab === tab);
+                });
+                $("paneStats").hidden = tab !== "stats";
+                $("paneRuns").hidden = tab !== "runs";
+            }
+            document.querySelector(".tabs").addEventListener("click", (e) => {
+                const btn = e.target.closest(".tab");
+                if (!btn) return;
+                setTab(btn.dataset.tab);
+            });
+
+            function renderPlan(p) {
+                const kind =
+                    p.pipeline === "long"
+                        ? "long"
+                        : p.mode === "workflow"
+                          ? "workflow"
+                          : "direct";
+                const label =
+                    kind === "long"
+                        ? "긴 입력 맵리듀스"
+                        : kind === "workflow"
+                          ? `파이프라인 ${p.steps.length}단계`
+                          : "단일 모델 (direct)";
+                const r = p.router;
+                const pl = p.planner;
+                const routerTxt = r?.backend
+                    ? `라우터 분류 ${[r.alias, r.tier, r.backend].filter(Boolean).join(" · ")}`
+                    : p.routerActive
+                      ? "라우터 미사용"
+                      : "라우터 없음";
+                const plannerTxt = pl?.backend
+                    ? `파이프라인 설계 ${[pl.alias, pl.tier, pl.backend].filter(Boolean).join(" · ")}`
+                    : p.plannerActive
+                      ? "설계기 미사용 (폴백)"
+                      : "설계기 없음";
+
+                const chain = p.steps
+                    .map(
+                        (s, i) => `
+        <div class="step-card">
+          <div class="sc-top">
+            <span class="sc-i">${i + 1}</span>
+            ${tierPill(s.tier)}
+            <span class="sc-role">${esc(s.role || "step")}</span>
+          </div>
+          <div class="sc-inst">${esc(s.instruction || "")}</div>
+        </div>`,
+                    )
+                    .join('<div class="arrow">↓</div>');
+
+                const longInfo = p.long
+                    ? `<p class="muted" style="margin:10px 0 0;font-size:12px">청크 ${p.long.chunks}개 · 조각당 ${fmt(p.long.chunkChars)}자(겹침 ${p.long.overlap}) · 추출 ${p.long.mapTier} ${p.long.mapConcurrency}병렬 → 종합 ${p.long.reduceTier}</p>`
+                    : "";
+
+                $("planOut").innerHTML = `
+        <div class="plan-head">
+          <span class="mode-badge ${kind}">${label}</span>
+          ${p.difficulty != null ? `<span class="muted">난이도 ${p.difficulty}</span>` : ""}
+          ${p.device ? `<span class="dev dev-${p.device}">${p.device.toUpperCase()}</span>` : ""}
+          <span class="muted">판정 ${fmt(p.ms)}ms</span>
+          <span class="muted">입력 ${fmt(p.inputChars)}자</span>
+          <span class="muted">모드 ${esc(p.requestedMode)}</span>
+        </div>
+        <p class="muted" style="margin:0 0 10px;font-size:12px">${esc(p.reason || "")}<br>${esc(routerTxt)} · ${esc(plannerTxt)}</p>
+        <div class="chain">${chain}</div>
+        ${longInfo}`;
+            }
+
+            async function runPlan() {
+                const btn = $("pqRun");
+                const q = $("pqUser").value.trim();
+                if (!q) {
+                    $("pqUser").focus();
+                    return;
+                }
+                btn.disabled = true;
+                btn.textContent = "판정 중…";
+                $("planOut").innerHTML =
+                    '<span class="muted">라우터에 계획을 요청하는 중…</span>';
+                try {
+                    const r = await fetch("/api/workflow/plan", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            ROLE_USER: q,
+                            ROLE_SYSTEM: $("pqSystem").value.trim(),
+                            WORKFLOW: $("pqMode").value,
+                            MODEL_TIER: $("pqTier").value,
+                            THINKING: $("pqThinking").checked,
+                        }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "플랜 확인 실패");
+                    renderPlan(d);
+                } catch (e) {
+                    $("planOut").innerHTML =
+                        `<span class="err">${esc(e.message)}</span>`;
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = "플랜 확인";
+                }
+            }
+            $("pqRun").addEventListener("click", runPlan);
+            $("pqUser").addEventListener("keydown", (e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) runPlan();
+            });
+
+            function statBars(items, keyLabel, max) {
+                if (!items.length) return '<div class="muted">데이터 없음</div>';
+                return items
+                    .map((b) => {
+                        const w = max ? ((b.avgMs ?? 0) / max) * 100 : 0;
+                        const skip = b.skipped
+                            ? ` · 생략 ${fmt(b.skipped)}`
+                            : "";
+                        return `<div class="stat-item">
+        <div class="si-top">
+          <span class="si-k">${keyLabel(b)}</span>
+          <span class="si-v">${b.avgMs == null ? "–" : fmt(b.avgMs) + "ms"} · ${fmt(b.steps)}회${skip}</span>
+        </div>
+        <div class="bar"><span style="width:${w}%"></span></div>
+      </div>`;
+                    })
+                    .join("");
+            }
+
+            function renderStats(d) {
+                $("modeBadge").textContent = `WORKFLOW_MODE=${d.configMode}`;
+                $("modeBadge").className =
+                    "route-badge" + (d.configMode === "off" ? " heuristic" : "");
+                $("routerBadge").textContent = d.routerActive
+                    ? "LLM 라우터 활성"
+                    : "라우터 없음 (휴리스틱)";
+                $("routerBadge").className =
+                    "route-badge" + (d.routerActive ? "" : " heuristic");
+
+                const wf = d.averages.workflow;
+                const lg = d.averages.long;
+                $("sWorkflow").textContent = fmt(d.counts.workflow);
+                $("sDirect").textContent = fmt(d.counts.direct);
+                $("sPct").textContent =
+                    d.counts.pipelinePct == null
+                        ? "–"
+                        : d.counts.pipelinePct + "%";
+                $("sSteps").textContent = wf.steps ?? "–";
+                $("sMs").textContent =
+                    wf.totalMs == null ? "–" : fmt(wf.totalMs);
+
+                const since = d.window.since
+                    ? new Date(d.window.since).toLocaleString("ko-KR")
+                    : "–";
+                const longTxt = d.counts.long
+                    ? `긴 입력 맵리듀스 ${fmt(d.counts.long)}건(평균 ${lg.steps}단계 · ${fmt(lg.totalMs)}ms)은 요약·순번·흐름 집계에서 제외`
+                    : "긴 입력 맵리듀스 실행 없음";
+                $("statWindow").textContent =
+                    `최근 대화 ${fmt(d.window.entries)}건 기준 (${since} 부터) · ${longTxt}`;
+
+                const maxIdx = Math.max(
+                    1,
+                    ...d.byIndex.map((b) => b.avgMs ?? 0),
+                );
+                $("stIndex").innerHTML = statBars(
+                    d.byIndex,
+                    (b) => `${b.key}단계`,
+                    maxIdx,
+                );
+                const maxTier = Math.max(
+                    1,
+                    ...d.byTier.map((b) => b.avgMs ?? 0),
+                );
+                $("stTier").innerHTML = statBars(
+                    d.byTier,
+                    (b) => tierPill(b.key),
+                    maxTier,
+                );
+                const maxRole = Math.max(
+                    1,
+                    ...d.byRole.map((b) => b.avgMs ?? 0),
+                );
+                $("stRole").innerHTML = statBars(
+                    d.byRole,
+                    (b) => esc(b.key),
+                    maxRole,
+                );
+
+                $("stFlow").innerHTML = d.flows.length
+                    ? d.flows
+                          .map((f) => {
+                              const w = (f.runs / d.flows[0].runs) * 100;
+                              return `<div class="stat-item">
+          <div class="si-top">
+            <span class="si-k flow-txt">${esc(f.flow)}</span>
+            <span class="si-v">${fmt(f.runs)}회 · 평균 ${f.avgMs == null ? "–" : fmt(f.avgMs) + "ms"}</span>
+          </div>
+          <div class="bar"><span style="width:${w}%"></span></div>
+        </div>`;
+                          })
+                          .join("")
+                    : '<div class="muted">파이프라인 실행 기록이 없습니다.</div>';
+
+                $("runs").innerHTML = d.runs.length
+                    ? d.runs
+                          .map(
+                              (r) => `
+        <tr class="run-row ${r.id === openRunId ? "open" : ""}" data-id="${esc(r.id)}">
+          <td>${new Date(r.ts).toLocaleString("ko-KR")}</td>
+          <td><span class="mode-badge ${r.kind}">${r.kind === "long" ? "긴 입력" : "파이프라인"}</span></td>
+          <td class="model" title="${esc(r.question)}">${esc(r.question)}</td>
+          <td class="flow-txt">${esc(r.flow)}</td>
+          <td class="num">${r.stepCount}</td>
+          <td class="num">${fmt(r.totalMs)}</td>
+          <td>${esc(r.routerAlias || "–")}</td>
+        </tr>`,
+                          )
+                          .join("")
+                    : `<tr><td colspan="${COLS}" class="muted">파이프라인 실행 기록이 없습니다. 테스트 콘솔에서 «파이프라인 강제사용» 으로 질문해 보세요.</td></tr>`;
+
+                if (openRunId && detailCache.has(openRunId)) {
+                    insertDetail(openRunId, detailCache.get(openRunId));
+                }
+                $("updated").textContent =
+                    "갱신 " + new Date().toLocaleTimeString();
+            }
+
+            function traceHtml(d) {
+                const nodes = d.trace.length
+                    ? d.trace
+                    : d.steps.map((s, i) => ({ kind: "model", i: i + 1, ...s }));
+                const body = nodes
+                    .map((n) => {
+                        if (n.kind === "router" || n.kind === "planner") {
+                            const plan = (n.stepsPlan || [])
+                                .map(
+                                    (s) =>
+                                        `${s.i}. ${s.tier} / ${esc(s.role)} — ${esc(s.instruction)}`,
+                                )
+                                .join("\n");
+                            const title =
+                                n.title ||
+                                (n.kind === "planner"
+                                    ? "파이프라인 설계"
+                                    : "라우터 분류");
+                            return `<div class="trace-node ${n.kind === "planner" ? "" : "router"}">
+          <div class="tn-top">
+            <span class="tn-title">${esc(title)}</span>
+            <span class="tn-meta">${esc(n.planner || "")}</span>
+          </div>
+          <div class="tn-meta">${esc(n.reason || "")}${n.flow ? ` · 흐름 ${esc(n.flow)}` : ""}</div>
+          ${plan ? `<div class="tn-body">${plan}</div>` : ""}
+        </div>`;
+                        }
+                        const from = n.receivedFrom;
+                        return `<div class="trace-node">
+        <div class="tn-top">
+          <span class="tn-title">${n.i}단계</span>
+          ${tierPill(n.tier)}
+          <span class="tn-meta">${esc(n.role || "")}${n.alias ? ` · ${esc(n.alias)}` : ""}${n.device ? ` · ${esc(n.device.toUpperCase())}` : ""} · ${fmt(n.ms)}ms${n.skipped ? " · 호출 생략" : ""}${n.fallbackFrom ? " · 직전 출력으로 폴백" : ""}</span>
+        </div>
+        <div class="tn-meta">지시: ${esc(n.instruction || "")}</div>
+        ${
+            from
+                ? `<div class="tn-label">입력 ← ${esc(from.label || "")}</div>
+               <div class="tn-body">${esc(from.text ?? from.preview ?? "")}</div>`
+                : ""
+        }
+        <div class="tn-label">출력</div>
+        <div class="tn-body">${esc(n.output ?? "")}</div>
+      </div>`;
+                    })
+                    .join("");
+                const r = d.router;
+                const routerTxt = r?.backend
+                    ? [r.alias, r.tier, r.backend].filter(Boolean).join(" · ")
+                    : "휴리스틱 판정";
+                return `<td class="detail" colspan="${COLS}">
+      <div class="tn-meta" style="margin-bottom:10px">
+        질문 ${fmt(String(d.question).length)}자 · 난이도 ${d.difficulty ?? "–"} · 라우터 ${esc(routerTxt)}<br>${esc(d.reason || "")}
+      </div>
+      ${body}
+    </td>`;
+            }
+
+            function insertDetail(id, html) {
+                const row = document.querySelector(
+                    `tr.run-row[data-id="${id}"]`,
+                );
+                if (!row) return;
+                const next = row.nextElementSibling;
+                if (next?.classList.contains("detail-row")) next.remove();
+                const tr = document.createElement("tr");
+                tr.className = "detail-row";
+                tr.innerHTML = html;
+                row.after(tr);
+                row.classList.add("open");
+            }
+
+            $("runs").addEventListener("click", async (e) => {
+                const row = e.target.closest("tr.run-row");
+                if (!row) return;
+                const id = row.dataset.id;
+                if (openRunId === id) {
+                    openRunId = null;
+                    row.classList.remove("open");
+                    const next = row.nextElementSibling;
+                    if (next?.classList.contains("detail-row")) next.remove();
+                    return;
+                }
+                document.querySelector("tr.detail-row")?.remove();
+                document
+                    .querySelectorAll("tr.run-row.open")
+                    .forEach((x) => x.classList.remove("open"));
+                openRunId = id;
+                if (detailCache.has(id)) {
+                    insertDetail(id, detailCache.get(id));
+                    return;
+                }
+                insertDetail(
+                    id,
+                    `<td class="detail" colspan="${COLS}"><span class="muted">불러오는 중…</span></td>`,
+                );
+                try {
+                    const r = await fetch(
+                        "/api/workflow/runs/" + encodeURIComponent(id),
+                    );
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "상세 조회 실패");
+                    const html = traceHtml(d);
+                    detailCache.set(id, html);
+                    if (openRunId === id) insertDetail(id, html);
+                } catch (err) {
+                    insertDetail(
+                        id,
+                        `<td class="detail" colspan="${COLS}"><span class="err">${esc(err.message)}</span></td>`,
+                    );
+                }
+            });
+
+            async function refresh() {
+                try {
+                    const r = await fetch("/api/workflow/stats?limit=300");
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "통계 조회 실패");
+                    renderStats(d);
+                } catch (e) {
+                    $("runs").innerHTML =
+                        `<tr><td colspan="${COLS}" class="err">통계 조회 실패: ${esc(e.message)}</td></tr>`;
+                }
+            }
+
+            refresh();
+            setInterval(refresh, 5000);
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>
