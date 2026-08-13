@@ -995,7 +995,13 @@ export async function createPlan(body) {
   // 1) 라우터: 티어·특기 분류
   let route = null;
   if (pool.hasActiveRouter()) {
-    route = await classifyWithLlm(body);
+    if (pool.shouldSkipLlmRouter()) {
+      logger.warn(
+        "라우터 슬롯 없음(실시간 대화 vs 부하) → 휴리스틱 분류로 빈 답변 슬롯 사용",
+      );
+    } else {
+      route = await classifyWithLlm(body);
+    }
   }
 
   // auto: 설계기 없이 라우터 단일 (강제 ON 이거나 협업 신호일 때만 설계기)

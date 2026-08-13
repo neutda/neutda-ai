@@ -14,10 +14,21 @@
                 flex-wrap: wrap;
                 background: var(--card, #161b22);
                 border: 1px solid var(--border, #30363d);
-                border-left: 3px solid var(--accent, #6c8cff);
                 border-radius: 10px;
                 padding: 10px 14px;
-                margin: 14px 20px 4px;
+            }
+            /* 부하 현황 컬럼(좁음) 안에서는 세로로 쌓이게 */
+            .load-side .snap-bar {
+                flex-direction: column;
+                align-items: stretch;
+                margin: 10px;
+            }
+            .load-side .snap-rec {
+                width: 100%;
+            }
+            .load-side .snap-bar input {
+                flex: 1 1 100%;
+                min-width: 0;
             }
             .snap-title {
                 font-weight: 700;
@@ -1086,28 +1097,6 @@
                     <span id="updated" class="updated"></span>
                 </div>
             </header>
-            <div class="snap-bar" id="snapBar">
-                <div class="snap-rec" id="snapIdle" style="flex: 1 1 auto">
-                    <span class="snap-title">📸 부하 스냅샷</span>
-                    <input
-                        id="snapLabel"
-                        placeholder="설정 라벨 (예: medium par 8→12, large ngl 60)"
-                    />
-                    <button id="snapStart" class="snap-btn start">
-                        ● 스냅샷 시작
-                    </button>
-                    <a class="snap-link" id="snapListLink">지난 스냅샷 ▾</a>
-                </div>
-                <div class="snap-rec" id="snapRec" style="display: none">
-                    <span class="snap-dot"></span>
-                    <span class="snap-recinfo" id="snapRecInfo">기록 중…</span>
-                    <button id="snapStop" class="snap-btn stop">
-                        ■ 종료 &amp; 리포트
-                    </button>
-                    <a class="snap-link" id="snapListLink2">지난 스냅샷 ▾</a>
-                </div>
-                <div class="snap-msg" id="snapMsg"></div>
-            </div>
             <div class="app-main">
                 <div class="monitor-split">
                     <div class="monitor-col">
@@ -1135,6 +1124,42 @@
                     <div class="monitor-col load-side">
                         <div class="sec-head">
                             <h2>부하 현황</h2>
+                        </div>
+                        <div class="snap-bar" id="snapBar">
+                            <div
+                                class="snap-rec"
+                                id="snapIdle"
+                                style="flex: 1 1 auto"
+                            >
+                                <span class="snap-title">📸 부하 스냅샷</span>
+                                <input
+                                    id="snapLabel"
+                                    placeholder="설정 라벨 (예: medium par 8→12)"
+                                />
+                                <button id="snapStart" class="snap-btn start">
+                                    ● 스냅샷 시작
+                                </button>
+                                <a class="snap-link" id="snapListLink"
+                                    >지난 스냅샷 ▾</a
+                                >
+                            </div>
+                            <div
+                                class="snap-rec"
+                                id="snapRec"
+                                style="display: none"
+                            >
+                                <span class="snap-dot"></span>
+                                <span class="snap-recinfo" id="snapRecInfo"
+                                    >기록 중…</span
+                                >
+                                <button id="snapStop" class="snap-btn stop">
+                                    ■ 종료 &amp; 리포트
+                                </button>
+                                <a class="snap-link" id="snapListLink2"
+                                    >지난 스냅샷 ▾</a
+                                >
+                            </div>
+                            <div class="snap-msg" id="snapMsg"></div>
                         </div>
                         <div class="monitor-col-scroll">
                             <div class="load-glance" id="queueOverview">
@@ -1197,7 +1222,14 @@
                 const left = load.leftover || {};
                 const apiPct = Number(api.utilPct) || 0;
                 const modelPct = Number(model.utilPct) || 0;
-                const pending = Number(model.pending ?? left.pending) || 0;
+                const stressPending = Number(model.pending ?? left.pending) || 0;
+                const interactivePending =
+                    Number(model.interactive ?? left.interactive) || 0;
+                // 워커가 집었지만 빈 슬롯 대기 중인 건 + 아직 안 집은 스트레스 대기 + 실시간 대화
+                const slotWaiting =
+                    Number(model.slotWaiting ?? left.slotWaiting) || 0;
+                const pending =
+                    slotWaiting + stressPending + interactivePending;
                 const totalWork =
                     Number(model.totalWork) ||
                     (Number(model.inFlight) || 0) + pending;
@@ -2564,6 +2596,26 @@
                             fmt(la.skippedFreeOk),
                             fmt(la.skippedHighDiff),
                             fmt(la.skippedHardLock),
+                        ],
+                    ],
+                );
+
+                html += "<h4>load-aware 승격 (유휴 large 활용)</h4>";
+                html += snapTbl(
+                    [
+                        "medium 포화 판정",
+                        "→large 승격",
+                        "승격율%",
+                        "난이도낮아보류",
+                        "둘다포화(불가)",
+                    ],
+                    [
+                        [
+                            fmt(la.mediumSaturatedDecisions),
+                            fmt(la.promoteMediumToLarge),
+                            la.promoteRatePct ?? 0,
+                            fmt(la.skippedPromoteLowDiff),
+                            fmt(la.skippedPromoteBusy),
                         ],
                     ],
                 );

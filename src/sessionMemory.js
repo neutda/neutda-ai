@@ -4,9 +4,11 @@
  * 나중 Redis 교체 지점: get / append / clear 인터페이스만 유지.
  */
 
-const DEFAULT_TTL_MS = 2 * 60 * 60 * 1000; // 2시간
-const DEFAULT_MAX_TURNS = 24;
-const DEFAULT_SWEEP_MS = 5 * 60 * 1000; // 5분
+import { config } from "./config.js";
+
+const DEFAULT_TTL_MS = config.sessionMemory.ttlMs; // 기본 2시간
+const DEFAULT_MAX_TURNS = config.sessionMemory.maxTurns;
+const DEFAULT_SWEEP_MS = config.sessionMemory.sweepMs; // 기본 5분
 
 /** @type {Map<string, { turns: { role: string, content: string }[], expiresAt: number }>} */
 const store = new Map();

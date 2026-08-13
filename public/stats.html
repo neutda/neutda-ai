@@ -360,6 +360,16 @@
                             ? `최근 ${new Date(status.loadAware.lastDemoteAt).toLocaleTimeString("ko-KR")}`
                             : "large→medium load-demote",
                     ),
+                    card(
+                        "슬롯 승격",
+                        fmt(status?.loadAware?.promoteMediumToLarge),
+                        status?.loadAware?.lastPromoteAt
+                            ? `최근 ${new Date(status.loadAware.lastPromoteAt).toLocaleTimeString("ko-KR")}`
+                            : "medium→large 유휴 활용",
+                        status?.loadAware?.promoteMediumToLarge > 0
+                            ? "var(--ok)"
+                            : "",
+                    ),
                 ].join("");
             }
 

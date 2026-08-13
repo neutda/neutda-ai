@@ -43,6 +43,7 @@ import {
 } from "./serverManager.js";
 import { getMetrics } from "./metrics.js";
 import { logger, getLogs, listLogDates, logDayKey, logFileStats, setLogScope } from "./logger.js";
+import { installProcessGuard, hardenHttpServer } from "./processGuard.js";
 import { config } from "./config.js";
 import { execOpts } from "./platform.js";
 import {
@@ -97,6 +98,7 @@ const HEARTBEAT_MS = config.agent.heartbeatMs;
 const AUTOSTART = config.agent.autostart;
 // 부모(express) 일별 로그와 파일이 섞이지 않도록 스코프 분리
 setLogScope(`agent-${AGENT_ID}`);
+installProcessGuard();
 
 // 부모가 원격(또는 AGENT_HOST 가 LAN)인데 llama 가 loopback 만 들으면
 // 헬스/채팅이 전부 실패한다 → 0.0.0.0 으로 올려 외부 접속을 연다.
@@ -647,6 +649,7 @@ async function boot() {
 // 자체 재시작 직후엔 이전 프로세스가 포트를 놓기 전일 수 있어 재시도한다.
 function listenWithRetry(attempt = 0) {
     const server = app.listen(AGENT_PORT, boot);
+    hardenHttpServer(server, { port: AGENT_PORT, fatalListen: false });
     server.on("error", (e) => {
         if (e.code === "EADDRINUSE" && attempt < 10) {
             logger.warn(

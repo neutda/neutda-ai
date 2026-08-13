@@ -65,6 +65,35 @@ export function applyLoadAwareRoute(route, body, opts = {}) {
   // preferred 서버가 없으면(cap=0) 손대지 않음 — 기존 pick/페일오버에 맡김
   if (pref.cap <= 0) return route;
 
+  // medium 포화 → 유휴 large 가 있으면 승격(강등의 대칭). large 유휴 활용.
+  if (preferred === "medium" && config.loadPromote) {
+    const lg = by.large || { cap: 0, used: 0, free: 0 };
+    const lgRoom = (lg.cap || 0) - (lg.used || 0);
+    const minPromote = Number(config.loadPromoteMinDifficulty) || 0;
+    if (lg.cap > 0 && lgRoom > 0) {
+      if (diff >= minPromote) {
+        const note =
+          `load: medium ${pref.used}/${pref.cap} 포화 → promote large ${lg.used || 0}/${lg.cap} ` +
+          `(diff=${diff}>=${minPromote}, 유휴 ${lgRoom})`;
+        pool.recordLoadPromote(note);
+        logger.info(`슬롯 인지 승격 ${note}`);
+        return {
+          ...route,
+          tier: "large",
+          reason: `${route.reason || "route"} → ${note}`,
+          loadPromoted: true,
+          loadPromoteFrom: "medium",
+          preferredTier: preferred,
+        };
+      }
+      // large 여유는 있으나 난이도 낮아 빠른 medium 대기가 나음 → 승격 보류
+      pool.recordLoadSkip("promoLowDiff");
+    } else if (lg.cap > 0) {
+      // medium·large 둘 다 포화 → 승격 불가(양 티어 압박 신호)
+      pool.recordLoadSkip("promoBusy");
+    }
+  }
+
   // large 포화(또는 초과) → medium 강등
   // medium 도 꽉 찬 뒤에도 large 에 나머지를 몰지 않음 (예전: medium.free>0 일 때만
   // 강등 → #1–4 large, #5–12 medium 이후 #13+ 가 다시 large 로 폭주)
@@ -116,13 +145,16 @@ export function applyLoadAwarePlan(plan, body, opts = {}) {
       body,
       { ...opts, snapshot: snap },
     );
-    if (route.tier === plan.tier && !route.loadDemoted) return plan;
+    if (route.tier === plan.tier && !route.loadDemoted && !route.loadPromoted)
+      return plan;
     return {
       ...plan,
       tier: route.tier,
       reason: route.reason,
       loadDemoted: route.loadDemoted || false,
       loadDemoteFrom: route.loadDemoteFrom || null,
+      loadPromoted: route.loadPromoted || false,
+      loadPromoteFrom: route.loadPromoteFrom || null,
     };
   }
 
@@ -147,8 +179,10 @@ export function applyLoadAwarePlan(plan, body, opts = {}) {
         steps,
         tier: route.tier,
         reason: route.reason,
-        loadDemoted: true,
-        loadDemoteFrom: route.loadDemoteFrom || s.tier,
+        loadDemoted: route.loadDemoted || false,
+        loadDemoteFrom: route.loadDemoteFrom || null,
+        loadPromoted: route.loadPromoted || false,
+        loadPromoteFrom: route.loadPromoteFrom || null,
       };
     }
   }

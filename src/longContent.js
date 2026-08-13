@@ -46,7 +46,8 @@ export function estimateTokens(text) {
   const hangul = (s.match(/[가-힣]/g) || []).length;
   const han = (s.match(/[\u4e00-\u9fff]/g) || []).length;
   const other = Math.max(0, s.length - hangul - han);
-  return Math.ceil(hangul * 1.35 + han * 1.6 + other * 0.4);
+  const est = config.tokenEstimate;
+  return Math.ceil(hangul * est.hangul + han * est.han + other * est.other);
 }
 
 /** 텍스트 길이·추정 토큰으로 긴 입력 여부 판정. 이미지 요청은 제외. */
@@ -239,17 +240,11 @@ function groupPartials(partials, maxChars) {
  * @param onEvent (ev) => void  — runWorkflow 와 호환되는 plan/step_start/step_done/token 이벤트
  * @returns runWorkflow 와 유사한 { answer, model, tier, device, alias, backend, steps, trace, plan }
  */
-export async function runLongContent({ body, temperature, onEvent }) {
-  const started = Date.now();
-  const userQ = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
-  const sysText =
-    typeof body?.ROLE_SYSTEM === "string" && body.ROLE_SYSTEM.trim()
-      ? body.ROLE_SYSTEM.trim()
-      : "";
-  const mapTier = config.longMapTier;
-  const reduceTier = config.longReduceTier;
-
-  // 1) 물리 파일 저장
+/**
+ * 1) 물리 파일 저장 + 청크 분할 + 단계 계획(stepsPlan) 수립.
+ * plan 이벤트를 방출하고 { saved, chunks, stepsPlan, flowLabel, trace } 반환.
+ */
+async function prepareLongRun({ userQ, sysText, mapTier, reduceTier, onEvent }) {
   const saved = await saveLongContent(userQ, {
     chars: userQ.length,
     system: sysText ? truncate(sysText, 120) : undefined,
@@ -301,8 +296,15 @@ export async function runLongContent({ body, temperature, onEvent }) {
     })),
   });
 
-  // 3) MAP: 청크별 추출 — 백엔드 여러 대에 분산하도록 제한된 병렬로 실행
-  //    (순차 실행 시 청크가 많으면 전체 시간이 과도해져 타임아웃 위험)
+  return { saved, chunks, stepsPlan, flowLabel, trace };
+}
+
+/**
+ * 2) MAP: 청크별 추출 — 백엔드 여러 대에 분산하도록 제한된 병렬로 실행.
+ *    (순차 실행 시 청크가 많으면 전체 시간이 과도해져 타임아웃 위험)
+ * 청크 인덱스 순서대로 채워진 stepRecs 배열을 반환.
+ */
+async function runMapPhase({ userQ, sysText, chunks, mapTier, temperature, onEvent }) {
   const stepRecs = new Array(chunks.length);
   let cursor = 0;
   const concurrency = Math.max(1, Math.min(config.longMapConcurrency, chunks.length));
@@ -415,8 +417,15 @@ export async function runLongContent({ body, temperature, onEvent }) {
   }
 
   await Promise.all(Array.from({ length: concurrency }, () => mapWorker()));
+  return stepRecs;
+}
 
-  // 청크 순서대로 trace·partials 재구성 (병렬이라 완료 순서가 섞였을 수 있음)
+/**
+ * MAP 결과를 청크 순서대로 trace 에 넣고, 관련 있는 조각만 partials 로 뽑는다.
+ * (병렬이라 완료 순서가 섞였을 수 있어 인덱스 순으로 재구성)
+ * 전 조각이 '관련 없음'이면 원문 앞부분으로 최소 1건을 만든다.
+ */
+function collectPartials(stepRecs, chunks, trace, userQ) {
   const partials = [];
   for (let i = 0; i < chunks.length; i++) {
     const rec = stepRecs[i];
@@ -426,13 +435,18 @@ export async function runLongContent({ body, temperature, onEvent }) {
     delete rec._relevant;
     delete rec._text;
   }
-
   if (!partials.length) {
     // 전 조각이 '관련 없음' — 그래도 최종 단계는 원문 앞부분으로 답을 시도
     partials.push({ i: 1, text: truncate(userQ, config.longReduceInputChars) });
   }
+  return partials;
+}
 
-  // 4) REDUCE: 상한을 넘으면 계층적으로 병합한 뒤 최종 종합
+/**
+ * 3) REDUCE: 부분 추출 합계가 상한을 넘으면 그룹 단위로 계층 병합.
+ * 최종 종합에 넣을 level(부분 결과 목록)을 반환.
+ */
+async function runReducePhase({ userQ, sysText, partials, reduceTier }) {
   let level = partials;
   let round = 0;
   while (
@@ -464,8 +478,14 @@ export async function runLongContent({ body, temperature, onEvent }) {
     );
     level = merged;
   }
+  return level;
+}
 
-  // 최종 종합 (마지막 단계는 스트리밍)
+/**
+ * 4) 최종 종합 (onEvent 있으면 스트리밍, 없으면 단발).
+ * { last, finalIdx } 반환.
+ */
+async function runFinalSynthesis({ userQ, sysText, level, reduceTier, temperature, stepsPlan, onEvent }) {
   const reduceMessages = buildReduceMessages({
     userQ,
     sysText,
@@ -534,6 +554,55 @@ export async function runLongContent({ body, temperature, onEvent }) {
     };
   }
 
+  return { last, finalIdx };
+}
+
+/**
+ * 긴 입력 맵리듀스 실행 (오케스트레이터).
+ * @param onEvent (ev) => void  — runWorkflow 와 호환되는 plan/step_start/step_done/token 이벤트
+ * @returns runWorkflow 와 유사한 { answer, model, tier, device, alias, backend, steps, trace, plan }
+ */
+export async function runLongContent({ body, temperature, onEvent }) {
+  const started = Date.now();
+  const userQ = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
+  const sysText =
+    typeof body?.ROLE_SYSTEM === "string" && body.ROLE_SYSTEM.trim()
+      ? body.ROLE_SYSTEM.trim()
+      : "";
+  const mapTier = config.longMapTier;
+  const reduceTier = config.longReduceTier;
+
+  const { saved, chunks, stepsPlan, trace } = await prepareLongRun({
+    userQ,
+    sysText,
+    mapTier,
+    reduceTier,
+    onEvent,
+  });
+
+  const stepRecs = await runMapPhase({
+    userQ,
+    sysText,
+    chunks,
+    mapTier,
+    temperature,
+    onEvent,
+  });
+  const partials = collectPartials(stepRecs, chunks, trace, userQ);
+
+  const level = await runReducePhase({ userQ, sysText, partials, reduceTier });
+
+  const { last, finalIdx } = await runFinalSynthesis({
+    userQ,
+    sysText,
+    level,
+    reduceTier,
+    temperature,
+    stepsPlan,
+    onEvent,
+  });
+
+  // 5) 최종 결과 조립 (finalRec trace 추가 + step_done + plan + 반환)
   const finalRec = {
     kind: "model",
     i: stepsPlan.length,

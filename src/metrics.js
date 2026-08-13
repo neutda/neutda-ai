@@ -2,6 +2,7 @@ import os from "node:os";
 import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { execOpts } from "./platform.js";
+import { config } from "./config.js";
 
 /**
  * 시스템 자원 사용량(GPU/CPU/RAM)을 수집한다.
@@ -62,7 +63,7 @@ function getGpu() {
       "uuid",
     ].join(",");
     const cmd = `nvidia-smi --query-gpu=${q} --format=csv,noheader,nounits`;
-    exec(cmd, execOpts({ timeout: 4000 }), (err, stdout) => {
+    exec(cmd, execOpts({ timeout: config.nvidiaSmiTimeoutMs }), (err, stdout) => {
       if (err || !stdout) return resolve([]);
       const gpus = stdout
         .trim()
@@ -99,7 +100,7 @@ async function getGpuProcessesByUuid() {
         "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
         "--format=csv,noheader,nounits",
       ],
-      execOpts({ timeout: 4000 }),
+      execOpts({ timeout: config.nvidiaSmiTimeoutMs }),
     );
     const byUuid = new Map();
     for (const line of stdout.trim().split(/\r?\n/).filter(Boolean)) {

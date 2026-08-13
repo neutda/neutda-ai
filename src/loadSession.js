@@ -115,9 +115,12 @@ function diffTier(a = {}, b = {}) {
     };
 }
 
-function computeDelta(baseline, final) {
-    // 백엔드: url 기준 매칭. 세션 중 config 잠금이라 집합은 안정적이지만,
-    // agent 하트비트 재등록 등으로 어긋날 수 있어 방어적으로 처리한다.
+/**
+ * 백엔드별 증분(요청/에러/지연). url 기준 매칭.
+ * 세션 중 config 잠금이라 집합은 안정적이지만, agent 하트비트 재등록 등으로
+ * 어긋날 수 있어 baseline/final 어느 한쪽에만 있는 백엔드는 partial 로 표시한다.
+ */
+function diffBackends(baseline, final) {
     const baseB = new Map(baseline.pool.backends.map((b) => [b.url, b]));
     const finB = new Map(final.pool.backends.map((b) => [b.url, b]));
     const byBackend = [];
@@ -167,8 +170,11 @@ function computeDelta(baseline, final) {
             });
         }
     }
+    return byBackend;
+}
 
-    // 모델별 집계 (같은 모델을 여러 백엔드가 서빙하면 합산)
+/** 모델별 집계 (같은 모델을 여러 백엔드가 서빙하면 합산). partial 백엔드는 제외. */
+function aggregateByModel(byBackend) {
     const modelMap = new Map();
     for (const b of byBackend) {
         if (b.partial) continue;
@@ -195,7 +201,7 @@ function computeDelta(baseline, final) {
         m.latencySumMs += b.latencySumMs || 0;
         modelMap.set(key, m);
     }
-    const byModel = [...modelMap.values()]
+    return [...modelMap.values()]
         .map((m) => ({
             ...m,
             errorRatePct:
@@ -203,18 +209,25 @@ function computeDelta(baseline, final) {
             avgMs: m.requests > 0 ? Math.round(m.latencySumMs / m.requests) : null,
         }))
         .sort((a, b) => b.requests - a.requests);
+}
 
+/** 티어별 요청/토큰 증분. */
+function diffTiers(baseline, final) {
     const byTier = {};
     for (const t of TIERS) {
         byTier[t] = diffTier(baseline.stats.tiers?.[t], final.stats.tiers?.[t]);
     }
+    return byTier;
+}
 
+/** 채팅 큐 증분 (거절/타임아웃 비율 = 용량 부족 신호). */
+function diffQueue(baseline, final) {
     const q0 = baseline.pool.queue || {};
     const q1 = final.pool.queue || {};
     const qEnq = (q1.enqueued || 0) - (q0.enqueued || 0);
     const qRej = (q1.rejected || 0) - (q0.rejected || 0);
     const qTo = (q1.timedOut || 0) - (q0.timedOut || 0);
-    const queue = {
+    return {
         enqueued: qEnq,
         started: (q1.started || 0) - (q0.started || 0),
         rejected: qRej,
@@ -227,7 +240,10 @@ function computeDelta(baseline, final) {
         peakDepthNote:
             "구간 피크는 시계열 샘플러(Phase 1) 필요 — 여기선 프로세스 전체 피크",
     };
+}
 
+/** 슬롯 인지 라우팅(강등/승격) 판정 증분과 실행 비율. */
+function diffLoadAware(baseline, final) {
     const l0 = baseline.pool.loadAware || {};
     const l1 = final.pool.loadAware || {};
     const demote = (l1.demoteLargeToMedium || 0) - (l0.demoteLargeToMedium || 0);
@@ -236,7 +252,16 @@ function computeDelta(baseline, final) {
     const skDiff = (l1.skippedHighDiff || 0) - (l0.skippedHighDiff || 0);
     // large preferred 로 판정된 총 건수 ≈ 강등 + 유지(여유/고난이도/하드락)
     const largeDecisions = demote + skFree + skDiff + skHard;
-    const loadAware = {
+    // 승격(medium→large): 유휴 large 활용
+    const promote =
+        (l1.promoteMediumToLarge || 0) - (l0.promoteMediumToLarge || 0);
+    const skPromoLow =
+        (l1.skippedPromoteLowDiff || 0) - (l0.skippedPromoteLowDiff || 0);
+    const skPromoBusy =
+        (l1.skippedPromoteBusy || 0) - (l0.skippedPromoteBusy || 0);
+    // medium 포화로 승격 판정이 걸린 총 건수 ≈ 승격 + 보류(난이도)+ 불가(둘 다 포화)
+    const mediumSaturatedDecisions = promote + skPromoLow + skPromoBusy;
+    return {
         demoteLargeToMedium: demote,
         skippedHardLock: skHard, // 이미지/THINKING 등으로 강등 안 함
         skippedFreeOk: skFree, // large 여유 있어 유지
@@ -245,9 +270,21 @@ function computeDelta(baseline, final) {
         // large 판정 중 실제 강등된 비율 (large 용량 압박 지표)
         demoteRatePct:
             largeDecisions > 0 ? Math.round((demote / largeDecisions) * 100) : 0,
+        // ── 승격(medium→large) ──
+        promoteMediumToLarge: promote,
+        skippedPromoteLowDiff: skPromoLow, // large 여유 있으나 난이도 낮아 보류
+        skippedPromoteBusy: skPromoBusy, // medium·large 둘 다 포화
+        mediumSaturatedDecisions,
+        // medium 포화 판정 중 실제 승격된 비율 (유휴 large 회수율)
+        promoteRatePct:
+            mediumSaturatedDecisions > 0
+                ? Math.round((promote / mediumSaturatedDecisions) * 100)
+                : 0,
     };
+}
 
-    // 전역 합계
+/** 티어 증분 + 백엔드 에러로 전역 합계. */
+function sumTotals(byTier, byBackend) {
     let reqSum = 0;
     let tokSum = 0;
     for (const t of TIERS) {
@@ -255,13 +292,22 @@ function computeDelta(baseline, final) {
         tokSum += byTier[t].tokens;
     }
     const errSum = byBackend.reduce((s, b) => s + (b.errors || 0), 0);
-    const totals = {
+    return {
         requests: reqSum,
         tokens: tokSum,
         errors: errSum,
         errorRatePct: reqSum > 0 ? Math.round((errSum / reqSum) * 100) : 0,
     };
+}
 
+/** baseline↔final 스냅샷 차이를 부하 리포트로 종합한다. */
+function computeDelta(baseline, final) {
+    const byBackend = diffBackends(baseline, final);
+    const byModel = aggregateByModel(byBackend);
+    const byTier = diffTiers(baseline, final);
+    const queue = diffQueue(baseline, final);
+    const loadAware = diffLoadAware(baseline, final);
+    const totals = sumTotals(byTier, byBackend);
     return { totals, byTier, byBackend, byModel, queue, loadAware };
 }
 

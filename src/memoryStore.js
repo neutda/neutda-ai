@@ -10,6 +10,7 @@
 import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { config } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data", "memory");
@@ -226,8 +227,8 @@ function applyScoreGuard(hits, mode) {
 function bm25Retrieve(entries, query, k) {
   if (!entries.length) return [];
   const { df, avgdl } = rebuildDf(entries);
-  const k1 = 1.5;
-  const b = 0.75;
+  const k1 = config.bm25.k1;
+  const b = config.bm25.b;
   const N = entries.length;
   const qTokens = [...new Set(tokenize(query))];
 
@@ -310,12 +311,15 @@ export async function remember(uid, text, meta) {
  * @param {string} query
  * @param {number} [k]
  */
-export async function recall(uid, query, k = 4) {
+export async function recall(uid, query, k = config.rag.topK) {
   const key = safeUid(uid);
   if (!key) return [];
   const q = String(query || "").trim();
   if (!q) return [];
-  const topK = Math.max(1, Math.min(8, Number(k) || 4));
+  const topK = Math.max(
+    1,
+    Math.min(config.rag.topKMax, Number(k) || config.rag.topK),
+  );
 
   const state = await loadUser(key);
   const entries = state.entries;
@@ -324,7 +328,7 @@ export async function recall(uid, query, k = 4) {
   const embedded = entries.filter((e) => Array.isArray(e.embedding));
   const coverage = entries.length ? embedded.length / entries.length : 0;
 
-  if (embedBatch && coverage >= 0.5 && embedded.length) {
+  if (embedBatch && coverage >= config.rag.vectorCoverageMin && embedded.length) {
     try {
       const qVecs = await embedBatch([q]);
       const qv = qVecs?.[0];

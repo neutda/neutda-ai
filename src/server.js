@@ -36,6 +36,9 @@ import { appendHistory, readHistory, clearHistory } from "./history.js";
 import { selectHistoryTurns, formatHistorySnippet } from "./historyContext.js";
 import { getMetrics } from "./metrics.js";
 import { logger, getLogs, listLogDates, logDayKey, logFileStats } from "./logger.js";
+import { installProcessGuard, hardenHttpServer } from "./processGuard.js";
+
+installProcessGuard();
 import { readLlamaLogs } from "./llamaLogs.js";
 import { isLocalDef } from "./serverUrl.js";
 import * as rag from "./rag.js";
@@ -54,6 +57,12 @@ import {
 import { extractText } from "./extract.js";
 import { loadStats, getStats } from "./stats.js";
 import { parseRouterJson } from "./llmRouter.js";
+import {
+    resolveTemperature,
+    resolveThinking,
+    resolveUserQuestion,
+    ensureRagLoaded,
+} from "./chatRequest.js";
 import {
     loadServerDefs,
     loadModelConfig,
@@ -323,7 +332,7 @@ async function resyncAllPoolRoles() {
 
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 30 * 1024 * 1024 },
+    limits: { fileSize: config.uploadMaxBytes },
 });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -341,7 +350,34 @@ async function writeResult(id, data) {
 }
 
 const app = express();
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: config.jsonBodyLimit }));
+
+/** SSE 전송. 클라이언트가 끊겨도 EPIPE 로 프로세스가 죽지 않게 한다. */
+function sseSend(res) {
+    if (!res._sseErrorHooked) {
+        res._sseErrorHooked = true;
+        res.on("error", (err) => {
+            if (
+                err?.code === "EPIPE" ||
+                err?.code === "ECONNRESET" ||
+                err?.code === "ERR_STREAM_DESTROYED"
+            ) {
+                return;
+            }
+            logger.warn(`SSE 오류: ${err.message}`);
+        });
+    }
+    return (event, data) => {
+        if (res.writableEnded || res.destroyed) return false;
+        try {
+            return res.write(
+                `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
+            );
+        } catch {
+            return false;
+        }
+    };
+}
 // 첫 화면(루트)은 서버 모니터링으로. 테스트 콘솔은 /index.html 로 접근.
 app.get("/", (_req, res) => res.redirect(302, "/monitor.html"));
 app.use(
@@ -719,7 +755,7 @@ async function proxyToAgent(id, method, subPath, body) {
     }
     const ctrl = new AbortController();
     // 제어 명령은 모델 로딩·재시작을 포함할 수 있어 폴링보다 넉넉히
-    const timer = setTimeout(() => ctrl.abort(), 60000);
+    const timer = setTimeout(() => ctrl.abort(), config.agentProxyTimeoutMs);
     try {
         const res = await fetch(`${agent.agentUrl}${subPath}`, {
             method,
@@ -1495,7 +1531,7 @@ app.post("/api/servers", async (req, res) => {
                 security: def.security === true,
                 securityIds: secAssign.securityIds,
                 securityPolicy: secAssign.securityPolicyText,
-                ctx: Number(def.ctx) > 0 ? Number(def.ctx) : 4096,
+                ctx: Number(def.ctx) > 0 ? Number(def.ctx) : config.llamaDefaultCtx,
                 parallel: Number(def.parallel) > 0 ? Number(def.parallel) : undefined,
                 vision: Boolean(def.mmproj && String(def.mmproj).trim()),
             },
@@ -1568,8 +1604,10 @@ app.patch("/api/servers/:name", async (req, res) => {
             }
             if (has("ctx")) {
                 const c = Number(req.body.ctx);
-                if (!Number.isFinite(c) || c < 512) {
-                    return res.status(400).json({ error: "ctx 는 512 이상 숫자여야 합니다." });
+                if (!Number.isFinite(c) || c < config.llamaCtxMin) {
+                    return res.status(400).json({
+                        error: `ctx 는 ${config.llamaCtxMin} 이상 숫자여야 합니다.`,
+                    });
                 }
                 next.ctx = Math.floor(c);
             }
@@ -1578,7 +1616,7 @@ app.patch("/api/servers/:name", async (req, res) => {
                 if (!Number.isFinite(p) || p < 1) {
                     return res.status(400).json({ error: "parallel 은 1 이상 숫자여야 합니다." });
                 }
-                next.parallel = Math.min(32, Math.floor(p));
+                next.parallel = Math.min(config.llamaParallelCap, Math.floor(p));
             }
             if (has("gpu")) next.gpu = String(req.body.gpu ?? "").trim();
             await assertGpuCapacityForUpdate(oldDef, next);
@@ -1618,11 +1656,11 @@ app.patch("/api/servers/:name", async (req, res) => {
         if (runKeys.length) {
             const b = pool.backends.find((x) => x.url === url);
             if (b && has("ngl")) b.device = Number(def.ngl) > 0 ? "gpu" : "cpu";
-            if (b && has("ctx")) b.ctx = Number(def.ctx) > 0 ? Number(def.ctx) : 4096;
+            if (b && has("ctx")) b.ctx = Number(def.ctx) > 0 ? Number(def.ctx) : config.llamaDefaultCtx;
             if (b && has("parallel")) {
                 b.parallel =
                     Number(def.parallel) > 0
-                        ? Math.min(32, Math.floor(Number(def.parallel)))
+                        ? Math.min(config.llamaParallelCap, Math.floor(Number(def.parallel)))
                         : b.parallel;
             }
             server = enrichServerWithRoles(def);
@@ -2545,23 +2583,22 @@ app.post("/api/chat/stream", async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();
-    const send = (event, data) =>
-        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = sseSend(res);
 
+    let interactiveId = null;
     try {
         const body = req.body ?? {};
-        const q = typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
+        const q = resolveUserQuestion(body);
         logger.info(
             `요청 수신 [chat/stream] "${q.slice(0, 60)}" (len=${q.length}, memory=${Array.isArray(body.HISTORY) ? body.HISTORY.length : 0}턴)`,
         );
-        const rawTemp = Number(body.TEMPERATURE);
-        const temperature = Number.isFinite(rawTemp)
-            ? rawTemp
-            : config.defaultTemperature;
-        const enableThinking =
-            body.THINKING === undefined
-                ? config.enableThinking
-                : Boolean(body.THINKING);
+        interactiveId = pool.beginInteractive(q.slice(0, 120));
+        send("status", {
+            phase: "accepted",
+            message: "요청을 받았습니다. 빈 슬롯이 있으면 바로 처리합니다.",
+        });
+        const temperature = resolveTemperature(body);
+        const enableThinking = resolveThinking(body);
 
         await prepareChatMemory(body);
 
@@ -3093,25 +3130,10 @@ app.post("/api/chat/stream", async (req, res) => {
                         typeof body.ROLE_USER === "string"
                             ? body.ROLE_USER
                             : "";
-                    const rawTemp = Number(body.TEMPERATURE);
-                    const temperature = Number.isFinite(rawTemp)
-                        ? rawTemp
-                        : config.defaultTemperature;
-                    const enableThinking =
-                        body.THINKING === undefined
-                            ? config.enableThinking
-                            : Boolean(body.THINKING);
+                    const temperature = resolveTemperature(body);
+                    const enableThinking = resolveThinking(body);
                     const { shrinkRagOnBody } = await import("./ragContext.js");
-                    if (!body._rag) {
-                        const pack = await loadRagForRequest(body);
-                        body._rag = {
-                            hits: pack.hits,
-                            context: pack.context,
-                            sources: pack.sources,
-                            strict: pack.strict,
-                            topK: pack.topK,
-                        };
-                    }
+                    await ensureRagLoaded(body, loadRagForRequest);
                     shrinkRagOnBody(body, 0.4);
                     logger.warn(
                         `chat(stream) RAG 컨텍스트 초과 → 문서 축소 후 파이프라인 재시도: ${err.message}`,
@@ -3250,16 +3272,9 @@ app.post("/api/chat/stream", async (req, res) => {
             }
             try {
                 const body = req.body ?? {};
-                const q =
-                    typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
-                const rawTemp = Number(body.TEMPERATURE);
-                const temperature = Number.isFinite(rawTemp)
-                    ? rawTemp
-                    : config.defaultTemperature;
-                const enableThinking =
-                    body.THINKING === undefined
-                        ? config.enableThinking
-                        : Boolean(body.THINKING);
+                const q = resolveUserQuestion(body);
+                const temperature = resolveTemperature(body);
+                const enableThinking = resolveThinking(body);
                 logger.warn(
                     `chat(stream) 컨텍스트 초과 → 맵리듀스 재시도: ${err.message}`,
                 );
@@ -3379,6 +3394,8 @@ app.post("/api/chat/stream", async (req, res) => {
             security: err.security || undefined,
         });
         res.end();
+    } finally {
+        pool.endInteractive(interactiveId);
     }
 });
 
@@ -3398,11 +3415,14 @@ app.post("/api/chat/stress", async (req, res) => {
 
     const send = (event, data) => {
         if (!wantStream) return;
-        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        sseSend(res)(event, data);
     };
 
+    // 요청 수신 즉시 잡는 대기 마커 (라우팅 지연과 무관하게 보드에 바로 뜨도록)
+    let stressPendingIds = null;
+
     try {
-        const q = typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
+        const q = resolveUserQuestion(body);
         if (!q.trim()) {
             if (wantStream) {
                 res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -3425,14 +3445,8 @@ app.post("/api/chat/stress", async (req, res) => {
                 ? "serial"
                 : "parallel";
 
-        const rawTemp = Number(body.TEMPERATURE);
-        const temperature = Number.isFinite(rawTemp)
-            ? rawTemp
-            : config.defaultTemperature;
-        const enableThinking =
-            body.THINKING === undefined
-                ? config.enableThinking
-                : Boolean(body.THINKING);
+        const temperature = resolveTemperature(body);
+        const enableThinking = resolveThinking(body);
 
         if (wantStream) {
             res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -3445,6 +3459,9 @@ app.post("/api/chat/stress", async (req, res) => {
             `요청 수신 [chat/stress] "${q.slice(0, 60)}" ×${count} (${mode}` +
                 `${wantStream ? ", stream" : ""})`,
         );
+
+        // 라우팅(createPlan)·프롬프트 준비 전에 N건을 대기로 등록 → 대기 즉시 상승
+        stressPendingIds = pool.beginStressBatch(count, q.slice(0, 120));
 
         const plan = await createPlan(body);
         const tier = plan.tier;
@@ -3491,6 +3508,7 @@ app.post("/api/chat/stress", async (req, res) => {
                 device: plan.device,
                 skill: plan.skill ?? null,
             },
+            pendingIds: stressPendingIds,
             onResult: wantStream
                 ? (row) => {
                       send("result", row);
@@ -3502,7 +3520,7 @@ app.post("/api/chat/stress", async (req, res) => {
         logger.info(
             `chat/stress 완료 ${count}회 ${ms}ms ` +
                 `preferred=${tier} byTier=${JSON.stringify(out.summary?.byTier || {})} ` +
-                `demote=${out.summary?.loadDemoted ?? 0}`,
+                `demote=${out.summary?.loadDemoted ?? 0} promote=${out.summary?.loadPromoted ?? 0}`,
         );
         const payload = {
             mode: "stress",
@@ -3526,6 +3544,9 @@ app.post("/api/chat/stress", async (req, res) => {
                 : "") +
             (out.summary?.loadDemoted
                 ? ` · demote ${out.summary.loadDemoted}`
+                : "") +
+            (out.summary?.loadPromoted
+                ? ` · promote ${out.summary.loadPromoted}`
                 : "") +
             (out.summary?.wallMs != null ? ` · ${out.summary.wallMs}ms` : "");
 
@@ -3571,25 +3592,25 @@ app.post("/api/chat/stress", async (req, res) => {
                 mode: "stress",
             });
         }
+    } finally {
+        // 안전망: 라우팅 실패 등으로 stressChat 이 소진 못 한 대기 마커 해제
+        // (정상 경로에선 stressChat 이 이미 해제 — 중복 해제는 무해)
+        pool.releaseStressBatch(stressPendingIds);
     }
 });
 
 app.post("/api/chat", async (req, res) => {
     const started = Date.now();
+    let interactiveId = null;
     try {
         const body = req.body ?? {};
-        const q = typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
+        const q = resolveUserQuestion(body);
         logger.info(
             `요청 수신 [chat] "${q.slice(0, 60)}" (len=${q.length}, memory=${Array.isArray(body.HISTORY) ? body.HISTORY.length : 0}턴)`,
         );
-        const rawTemp = Number(body.TEMPERATURE);
-        const temperature = Number.isFinite(rawTemp)
-            ? rawTemp
-            : config.defaultTemperature;
-        const enableThinking =
-            body.THINKING === undefined
-                ? config.enableThinking
-                : Boolean(body.THINKING);
+        interactiveId = pool.beginInteractive(q.slice(0, 120));
+        const temperature = resolveTemperature(body);
+        const enableThinking = resolveThinking(body);
 
         await prepareChatMemory(body);
 
@@ -3991,25 +4012,10 @@ app.post("/api/chat", async (req, res) => {
                         typeof body.ROLE_USER === "string"
                             ? body.ROLE_USER
                             : "";
-                    const rawTemp = Number(body.TEMPERATURE);
-                    const temperature = Number.isFinite(rawTemp)
-                        ? rawTemp
-                        : config.defaultTemperature;
-                    const enableThinking =
-                        body.THINKING === undefined
-                            ? config.enableThinking
-                            : Boolean(body.THINKING);
+                    const temperature = resolveTemperature(body);
+                    const enableThinking = resolveThinking(body);
                     const { shrinkRagOnBody } = await import("./ragContext.js");
-                    if (!body._rag) {
-                        const pack = await loadRagForRequest(body);
-                        body._rag = {
-                            hits: pack.hits,
-                            context: pack.context,
-                            sources: pack.sources,
-                            strict: pack.strict,
-                            topK: pack.topK,
-                        };
-                    }
+                    await ensureRagLoaded(body, loadRagForRequest);
                     shrinkRagOnBody(body, 0.4);
                     logger.warn(
                         `chat RAG 컨텍스트 초과 → 문서 축소 재시도: ${err.message}`,
@@ -4098,16 +4104,9 @@ app.post("/api/chat", async (req, res) => {
             }
             try {
                 const body = req.body ?? {};
-                const q =
-                    typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
-                const rawTemp = Number(body.TEMPERATURE);
-                const temperature = Number.isFinite(rawTemp)
-                    ? rawTemp
-                    : config.defaultTemperature;
-                const enableThinking =
-                    body.THINKING === undefined
-                        ? config.enableThinking
-                        : Boolean(body.THINKING);
+                const q = resolveUserQuestion(body);
+                const temperature = resolveTemperature(body);
+                const enableThinking = resolveThinking(body);
                 logger.warn(
                     `chat 컨텍스트 초과 → 맵리듀스 재시도: ${err.message}`,
                 );
@@ -4202,6 +4201,8 @@ app.post("/api/chat", async (req, res) => {
             /필수|문자열|확장자|이미지/.test(err.message) && !err.retryable;
         logger.error(`chat 실패 (${Date.now() - started}ms): ${err.message}`);
         res.status(isClientError ? 400 : 502).json({ error: err.message });
+    } finally {
+        pool.endInteractive(interactiveId);
     }
 });
 
@@ -4753,8 +4754,7 @@ app.post("/api/rag/ask/stream", async (req, res) => {
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders?.();
-    const send = (event, data) =>
-        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = sseSend(res);
 
     try {
         // 검색·생성 전에 상태를 먼저 밀어 TTFT 체감 지연을 줄인다.
@@ -4881,6 +4881,14 @@ app.post("/api/rag/ask/stream", async (req, res) => {
 
 app.use((_req, res) => res.status(404).json({ error: "Not Found" }));
 
+app.use((err, req, res, next) => {
+    logger.error(
+        `Express 오류 ${req.method} ${req.path}: ${err?.message || err}`,
+    );
+    if (res.headersSent) return next(err);
+    res.status(500).json({ error: err?.message || "internal error" });
+});
+
 loadStats();
 pool.startHealthChecks();
 startAgentPolling();
@@ -4895,11 +4903,7 @@ memoryStore.setEmbedder(async (texts) => {
     return out?.vectors ?? null;
 });
 
-app.listen(config.port, () => {
-    const routers = pool.backends.filter((b) => b.routerEnabled);
-    const routerLabel = routers.length
-        ? routers.map((b) => `${b.alias || b.tier}@${b.url}`).join(", ")
-        : "없음";
+const httpServer = app.listen(config.port, () => {
     logger.info(
         `부모 관리서버 시작 (port ${config.port}, OS=${config.osMode}, ROUTING_MODE=${config.routingMode}) — 모델 백엔드는 하위 관리서버(agent) 등록으로 채워집니다`,
     );
@@ -4917,3 +4921,11 @@ app.listen(config.port, () => {
         `[neutda-ai] POST /api/chat 로 ROLE_SYSTEM/ROLE_USER/TEMPERATURE/content 전송`,
     );
 });
+hardenHttpServer(httpServer, { port: config.port });
+
+function onShutdownSignal(sig) {
+    logger.info(`관리서버 종료 신호 ${sig}`);
+    process.exit(0);
+}
+process.on("SIGINT", onShutdownSignal);
+process.on("SIGTERM", onShutdownSignal);

@@ -205,9 +205,13 @@ export function addLog(level, message, meta = null) {
     }
 
     const line = `[${entry.ts}] ${level.toUpperCase()} ${entry.message}`;
-    if (level === "error") console.error(line);
-    else if (level === "warn") console.warn(line);
-    else console.log(line);
+    try {
+        if (level === "error") console.error(line);
+        else if (level === "warn") console.warn(line);
+        else console.log(line);
+    } catch {
+        // 터미널 파이프가 깨져도 파일 로그는 남긴다 (EPIPE 로 프로세스 종료 방지)
+    }
 
     return entry;
 }

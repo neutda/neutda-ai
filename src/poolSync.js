@@ -7,6 +7,7 @@ import { pool } from "./pool.js";
 import { serverUrl } from "./serverUrl.js";
 import { rolesById, loadRolesSync, resolveServerRoles } from "./roles.js";
 import { resolveServerSecurity } from "./securityPolicies.js";
+import { config } from "./config.js";
 
 /** def → 풀 등록에 쓰는 해석 결과 (역할/보안/티어/장치/별칭/고정플래그) */
 function resolveForPool(def) {
@@ -27,10 +28,10 @@ function resolveForPool(def) {
             security: def.security === true,
             securityIds: sec.securityIds,
             securityPolicy: sec.securityPolicyText,
-            ctx: Number(def.ctx) > 0 ? Number(def.ctx) : 4096,
+            ctx: Number(def.ctx) > 0 ? Number(def.ctx) : config.llamaDefaultCtx,
             parallel:
                 Number(def.parallel) > 0
-                    ? Math.min(32, Math.floor(Number(def.parallel)))
+                    ? Math.min(config.llamaParallelCap, Math.floor(Number(def.parallel)))
                     : undefined,
             vision: Boolean(def.mmproj && String(def.mmproj).trim()),
         },

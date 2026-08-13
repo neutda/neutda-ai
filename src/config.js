@@ -353,4 +353,103 @@ export const config = {
     100,
     Math.max(0, num(process.env.LOAD_DEMOTE_MAX_DIFFICULTY, 75)),
   ),
+  // 슬롯 인지 승격: medium 포화 + large 여유 시 medium→large 로 올려 유휴 large 활용
+  loadPromote: (() => {
+    const raw = String(process.env.LOAD_PROMOTE || "on").trim().toLowerCase();
+    return raw !== "off" && raw !== "0" && raw !== "false";
+  })(),
+  // 이 난이도 이상만 medium→large 승격 허용 (미만이면 빠른 medium 대기가 나음)
+  loadPromoteMinDifficulty: Math.min(
+    100,
+    Math.max(0, num(process.env.LOAD_PROMOTE_MIN_DIFFICULTY, 40)),
+  ),
+
+  // ===== llama 백엔드 공통 기본값 (pool·serverManager·poolSync·agent 공용) =====
+  // servers.json 에 ctx/parallel 미지정 시 사용하는 폴백 및 검증 경계
+  llamaDefaultCtx: num(process.env.LLAMA_DEFAULT_CTX, 4096),
+  // 한 인스턴스가 가질 수 있는 최대 parallel 슬롯 (KV VRAM 폭주 방지 상한)
+  llamaParallelCap: Math.max(1, num(process.env.LLAMA_PARALLEL_CAP, 32)),
+  // 허용 최소 ctx (너무 작으면 프롬프트가 안 들어감)
+  llamaCtxMin: num(process.env.LLAMA_CTX_MIN, 512),
+
+  // ===== 헬스체크 / 외부 조회 타임아웃 =====
+  // 백엔드 /health 응답 대기(ms)
+  healthCheckTimeoutMs: num(process.env.HEALTH_CHECK_TIMEOUT_MS, 3000),
+  // /v1/models (로드된 모델명) 조회 대기(ms)
+  modelFetchTimeoutMs: num(process.env.MODEL_FETCH_TIMEOUT_MS, 3000),
+  // nvidia-smi 실행 타임아웃(ms) — VRAM/GPU 계측
+  nvidiaSmiTimeoutMs: num(process.env.NVIDIA_SMI_TIMEOUT_MS, 4000),
+  // 부모→하위 관리서버 프록시 요청 타임아웃(ms)
+  agentProxyTimeoutMs: num(process.env.AGENT_PROXY_TIMEOUT_MS, 60000),
+
+  // ===== 업로드 / 요청 본문 한도 =====
+  uploadMaxBytes: num(process.env.UPLOAD_MAX_BYTES, 30 * 1024 * 1024),
+  jsonBodyLimit: (process.env.JSON_BODY_LIMIT || "25mb").trim(),
+
+  // ===== RAG (문서 검색) =====
+  rag: {
+    // 청크 목표 길이/겹침(문자)
+    chunkChars: num(process.env.RAG_CHUNK_CHARS, 600),
+    chunkOverlap: num(process.env.RAG_CHUNK_OVERLAP, 100),
+    // 임베딩 배치 크기
+    embedBatch: num(process.env.RAG_EMBED_BATCH, 8),
+    // 검색 topK 기본/최대
+    topK: num(process.env.RAG_TOPK, 4),
+    topKMax: num(process.env.RAG_TOPK_MAX, 8),
+    // 벡터 커버리지가 이 값 미만이면 의미검색 대신 BM25 즉시
+    vectorCoverageMin: num(process.env.RAG_VECTOR_COVERAGE_MIN, 0.5),
+    // 코사인 유사도 하한 (이하 hit 제거)
+    cosineCutoff: num(process.env.RAG_COSINE_CUTOFF, 0.05),
+  },
+
+  // ===== BM25 랭킹 파라미터 (문서 RAG · 개인기억 공용) =====
+  bm25: {
+    k1: num(process.env.BM25_K1, 1.5),
+    b: num(process.env.BM25_B, 0.75),
+  },
+
+  // ===== 단기기억 (S_ID) =====
+  sessionMemory: {
+    // 슬라이딩 TTL(ms) — 기본 2시간
+    ttlMs: num(process.env.SESSION_MEMORY_TTL_MS, 2 * 60 * 60 * 1000),
+    // 세션당 최근 N턴 유지
+    maxTurns: num(process.env.SESSION_MEMORY_MAX_TURNS, 24),
+    // 만료 세션 sweep 주기(ms) — 기본 5분
+    sweepMs: num(process.env.SESSION_MEMORY_SWEEP_MS, 5 * 60 * 1000),
+  },
+
+  // ===== 풀 계측 =====
+  // 완료/실패 잡 링버퍼 크기
+  poolJobHistoryMax: num(process.env.POOL_JOB_HISTORY_MAX, 120),
+  // 최근 처리량(requestsLastMin) 슬라이딩 윈도우(ms)
+  poolStatsWindowMs: num(process.env.POOL_STATS_WINDOW_MS, 60000),
+
+  // ===== 보안 게이트(judge) =====
+  security: {
+    // judge 에 넣는 입력 스니펫 최대 길이
+    inputMaxChars: num(process.env.SECURITY_INPUT_MAX_CHARS, 5000),
+    // 정책 본문 truncation 길이
+    policyBodyMaxChars: num(process.env.SECURITY_POLICY_BODY_MAX_CHARS, 6000),
+    // judge 응답 최대 토큰
+    judgeMaxTokens: num(process.env.SECURITY_JUDGE_MAX_TOKENS, 120),
+    // 근거 인용(quote) 허용 길이 (오탐/누락 방지 경계)
+    quoteMin: num(process.env.SECURITY_QUOTE_MIN, 2),
+    quoteMax: num(process.env.SECURITY_QUOTE_MAX, 24),
+  },
+
+  // ===== 긴 입력 토큰 추정 계수 (한글/한자/기타 문자당 토큰) =====
+  tokenEstimate: {
+    hangul: num(process.env.TOKEN_EST_HANGUL, 1.35),
+    han: num(process.env.TOKEN_EST_HAN, 1.6),
+    other: num(process.env.TOKEN_EST_OTHER, 0.4),
+  },
+
+  // ===== 서버 매니저 (llama 프로세스 관리) =====
+  serverManager: {
+    // 새 서버 자동 포트 스캔 범위 [start, end)
+    portScanStart: num(process.env.LLAMA_PORT_SCAN_START, 8080),
+    portScanEnd: num(process.env.LLAMA_PORT_SCAN_END, 8200),
+    // large 티어 신규 서버 기본 parallel (KV VRAM 절약)
+    largeTierParallel: num(process.env.LARGE_TIER_PARALLEL, 2),
+  },
 };

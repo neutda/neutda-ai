@@ -16,13 +16,104 @@ import { resolveServerSecurity } from "./securityPolicies.js";
 import { serverUrl } from "./serverUrl.js";
 import { logger } from "./logger.js";
 import { recordChat } from "./stats.js";
-import {
-    fitMessagesForBackend,
-    messagesHaveImages,
-} from "./promptFit.js";
+import { fitMessagesForBackend, messagesHaveImages } from "./promptFit.js";
 
 const CHAT_TIERS = new Set(["small", "medium", "large"]);
 const TIER_RANK = { small: 0, medium: 1, large: 2 };
+/** 백엔드 슬롯 대기 우선순위. 대화·인프라가 스트레스 백로그를 앞선다. */
+const SLOT_PRI_STRESS = 0;
+const SLOT_PRI_CHAT = 10;
+const SLOT_PRI_INFRA = 20;
+
+// ── 보안 게이트(judge 응답) 판정용 정규식 (매 호출 재생성 방지 위해 모듈 상수) ──
+// 스키마 예시·포괄 라벨을 reason 으로 베끼는 무효 사유
+const SEC_JUNK_LABEL_RE =
+    /^(short_?label|long_?label|label|blocked|violation|policy|reason|unsafe|harmful|offensive|abuse|욕설|혐오|위반|차단)$/i;
+const SEC_JUNK_PHRASE_RE =
+    /general questions|coding help|fiction|research|Stage=|티어 하한|llm-router|PIPELINE|You are|allow\s*=|짧은한국어|SECURITY POLICY|POLICY:|최종 직전|너무\s*짧|짧은\s*답|일반적인\s*대화|인사|greeting|hello|하이|short_label|contains_offensive|inappropriate|violates?\s*policy/i;
+// 욕설·혐오 정책인지, 인용이 실제 금칙어인지, 오히려 무해한 단어인지 판별
+const SEC_ABUSE_POLICY_RE = /욕설|혐오|비하|협박|차별|profanity|abuse|hate|insult|slur/i;
+const SEC_ABUSE_HIT_RE =
+    /씨발|시발|씨빨|병신|좆|지랄|꺼져|닥쳐|미친\s*놈|미친\s*년|개새|쓰레기\s*년|한남충|한녀|느금마|니미|씹|ㅅㅂ|ㅄ|fuck|shit|bitch|asshole|cunt|nigger|faggot/i;
+const SEC_BENIGN_QUOTE_RE =
+    /^(분석|요약|확인|개선|내용|답변|요청|회의|담당|기능|체크|삭제|채팅|사용자|의견|이해|동료|메시지|최종|초안|비판|병합|리뷰|배포|예산|일정)$/;
+
+/**
+ * 보안 judge 의 원시 응답(JSON 문자열)을 판정으로 해석한다. 순수 함수 — 백엔드 상태와 무관.
+ * 기본 ALLOW: JSON 없음/파싱 실패/근거 인용 없음/무효 사유/욕설 근거 없음이면 허용(ambiguous).
+ * 차단은 explicit allow=false + 초안에 실재하는 짧은 인용(quote)이 있을 때만.
+ * @param {string} raw judge 응답
+ * @param {string} policyText 배정된 보안 정책 본문
+ * @param {string} draftOnly 검토 대상(최종 직전 답변)
+ */
+function parseSecurityVerdict(raw, policyText, draftOnly) {
+    // 첫 JSON 객체 (중첩 최소화 — 모델이 한 줄로 내는 전제)
+    const m = String(raw ?? "").match(/\{[\s\S]*?\}/);
+    if (!m) {
+        return { allow: true, reason: "보안검증 JSON 없음 → 허용", ambiguous: true };
+    }
+    let j;
+    try {
+        j = JSON.parse(m[0]);
+    } catch {
+        return {
+            allow: true,
+            reason: "보안검증 JSON 파싱 실패 → 허용",
+            ambiguous: true,
+        };
+    }
+    const explicitFalse =
+        j.allow === false ||
+        j.allow === "false" ||
+        j.allow === 0 ||
+        j.safe === false;
+    const reason = String(j.reason ?? j.message ?? "").trim() || "blocked";
+    if (!explicitFalse) {
+        return { allow: true, reason: reason === "blocked" ? "ok" : reason };
+    }
+
+    const quote = String(j.quote ?? j.span ?? j.evidence ?? j.match ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+    const draftFlat = String(draftOnly).replace(/\s+/g, " ");
+
+    // 허위차단 방지: 초안에 실제로 있는 짧은 인용(quoteMin~quoteMax 자)이 필수
+    const quoteOk =
+        quote.length >= config.security.quoteMin &&
+        quote.length <= config.security.quoteMax &&
+        draftFlat.includes(quote);
+    if (!quoteOk) {
+        return {
+            allow: true,
+            reason: `보안검증 근거 부족(quote 없음/불일치/과장 “${reason.slice(0, 40)}”) → 허용`,
+            ambiguous: true,
+        };
+    }
+
+    // 스키마 예시·포괄 라벨을 reason 으로 베끼는 경우 (short_label «분석» 등)
+    const junkReason =
+        SEC_JUNK_LABEL_RE.test(reason) || SEC_JUNK_PHRASE_RE.test(reason);
+    if (junkReason || reason.length < 2) {
+        return {
+            allow: true,
+            reason: `보안검증 사유 무효(“${reason.slice(0, 40)}”) → 허용`,
+            ambiguous: true,
+        };
+    }
+
+    // 욕설·혐오 정책: quote 자체가 금칙/욕설 신호여야 함 (일반 단어 «분석» 차단 방지)
+    if (SEC_ABUSE_POLICY_RE.test(String(policyText || ""))) {
+        if (SEC_BENIGN_QUOTE_RE.test(quote) || !SEC_ABUSE_HIT_RE.test(quote)) {
+            return {
+                allow: true,
+                reason: `욕설 근거 없음(quote “${quote.slice(0, 20)}”) → 허용`,
+                ambiguous: true,
+            };
+        }
+    }
+
+    return { allow: false, reason: `${reason} «${quote.slice(0, 40)}»` };
+}
 
 /**
  * 여러 llama-server 백엔드를 관리하는 풀.
@@ -57,16 +148,18 @@ class Backend {
         this.routerEnabled = Boolean(f.router ?? router);
         this.plannerEnabled = Boolean(f.planner);
         this.embeddingEnabled = Boolean(f.embedding);
-    this.securityEnabled = Boolean(f.security);
-    this.securityIds = Array.isArray(f.securityIds) ? [...f.securityIds] : [];
-    this.securityPolicy = String(f.securityPolicy ?? "").trim();
-    this.ctx = Number(f.ctx) > 0 ? Number(f.ctx) : 4096;
-    this.parallel =
-        Number(f.parallel) > 0
-            ? Math.min(32, Math.floor(Number(f.parallel)))
-            : Math.max(1, Number(config.llamaParallel) || 4);
-    this.vision = Boolean(f.vision);
-    this.healthy = false;
+        this.securityEnabled = Boolean(f.security);
+        this.securityIds = Array.isArray(f.securityIds)
+            ? [...f.securityIds]
+            : [];
+        this.securityPolicy = String(f.securityPolicy ?? "").trim();
+        this.ctx = Number(f.ctx) > 0 ? Number(f.ctx) : config.llamaDefaultCtx;
+        this.parallel =
+            Number(f.parallel) > 0
+                ? Math.min(config.llamaParallelCap, Math.floor(Number(f.parallel)))
+                : Math.max(1, Number(config.llamaParallel) || 4);
+        this.vision = Boolean(f.vision);
+        this.healthy = false;
         this.model = null;
         this.inFlight = 0;
         this.totalRequests = 0;
@@ -85,9 +178,7 @@ class Backend {
     /** 다른 인프라 역할도 겸하는지 (표시/참고용). 답변 풀 포함 여부는 solve 로만 결정. */
     get exclusiveInfra() {
         return (
-            this.routerEnabled ||
-            this.plannerEnabled ||
-            this.securityEnabled
+            this.routerEnabled || this.plannerEnabled || this.securityEnabled
         );
     }
 
@@ -105,10 +196,7 @@ class Backend {
      * (예: 소형 +「간단한 인사」만 담당)
      */
     get canServeSkill() {
-        return (
-            this.skills.length > 0 &&
-            CHAT_TIERS.has(this.tier)
-        );
+        return this.skills.length > 0 && CHAT_TIERS.has(this.tier);
     }
 
     get avgLatencyMs() {
@@ -139,9 +227,9 @@ class Backend {
             routerEnabled: this.routerEnabled,
             plannerEnabled: this.plannerEnabled,
             embeddingEnabled: this.embeddingEnabled,
-      securityEnabled: this.securityEnabled,
-      securityIds: this.securityIds,
-      securityPolicy: this.securityPolicy,
+            securityEnabled: this.securityEnabled,
+            securityIds: this.securityIds,
+            securityPolicy: this.securityPolicy,
             healthy: this.healthy,
             model: this.model,
             ctx: this.ctx,
@@ -180,18 +268,18 @@ class Pool {
                         router: s.router === true,
                         planner: s.planner === true,
                         embedding: s.embedding === true,
-            security: s.security === true,
-            securityIds: s.securityIds ?? [],
-            securityPolicy: s.securityPolicy ?? "",
-            ctx: Number(s.ctx) > 0 ? Number(s.ctx) : 4096,
-            parallel:
-              Number(s.parallel) > 0
-                ? Math.min(32, Math.floor(Number(s.parallel)))
-                : undefined,
-            vision: Boolean(s.vision || s.mmproj),
-          },
-        ),
-    );
+                        security: s.security === true,
+                        securityIds: s.securityIds ?? [],
+                        securityPolicy: s.securityPolicy ?? "",
+                        ctx: Number(s.ctx) > 0 ? Number(s.ctx) : config.llamaDefaultCtx,
+                        parallel:
+                            Number(s.parallel) > 0
+                                ? Math.min(config.llamaParallelCap, Math.floor(Number(s.parallel)))
+                                : undefined,
+                        vision: Boolean(s.vision || s.mmproj),
+                    },
+                ),
+        );
         this.applyDefaultRouterRoles();
         this.rrCursor = 0;
         this.healthTimer = null;
@@ -200,16 +288,32 @@ class Pool {
         this._chatRunning = 0;
         /** @type {{ resolve: Function, reject: Function, at: number, kind: string, timer: any, onQueue?: Function, preview?: string }[]} */
         this._chatQueue = [];
+        /**
+         * 백엔드 슬롯 세마포어 대기자. inFlight < parallel 인 백엔드가 없을 때
+         * _chatDispatch/_chatStreamDispatch 가 여기서 대기하다 슬롯이 비면 재획득.
+         * priority 높은 순 → 같은 priority 는 seq(도착 순) → 대화가 스트레스
+         * 백로그를 앞질러 슬롯을 받는다.
+         * @type {{ tryAcquire: () => any, resolve: Function, reject: Function, timer: any, priority: number, seq: number }[]}
+         */
+        this._slotWaiters = [];
+        this._slotWaiterSeq = 0;
         /** 모델로 나간 진행 중 호출 (질문 미리보기·잔여 리스트용) */
         this._modelJobs = new Map();
         this._modelJobSeq = 0;
         /** 최근 완료/실패 작업 (부하현황 탭용, 메모리 ring) */
         this._jobHistory = [];
-        this._jobHistoryMax = 120;
+        this._jobHistoryMax = config.poolJobHistoryMax;
         this._jobHistorySeq = 0;
         /** 스트레스 워커 풀에서 아직 시작 전인 대기 건 */
         this._stressPending = new Map();
         this._stressPendingSeq = 0;
+        /**
+         * 실시간 대화 HTTP (chat / chat/stream). 스트레스 워커가 빈 슬롯을
+         * 가로채기 전에 대화를 보드에 올리고, 슬롯 양보를 강제한다.
+         * @type {Map<number, { preview: string, at: number }>}
+         */
+        this._interactive = new Map();
+        this._interactiveSeq = 0;
         this._queueStats = {
             enqueued: 0,
             started: 0,
@@ -219,7 +323,7 @@ class Pool {
             lastEnqueueAt: null,
             lastStartAt: null,
         };
-        /** load-aware 강등 통계 */
+        /** load-aware 강등·승격 통계 */
         this._loadStats = {
             demoteLargeToMedium: 0,
             skippedHardLock: 0,
@@ -227,6 +331,12 @@ class Pool {
             skippedHighDiff: 0,
             lastDemoteAt: null,
             lastDemoteReason: null,
+            // 승격(medium→large): 유휴 large 활용
+            promoteMediumToLarge: 0,
+            skippedPromoteLowDiff: 0, // medium 포화지만 난이도 낮아 승격 안 함
+            skippedPromoteBusy: 0, // medium 포화 + large 도 포화 → 승격 불가
+            lastPromoteAt: null,
+            lastPromoteReason: null,
         };
         /** 부하 스냅샷 세션 에러 sink (loadSession.recordError). 없으면 no-op */
         this._errorSink = null;
@@ -266,7 +376,7 @@ class Pool {
     /** 백엔드별 parallel 합 (없으면 LLAMA_PARALLEL) */
     backendParallel(b) {
         const p = Number(b?.parallel);
-        if (Number.isFinite(p) && p >= 1) return Math.min(32, Math.floor(p));
+        if (Number.isFinite(p) && p >= 1) return Math.min(config.llamaParallelCap, Math.floor(p));
         return Math.max(1, Number(config.llamaParallel) || 4);
     }
 
@@ -312,9 +422,7 @@ class Pool {
         const maxInFlight = this.chatMaxInFlight();
         const maxDepth = this.chatQueueMax();
         const load = this.chatLoadLevel();
-        const oldestMs = depth
-            ? Date.now() - this._chatQueue[0].at
-            : 0;
+        const oldestMs = depth ? Date.now() - this._chatQueue[0].at : 0;
         const backendInFlight = this.backends.reduce(
             (s, b) => s + (b.inFlight || 0),
             0,
@@ -328,13 +436,14 @@ class Pool {
             maxInFlight,
             maxDepth,
             load,
-            loadLabel: {
-                idle: "한가함",
-                normal: "처리 중",
-                busy: depth > 0 ? "혼잡 (대기열)" : "혼잡 (슬롯 가득)",
-                saturated: "포화 (큐 가득)",
-                offline: "해결 서버 없음 (복구 대기)",
-            }[load] || load,
+            loadLabel:
+                {
+                    idle: "한가함",
+                    normal: "처리 중",
+                    busy: depth > 0 ? "혼잡 (대기열)" : "혼잡 (슬롯 가득)",
+                    saturated: "포화 (큐 가득)",
+                    offline: "해결 서버 없음 (복구 대기)",
+                }[load] || load,
             oldestWaitMs: oldestMs,
             backendInFlight,
             solveInFlight,
@@ -416,21 +525,22 @@ class Pool {
         if (kind === "hard") this._loadStats.skippedHardLock++;
         else if (kind === "free") this._loadStats.skippedFreeOk++;
         else if (kind === "diff") this._loadStats.skippedHighDiff++;
+        else if (kind === "promoLowDiff")
+            this._loadStats.skippedPromoteLowDiff++;
+        else if (kind === "promoBusy") this._loadStats.skippedPromoteBusy++;
+    }
+
+    recordLoadPromote(reason) {
+        this._loadStats.promoteMediumToLarge++;
+        this._loadStats.lastPromoteAt = new Date().toISOString();
+        this._loadStats.lastPromoteReason = String(reason || "").slice(0, 200);
     }
 
     /**
-     * 통계용 부하 보드: API / 모델 / 잔여(모델이 바로 못 받는 것) 분리
+     * 부하 보드용 작업 목록 수집: 진행 중 모델 잡 / 대화 대기 / 스트레스 대기.
+     * (모델 잡에 이미 보이는 대화는 interactiveWaiting 에서 제외해 중복 표시 방지)
      */
-    loadBoard() {
-        const now = Date.now();
-        const solve = this.backends.filter((b) => b.healthy && b.canChat);
-        const capacity = solve.reduce(
-            (s, b) => s + this.backendParallel(b),
-            0,
-        );
-        const inFlight = solve.reduce((s, b) => s + (b.inFlight || 0), 0);
-        const defaultPar = Math.max(1, Number(config.llamaParallel) || 4);
-
+    _collectLoadJobs(now) {
         const jobs = [...this._modelJobs.values()]
             .sort((a, b) => a.startedAt - b.startedAt)
             .map((j) => ({
@@ -440,6 +550,24 @@ class Pool {
                 alias: j.alias || null,
                 backend: j.backendUrl || null,
                 elapsedMs: now - j.startedAt,
+            }));
+
+        const jobPreviews = new Set(
+            [...this._modelJobs.values()]
+                .filter((j) => j.kind && j.kind !== "stress")
+                .map((j) => j.preview),
+        );
+        const interactiveWaiting = [...this._interactive.values()]
+            .filter((j) => !jobPreviews.has(j.preview))
+            .sort((a, b) => a.at - b.at)
+            .map((j, i) => ({
+                i: i + 1,
+                preview: j.preview || "(대화)",
+                kind: "chat-wait",
+                tier: null,
+                alias: null,
+                backend: null,
+                waitMs: now - j.at,
             }));
 
         const stressWaiting = [...this._stressPending.values()]
@@ -454,15 +582,39 @@ class Pool {
                 waitMs: now - j.at,
             }));
 
+        return { jobs, interactiveWaiting, stressWaiting };
+    }
+
+    /**
+     * 통계용 부하 보드: API / 모델 / 잔여(모델이 바로 못 받는 것) 분리
+     */
+    loadBoard() {
+        const now = Date.now();
+        const solve = this.backends.filter((b) => b.healthy && b.canChat);
+        const capacity = solve.reduce((s, b) => s + this.backendParallel(b), 0);
+        const inFlight = solve.reduce((s, b) => s + (b.inFlight || 0), 0);
+        const defaultPar = Math.max(1, Number(config.llamaParallel) || 4);
+
+        const { jobs, interactiveWaiting, stressWaiting } =
+            this._collectLoadJobs(now);
+
         const processing = capacity > 0 ? jobs.slice(0, capacity) : [];
         // llama 초과 추정 + 스트레스 워커 대기(슬롯 열려야 시작)
         const waitingModel = [
+            ...interactiveWaiting,
             ...(capacity > 0 ? jobs.slice(capacity) : jobs),
             ...stressWaiting,
         ];
         const pendingCount = this._stressPending.size;
-        // 보드용: 실제 모델 inFlight 초과 + 아직 안 쏜 스트레스 대기
-        const overflow = Math.max(0, inFlight - capacity) + pendingCount;
+        // 워커가 집었지만 빈 슬롯이 없어 세마포어에서 대기 중인 건
+        // (슬롯 게이트 도입 후 실제 대기는 여기에 쌓인다)
+        const slotWaiting = this._slotWaiters.length;
+        // 보드용: 슬롯 초과(=슬롯 대기) + 아직 워커가 안 집은 스트레스 대기
+        const overflow =
+            Math.max(0, inFlight - capacity) +
+            slotWaiting +
+            pendingCount +
+            interactiveWaiting.length;
 
         const apiWaiting = this._chatQueue.map((e, i) => ({
             i: i + 1,
@@ -473,7 +625,8 @@ class Pool {
 
         const apiJobs = this._chatRunning;
         const apiCap = this.chatMaxInFlight();
-        const totalWork = inFlight + pendingCount;
+        const totalWork =
+            inFlight + slotWaiting + pendingCount + interactiveWaiting.length;
 
         return {
             api: {
@@ -494,6 +647,8 @@ class Pool {
                 inFlight,
                 capacity,
                 pending: pendingCount,
+                interactive: interactiveWaiting.length,
+                slotWaiting,
                 totalWork,
                 parallelPerServer: defaultPar,
                 healthySolve: solve.length,
@@ -524,11 +679,15 @@ class Pool {
                 label: "잔여 질문 (모델이 바로 못 받은 것)",
                 overflowEstimate: overflow,
                 pending: pendingCount,
+                interactive: interactiveWaiting.length,
+                slotWaiting,
                 waiting: waitingModel,
                 processing,
                 apiWaiting,
                 note:
-                    "pending = 스트레스 등에서 슬롯 대기 중. " +
+                    "slotWaiting = 워커가 집었으나 빈 슬롯 대기 중. " +
+                    "pending = 아직 워커가 안 집은 스트레스 대기. " +
+                    "interactive = 실시간 대화(라우팅 전 포함). " +
                     "API waiting 은 Express가 아직 모델로 안 보낸 건.",
             },
             history: this._jobHistoryLists(),
@@ -547,6 +706,116 @@ class Pool {
 
     _untrackStressPending(id) {
         if (id != null) this._stressPending.delete(id);
+    }
+
+    /**
+     * 스트레스 N건을 즉시 "대기"로 등록한다(라우팅·프롬프트 준비 전에 호출).
+     * 이렇게 해야 요청을 받는 즉시 부하 보드의 대기 수치가 바로 오른다.
+     * 반환한 ids 를 stressChat 에 넘기면 워커가 하나씩 소진한다.
+     * @returns {number[]}
+     */
+    beginStressBatch(count, preview = "") {
+        const n = Math.max(1, Math.floor(Number(count) || 1));
+        const label = String(preview || "").slice(0, 120);
+        const ids = [];
+        for (let i = 1; i <= n; i++) {
+            ids.push(
+                this._trackStressPending({
+                    i,
+                    preview: label
+                        ? `[대기 #${i}/${n}] ${label}`
+                        : `stress 대기 #${i}/${n}`,
+                }),
+            );
+        }
+        return ids;
+    }
+
+    /** beginStressBatch 로 잡은 대기 마커를 모두 해제(누수 방지 안전망). */
+    releaseStressBatch(ids) {
+        if (!Array.isArray(ids)) return;
+        for (const id of ids) this._untrackStressPending(id);
+    }
+
+    /**
+     * 실시간 대화 시작. 라우팅·임베딩 전에 호출해야 스트레스가 빈 슬롯을
+     * 다시 채우지 않고, 부하 보드에 대화가 바로 보인다.
+     * @returns {number} endInteractive 에 넘길 id
+     */
+    beginInteractive(preview = "") {
+        const id = ++this._interactiveSeq;
+        this._interactive.set(id, {
+            preview: String(preview || "").slice(0, 120) || "(대화)",
+            at: Date.now(),
+        });
+        this._logQueue(
+            `대화 우선 진입: "${String(preview || "").slice(0, 40)}" ` +
+                `(실시간 ${this._interactive.size}건 · 스트레스 대기 ${this._stressPending.size}건)`,
+        );
+        return id;
+    }
+
+    endInteractive(id) {
+        if (id == null) return;
+        this._interactive.delete(id);
+        this.pumpSlotWaiters();
+    }
+
+    _mergeExclude(tried, skip) {
+        if (!skip || skip.size === 0) return tried;
+        const s = new Set(tried);
+        for (const u of skip) s.add(u);
+        return s;
+    }
+
+    _backendHasFreeSlot(b) {
+        if (!b) return false;
+        return (Number(b.inFlight) || 0) < this.backendParallel(b);
+    }
+
+    _preferFree(list) {
+        if (!list?.length) return list;
+        const free = list.filter((b) => this._backendHasFreeSlot(b));
+        return free.length ? free : list;
+    }
+
+    _interactiveJobCount() {
+        let n = 0;
+        for (const j of this._modelJobs.values()) {
+            if (j.kind && j.kind !== "stress") n++;
+        }
+        return n;
+    }
+
+    /**
+     * 실시간 대화가 아직 슬롯을 못 잡았으면 스트레스는 빈 슬롯을 가져가면 안 됨.
+     * (인사는 라우터/임베딩을 먼저 타서, 그 전에 스트레스가 슬롯을 다시 채우면
+     *  보드엔 빈 칸이 보여도 대화는 스트레스가 끝날 때까지 답이 안 온다.)
+     */
+    _holdStressSlots() {
+        if (this._interactive.size <= 0) return false;
+        if (this._slotWaiters.some((w) => (Number(w.priority) || 0) > 0)) {
+            return true;
+        }
+        return this._interactive.size > this._interactiveJobCount();
+    }
+
+    /** 라우터 역할 백엔드에 빈 슬롯이 있는지 */
+    routerHasFreeSlot() {
+        return this.backends.some(
+            (b) => b.routerEnabled && b.healthy && this._backendHasFreeSlot(b),
+        );
+    }
+
+    /**
+     * 실시간 대화인데 라우터 슬롯이 없으면 LLM 분류를 건너뛴다.
+     * 대형 라우터가 스트레스에 점유된 채 휴리스틱으로 바로 답변 슬롯(비어 있는
+     * medium 등)을 쓰게 한다.
+     */
+    shouldSkipLlmRouter() {
+        if (this._interactive.size <= 0) return false;
+        if (!this.hasActiveRouter()) return false;
+        return !this.routerHasFreeSlot();
     }
 
     _trackModelJob(meta = {}) {
@@ -650,7 +919,10 @@ class Pool {
             );
         }
 
-        const waitMs = Math.max(5_000, Number(config.chatQueueWaitMs) || 120_000);
+        const waitMs = Math.max(
+            5_000,
+            Number(config.chatQueueWaitMs) || 120_000,
+        );
 
         return new Promise((resolve, reject) => {
             const entry = {
@@ -727,6 +999,138 @@ class Pool {
         }
     }
 
+    /**
+     * 백엔드 슬롯 세마포어 획득.
+     * pickFn 은 현재 후보 백엔드(라우팅·failover 반영)를 고른다.
+     * - pickFn 이 null → 후보 자체가 없음 → null 반환(디스패치 루프 종료).
+     * - 고른 백엔드에 빈 슬롯(inFlight<parallel) → 즉시 inFlight++ 하고 반환.
+     * - 후보는 있으나 전부 참 → 슬롯이 빌 때까지 대기 후 재획득.
+     * 이로써 백엔드별 inFlight 는 절대 parallel 을 넘지 않는다(전역 상한 = 슬롯 합).
+     * @param {() => (object|null)} pickFn
+     * @param {{ priority?: number }} [opts] priority 높을수록 먼저 슬롯 획득
+     *        (대화=10, 스트레스=0). 대화가 스트레스 백로그를 앞지른다.
+     * @returns {Promise<object|null>} inFlight 이미 증가된 백엔드, 또는 후보 없으면 null
+     */
+    acquireBackendSlot(pickFn, { priority = 0 } = {}) {
+        const myPri = Number(priority) || 0;
+        // 동기 시도: 빈 슬롯 있으면 바로 잡고, 후보 없으면 null, 다 차면 대기 신호.
+        // pickFn(skip) 이 가득 찬 백엔드를 돌려도 skip 에 넣어 다른 후보(다른 티어)를 본다.
+        const tryAcquire = () => {
+            const skip = new Set();
+            while (true) {
+                const b = pickFn(skip);
+                if (!b) {
+                    return skip.size > 0
+                        ? { state: "full" }
+                        : { state: "none" };
+                }
+                if (skip.has(b.url)) return { state: "full" };
+                const parallel = this.backendParallel(b);
+                if ((b.inFlight || 0) < parallel) {
+                    b.inFlight++;
+                    return { state: "got", backend: b };
+                }
+                skip.add(b.url);
+                if (skip.size > 64) return { state: "full" };
+            }
+        };
+
+        const rollback = (backend) => {
+            if (backend) {
+                backend.inFlight = Math.max(0, (backend.inFlight || 0) - 1);
+            }
+        };
+
+        const first = tryAcquire();
+        if (first.state === "got") {
+            const higherWaiter = this._slotWaiters.some(
+                (w) => (Number(w.priority) || 0) > myPri,
+            );
+            const holdStress =
+                myPri <= SLOT_PRI_STRESS && this._holdStressSlots();
+            if (higherWaiter || holdStress) {
+                rollback(first.backend);
+            } else {
+                return Promise.resolve(first.backend);
+            }
+        } else if (first.state === "none") {
+            return Promise.resolve(null);
+        }
+
+        // 후보는 있으나 슬롯이 가득(또는 대화 양보) → 릴리스될 때까지 대기
+        const waitMs = Math.max(
+            5_000,
+            Number(config.chatQueueWaitMs) || 120_000,
+        );
+        return new Promise((resolve, reject) => {
+            const waiter = {
+                tryAcquire,
+                resolve,
+                reject,
+                timer: null,
+                priority: myPri,
+                seq: ++this._slotWaiterSeq,
+            };
+            waiter.timer = setTimeout(() => {
+                const i = this._slotWaiters.indexOf(waiter);
+                if (i >= 0) this._slotWaiters.splice(i, 1);
+                reject(
+                    new Error(
+                        `모델 슬롯 대기 시간이 초과되었습니다 (${Math.round(waitMs / 1000)}초). 서버가 바쁩니다.`,
+                    ),
+                );
+            }, waitMs);
+            this._slotWaiters.push(waiter);
+            // 방금 양보로 비운 슬롯·이미 비어 있던 슬롯을 높은 우선순위가 바로 집게
+            this.pumpSlotWaiters();
+        });
+    }
+
+    /** 백엔드 슬롯 반납: inFlight-- 후 대기자에게 빈 슬롯을 넘긴다. */
+    releaseBackendSlot(backend) {
+        if (backend)
+            backend.inFlight = Math.max(0, (backend.inFlight || 0) - 1);
+        this.pumpSlotWaiters();
+    }
+
+    /**
+     * 슬롯이 비면 대기자를 깨워 재획득 시도.
+     * priority 높은 순 → 같은 priority 는 seq(도착 순). 이렇게 해야 대화가
+     * 스트레스 백로그(수십 건)를 앞질러 빈 슬롯을 받는다.
+     */
+    pumpSlotWaiters() {
+        if (!this._slotWaiters.length) return;
+        const holdStress = this._holdStressSlots();
+        // 우선순위·도착순으로 시도 순서 결정 (원본 배열은 건드리지 않고 정렬 사본)
+        const order = [...this._slotWaiters].sort(
+            (a, b) => b.priority - a.priority || a.seq - b.seq,
+        );
+        const done = new Set();
+        for (const waiter of order) {
+            if (
+                holdStress &&
+                (Number(waiter.priority) || 0) <= SLOT_PRI_STRESS
+            ) {
+                continue;
+            }
+            const r = waiter.tryAcquire();
+            if (r.state === "got") {
+                if (waiter.timer) clearTimeout(waiter.timer);
+                waiter.resolve(r.backend);
+                done.add(waiter);
+            } else if (r.state === "none") {
+                // 이 대기자의 후보가 사라짐(모두 비정상 등) → null 로 종료
+                if (waiter.timer) clearTimeout(waiter.timer);
+                waiter.resolve(null);
+                done.add(waiter);
+            }
+            // "full" 은 그대로 대기 유지
+        }
+        if (done.size) {
+            this._slotWaiters = this._slotWaiters.filter((w) => !done.has(w));
+        }
+    }
+
     async withChatSlot(kind, onQueue, fn, preview = "") {
         const slot = await this.acquireChatSlot({ kind, onQueue, preview });
         try {
@@ -737,29 +1141,34 @@ class Pool {
     }
 
     async checkAll() {
-        await Promise.all(
-            this.backends.map(async (b) => {
-                const prev = b.healthy;
-                const { ok, latencyMs } = await checkHealth(b.url);
-                b.healthy = ok;
-                b.healthLatencyMs = latencyMs;
-                b.lastCheck = new Date().toISOString();
-                if (ok && !b.model) b.model = await fetchModel(b.url);
-                if (!ok && !b.lastError) b.lastError = "health check failed";
-                if (prev !== ok) {
-                    if (ok)
-                        logger.info(
-                            `백엔드 복구됨 ✅ ${b.tier}/${b.device ?? "-"} @ ${b.url} (${latencyMs}ms)`,
-                        );
-                    else
-                        logger.warn(
-                            `백엔드 다운 ⚠️ ${b.tier}/${b.device ?? "-"} @ ${b.url}`,
-                        );
-                }
-            }),
-        );
-        // 해결 서버가 다시 살아나면 대기 큐 출고
-        this.pumpChatQueue();
+        try {
+            await Promise.all(
+                this.backends.map(async (b) => {
+                    const prev = b.healthy;
+                    const { ok, latencyMs } = await checkHealth(b.url);
+                    b.healthy = ok;
+                    b.healthLatencyMs = latencyMs;
+                    b.lastCheck = new Date().toISOString();
+                    if (ok && !b.model) b.model = await fetchModel(b.url);
+                    if (!ok && !b.lastError)
+                        b.lastError = "health check failed";
+                    if (prev !== ok) {
+                        if (ok)
+                            logger.info(
+                                `백엔드 복구됨 ✅ ${b.tier}/${b.device ?? "-"} @ ${b.url} (${latencyMs}ms)`,
+                            );
+                        else
+                            logger.warn(
+                                `백엔드 다운 ⚠️ ${b.tier}/${b.device ?? "-"} @ ${b.url}`,
+                            );
+                    }
+                }),
+            );
+            // 해결 서버가 다시 살아나면 대기 큐 출고
+            this.pumpChatQueue();
+        } catch (err) {
+            logger.error(`헬스체크 실패: ${err.message}`);
+        }
     }
 
     startHealthChecks() {
@@ -866,18 +1275,18 @@ class Pool {
             b.chatEnabled = f.solve;
             b.routerEnabled = f.router;
             b.plannerEnabled = f.planner;
-      b.embeddingEnabled = f.embedding;
-      b.securityEnabled = f.security;
-    }
-    // 보안 정책 배정(securityIds) → 검사 본문 복원
-    for (const d of defs) {
-      const url = serverUrl(d);
-      const b = this.backends.find((x) => x.url === url);
-      if (!b) continue;
-      const sec = resolveServerSecurity(d);
-      b.securityIds = sec.securityIds;
-      b.securityPolicy = sec.securityPolicyText;
-    }
+            b.embeddingEnabled = f.embedding;
+            b.securityEnabled = f.security;
+        }
+        // 보안 정책 배정(securityIds) → 검사 본문 복원
+        for (const d of defs) {
+            const url = serverUrl(d);
+            const b = this.backends.find((x) => x.url === url);
+            if (!b) continue;
+            const sec = resolveServerSecurity(d);
+            b.securityIds = sec.securityIds;
+            b.securityPolicy = sec.securityPolicyText;
+        }
         const routers = this.backends.filter((b) => b.routerEnabled);
         if (routers.length) {
             logger.info(
@@ -1052,16 +1461,16 @@ class Pool {
         return true;
     }
 
-  /** 보안 정책 배정 반영 (카탈로그 id + 병합 본문) */
-  setSecurityAssignment(url, { securityIds, securityPolicy } = {}) {
-    const b = this.backends.find((x) => x.url === url);
-    if (!b) return false;
-    if (Array.isArray(securityIds)) b.securityIds = [...securityIds];
-    if (securityPolicy !== undefined) {
-      b.securityPolicy = String(securityPolicy ?? "").trim();
+    /** 보안 정책 배정 반영 (카탈로그 id + 병합 본문) */
+    setSecurityAssignment(url, { securityIds, securityPolicy } = {}) {
+        const b = this.backends.find((x) => x.url === url);
+        if (!b) return false;
+        if (Array.isArray(securityIds)) b.securityIds = [...securityIds];
+        if (securityPolicy !== undefined) {
+            b.securityPolicy = String(securityPolicy ?? "").trim();
+        }
+        return true;
     }
-    return true;
-  }
 
     hasActiveRouter() {
         return this.backends.some((b) => b.routerEnabled);
@@ -1113,6 +1522,7 @@ class Pool {
         if (!candidates.length) return null;
         const healthy = candidates.filter((b) => b.healthy);
         if (healthy.length) candidates = healthy;
+        candidates = this._preferFree(candidates);
         let min = Infinity;
         for (const b of candidates) min = Math.min(min, b.inFlight);
         const least = candidates.filter((b) => b.inFlight === min);
@@ -1139,6 +1549,7 @@ class Pool {
 
         const healthy = candidates.filter((b) => b.healthy);
         if (healthy.length) candidates = healthy;
+        candidates = this._preferFree(candidates);
 
         let min = Infinity;
         for (const b of candidates) min = Math.min(min, b.inFlight);
@@ -1166,25 +1577,40 @@ class Pool {
         let lastErr = null;
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            let backend = this.pickFixed(roleKey, tried);
-            if (!backend) break;
-            if ((TIER_RANK[backend.tier] ?? 0) < minRank) {
-                const higher = this.pickFixed(roleKey, tried, minRank);
-                if (higher && higher.url !== backend.url) {
-                    logger.info(
-                        `${label} 에스컬레이션: ${backend.tier}@${backend.url} → ${higher.tier}@${higher.url} (요구 티어 ${minTier})`,
-                    );
-                    backend = higher;
+            const pick = (skip = new Set()) => {
+                const excl = this._mergeExclude(tried, skip);
+                let b = this.pickFixed(roleKey, excl);
+                if (!b) return null;
+                if ((TIER_RANK[b.tier] ?? 0) < minRank) {
+                    const higher = this.pickFixed(roleKey, excl, minRank);
+                    if (higher && higher.url !== b.url) {
+                        logger.info(
+                            `${label} 에스컬레이션: ${b.tier}@${b.url} → ${higher.tier}@${higher.url} (요구 티어 ${minTier})`,
+                        );
+                        b = higher;
+                    }
                 }
-            }
+                return b;
+            };
+            const backend = await this.acquireBackendSlot(pick, {
+                priority: SLOT_PRI_INFRA,
+            });
+            if (!backend) break;
             tried.add(backend.url);
 
-            backend.inFlight++;
             backend.totalRequests++;
             // 분류(라우터)·설계(설계기) 호출은 채팅이 아님 — 역할별 카운터로 분리
             if (roleKey === "planner") backend.plannerRequests++;
             else backend.routerRequests++;
+            const jobId = this._trackModelJob({
+                preview: `${label} 분류`,
+                kind: roleKey,
+                tier: backend.tier,
+                alias: backend.alias || null,
+                backendUrl: backend.url,
+            });
             const started = Date.now();
+            let jobOk = false;
             try {
                 const result = await chatCompletion({
                     baseUrl: backend.url,
@@ -1193,6 +1619,7 @@ class Pool {
                 });
                 backend.lastLatencyMs = Date.now() - started;
                 backend.totalLatencyMs += backend.lastLatencyMs;
+                jobOk = true;
                 return {
                     result,
                     backendUrl: backend.url,
@@ -1212,13 +1639,20 @@ class Pool {
                     err,
                 );
                 if (!err.retryable) throw err;
-                backend.healthy = false;
+                // 연결 실패(backendDown)일 때만 즉시 unhealthy 처리.
+                // 500·타임아웃은 요청/과부하 문제라 페일오버만 하고 상태는
+                // 헬스체크에 맡긴다(부하 중 모델 깜빡임 방지).
+                if (err.backendDown) backend.healthy = false;
                 logger.warn(
                     `${label} 백엔드 실패 → 재시도 (${backend.url}): ${err.message}`,
                 );
             } finally {
-                backend.inFlight--;
+                this.releaseBackendSlot(backend);
                 this.completed.push(Date.now());
+                this._finishModelJob(jobId, {
+                    ok: jobOk,
+                    error: lastErr?.message || null,
+                });
             }
         }
 
@@ -1251,6 +1685,71 @@ class Pool {
         };
     }
 
+    /** 최소 inFlight 후보 중 라운드로빈으로 하나 선택 (동률이면 분산). 빈 목록은 null. */
+    _leastLoadedRR(list) {
+        if (!list?.length) return null;
+        let min = Infinity;
+        for (const b of list) min = Math.min(min, b.inFlight);
+        const least = list.filter((b) => b.inFlight === min);
+        this.rrCursor = (this.rrCursor + 1) % least.length;
+        return least[this.rrCursor];
+    }
+
+    /** 비전 선호 시 vision 가능한 백엔드만 남긴다(있을 때만). */
+    _preferVision(list, preferVision) {
+        if (!preferVision || !list?.length) return list;
+        const vis = list.filter((b) => b.vision);
+        return vis.length ? vis : list;
+    }
+
+    /**
+     * 역할(특기) 우선 선택. preferredSkill 이 없거나 매칭 백엔드가 없으면 null 을
+     * 반환해 호출자가 일반 해결 풀로 폴백하게 한다.
+     */
+    _pickBySkill(healthySkill, { preferredSkill, preferredTier, preferredDevice, preferVision }) {
+        if (!preferredSkill) return null;
+        let bySkill = healthySkill.filter((b) => b.skills.includes(preferredSkill));
+        if (bySkill.length === 0) return null;
+        if (preferredTier) {
+            const atTier = bySkill.filter((b) => b.tier === preferredTier);
+            if (atTier.length > 0) bySkill = atTier;
+        }
+        if (preferredDevice) {
+            const byDevice = bySkill.filter((b) => b.device === preferredDevice);
+            if (byDevice.length > 0) bySkill = byDevice;
+        }
+        bySkill = this._preferVision(bySkill, preferVision);
+        bySkill = this._preferFree(bySkill);
+        return this._leastLoadedRR(bySkill);
+    }
+
+    /** 일반 해결(solve) 풀에서 티어/장치/비전 선호를 반영해 최소 부하 백엔드 선택. */
+    _pickByTier(healthyChat, { preferredTier, allowOtherTiers, preferredDevice, preferVision }) {
+        if (healthyChat.length === 0) return null;
+        let candidates = preferredTier
+            ? healthyChat.filter((b) => b.tier === preferredTier)
+            : healthyChat;
+        if (candidates.length === 0) {
+            if (!allowOtherTiers) return null;
+            // 원하는 티어가 없으면: 상위 티어 우선(가까운 순), 없으면 하위 티어
+            const want = TIER_RANK[preferredTier] ?? 0;
+            const fallbackScore = (b) => {
+                const r = TIER_RANK[b.tier] ?? 0;
+                return r >= want ? r - want : 10 + (want - r);
+            };
+            let best = Infinity;
+            for (const b of healthyChat) best = Math.min(best, fallbackScore(b));
+            candidates = healthyChat.filter((b) => fallbackScore(b) === best);
+        }
+        if (preferredDevice) {
+            const byDevice = candidates.filter((b) => b.device === preferredDevice);
+            if (byDevice.length > 0) candidates = byDevice;
+        }
+        candidates = this._preferVision(candidates, preferVision);
+        candidates = this._preferFree(candidates);
+        return this._leastLoadedRR(candidates);
+    }
+
     pick(
         exclude = new Set(),
         preferredTier = null,
@@ -1264,81 +1763,25 @@ class Pool {
         );
         // 특기 요청: solve 꺼진 역할 전용 서버도 포함
         const healthySkill = this.backends.filter(
-            (b) =>
-                b.healthy &&
-                b.canServeSkill &&
-                !exclude.has(b.url),
+            (b) => b.healthy && b.canServeSkill && !exclude.has(b.url),
         );
 
-        const preferVis = (list) => {
-            if (!preferVision || !list?.length) return list;
-            const vis = list.filter((b) => b.vision);
-            return vis.length ? vis : list;
-        };
-
         // 1) 역할(특기) 먼저 — 맞으면 그 서버로
-        if (preferredSkill) {
-            let bySkill = healthySkill.filter((b) =>
-                b.skills.includes(preferredSkill),
-            );
-            if (bySkill.length > 0) {
-                if (preferredTier) {
-                    const atTier = bySkill.filter(
-                        (b) => b.tier === preferredTier,
-                    );
-                    if (atTier.length > 0) bySkill = atTier;
-                }
-                if (preferredDevice) {
-                    const byDevice = bySkill.filter(
-                        (b) => b.device === preferredDevice,
-                    );
-                    if (byDevice.length > 0) bySkill = byDevice;
-                }
-                bySkill = preferVis(bySkill);
-                let min = Infinity;
-                for (const b of bySkill) min = Math.min(min, b.inFlight);
-                const least = bySkill.filter((b) => b.inFlight === min);
-                this.rrCursor = (this.rrCursor + 1) % least.length;
-                return least[this.rrCursor];
-            }
-        }
+        const bySkill = this._pickBySkill(healthySkill, {
+            preferredSkill,
+            preferredTier,
+            preferredDevice,
+            preferVision,
+        });
+        if (bySkill) return bySkill;
 
         // 2) 일반 해결 풀 (solve 켠 서버만)
-        if (healthyChat.length === 0) return null;
-
-        let candidates = preferredTier
-            ? healthyChat.filter((b) => b.tier === preferredTier)
-            : healthyChat;
-        if (candidates.length === 0) {
-            if (!allowOtherTiers) return null;
-            const want = TIER_RANK[preferredTier] ?? 0;
-            const fallbackScore = (b) => {
-                const r = TIER_RANK[b.tier] ?? 0;
-                return r >= want ? r - want : 10 + (want - r);
-            };
-            let best = Infinity;
-            for (const b of healthyChat)
-                best = Math.min(best, fallbackScore(b));
-            candidates = healthyChat.filter(
-                (b) => fallbackScore(b) === best,
-            );
-        }
-
-        if (preferredDevice) {
-            const byDevice = candidates.filter(
-                (b) => b.device === preferredDevice,
-            );
-            if (byDevice.length > 0) candidates = byDevice;
-        }
-
-        candidates = preferVis(candidates);
-
-        let min = Infinity;
-        for (const b of candidates) min = Math.min(min, b.inFlight);
-        const leastLoaded = candidates.filter((b) => b.inFlight === min);
-
-        this.rrCursor = (this.rrCursor + 1) % leastLoaded.length;
-        return leastLoaded[this.rrCursor];
+        return this._pickByTier(healthyChat, {
+            preferredTier,
+            allowOtherTiers,
+            preferredDevice,
+            preferVision,
+        });
     }
 
     /**
@@ -1353,7 +1796,11 @@ class Pool {
         const opts = this.skillOptions();
         for (const o of opts) {
             const name = o.skill;
-            if (keys.some((k) => name.includes(k) || new RegExp(k, "i").test(name))) {
+            if (
+                keys.some(
+                    (k) => name.includes(k) || new RegExp(k, "i").test(name),
+                )
+            ) {
                 return name;
             }
         }
@@ -1365,10 +1812,7 @@ class Pool {
         if (!skill) return null;
         const ranks = this.backends
             .filter(
-                (b) =>
-                    b.healthy &&
-                    b.canServeSkill &&
-                    b.skills.includes(skill),
+                (b) => b.healthy && b.canServeSkill && b.skills.includes(skill),
             )
             .map((b) => b.tier);
         if (!ranks.length) return null;
@@ -1402,29 +1846,31 @@ class Pool {
     /**
      * 모델 스트레스: Express 요청은 1회, 내부에서 모델 호출을 count 회.
      * 기본 parallel = Promise.all 로 llama --parallel 슬롯을 실제로 밀어본다.
-     * 채팅 큐 슬롯은 스트레스 작업 1개만 점유(하위 N회는 _chatDispatch 직행).
+     * 전역 채팅 슬롯(acquireChatSlot)은 잡지 않는다 — 하위 N회가 각자
+     * _chatDispatch 의 백엔드 슬롯 세마포어를 거치므로 그것으로 동시성이 충분히
+     * 제한된다. 전역 슬롯을 배치째 점유하면, 그 사이 들어온 일반 대화가 전역
+     * 게이트에서 "배치(32건)가 다 끝날 때까지" 막힌다(관측된 버그).
      * 각 호출마다 load-aware 로 티어를 다시 본다 (슬롯 포화 시 medium 강등).
      */
     async stressChat(params = {}) {
         const {
             count = 1,
             mode = "parallel",
-            onQueue,
+            onQueue: _onQueue, // 전역 게이트 미사용 — 큐 위치 콜백 없음
             preview = "",
             loadAwareBody = null,
             loadAwareRoute = null,
             maxTokensByTier = null,
             onResult = null,
+            pendingIds: preRegisteredPendingIds = null,
             ...rest
         } = params;
         const n = Math.min(32, Math.max(1, Math.floor(Number(count) || 1)));
         const serial = String(mode).toLowerCase() === "serial";
         const label = String(preview || "").slice(0, 120);
 
-        return this.withChatSlot(
-            "stress",
-            onQueue,
-            async () => {
+        // 전역 채팅 슬롯을 잡지 않고 바로 실행 (하위 N건은 백엔드 세마포어로 제어)
+        {
             const wall0 = Date.now();
             const { applyLoadAwareRoute } = await import("./loadAwareRoute.js");
 
@@ -1463,7 +1909,10 @@ class Pool {
                         Number.isFinite(Number(maxTokensByTier[tier]))
                     ) {
                         maxTokens = Number(maxTokensByTier[tier]);
-                    } else if (tier !== "large" && rest.maxTokensSmall != null) {
+                    } else if (
+                        tier !== "large" &&
+                        rest.maxTokensSmall != null
+                    ) {
                         maxTokens = rest.maxTokensSmall;
                     }
                     const out = await this._chatDispatch({
@@ -1482,6 +1931,7 @@ class Pool {
                         tier: out.tier,
                         preferredTier: tier,
                         loadDemoted: Boolean(routed.loadDemoted),
+                        loadPromoted: Boolean(routed.loadPromoted),
                         routeReason: routed.reason || null,
                         device: out.device,
                         alias: out.alias || null,
@@ -1514,6 +1964,10 @@ class Pool {
 
             let results;
             if (serial) {
+                // 순차 모드는 대기 마커를 쓰지 않으므로 미리 등록분은 즉시 해제
+                if (Array.isArray(preRegisteredPendingIds)) {
+                    this.releaseStressBatch(preRegisteredPendingIds);
+                }
                 results = [];
                 for (let i = 1; i <= n; i++) results.push(await runOne(i));
             } else {
@@ -1525,18 +1979,27 @@ class Pool {
                     `모델 스트레스 동시성 ${concurrency} (슬롯합 ${slotCap}) — 완료 시 재라우팅`,
                 );
 
-                // 통계 보드용: 아직 안 쏜 N건을 대기로 등록 (시작 시 해제)
-                const pendingIds = [];
-                for (let i = 1; i <= n; i++) {
-                    pendingIds.push(
-                        this._trackStressPending({
-                            i,
-                            preview: label
-                                ? `[대기 #${i}/${n}] ${label}`
-                                : `stress 대기 #${i}/${n}`,
-                        }),
-                    );
-                }
+                // 통계 보드용: 아직 안 쏜 N건을 대기로 등록 (시작 시 해제).
+                // 서버가 요청 수신 즉시 미리 등록해 넘겼으면(preRegistered) 그걸
+                // 그대로 쓴다 → 라우팅(createPlan) 지연과 무관하게 대기가 바로 뜬다.
+                const pendingIds =
+                    Array.isArray(preRegisteredPendingIds) &&
+                    preRegisteredPendingIds.length === n
+                        ? preRegisteredPendingIds
+                        : (() => {
+                              const ids = [];
+                              for (let i = 1; i <= n; i++) {
+                                  ids.push(
+                                      this._trackStressPending({
+                                          i,
+                                          preview: label
+                                              ? `[대기 #${i}/${n}] ${label}`
+                                              : `stress 대기 #${i}/${n}`,
+                                      }),
+                                  );
+                              }
+                              return ids;
+                          })();
 
                 results = new Array(n);
                 let next = 0;
@@ -1564,10 +2027,12 @@ class Pool {
             const sum = times.reduce((a, b) => a + b, 0);
             const byTier = {};
             let demoted = 0;
+            let promoted = 0;
             for (const r of oks) {
                 const t = r.tier || "?";
                 byTier[t] = (byTier[t] || 0) + 1;
                 if (r.loadDemoted) demoted++;
+                if (r.loadPromoted) promoted++;
             }
             const summary = {
                 ok: oks.length,
@@ -1578,13 +2043,16 @@ class Pool {
                 maxMs: times[times.length - 1] ?? 0,
                 byTier,
                 loadDemoted: demoted,
-                concurrency: serial ? 1 : Math.min(n, Math.max(1, this.chatMaxInFlight() || 1)),
+                loadPromoted: promoted,
+                concurrency: serial
+                    ? 1
+                    : Math.min(n, Math.max(1, this.chatMaxInFlight() || 1)),
                 slotCap: Math.max(1, this.chatMaxInFlight() || 1),
             };
             logger.info(
                 `모델 스트레스 완료: 성공 ${summary.ok}/${n} 실패 ${summary.fail} ` +
                     `벽시계 ${wallMs}ms min/avg/max ${summary.minMs}/${summary.avgMs}/${summary.maxMs}ms ` +
-                    `티어 ${JSON.stringify(byTier)} demote=${demoted}`,
+                    `티어 ${JSON.stringify(byTier)} demote=${demoted} promote=${promoted}`,
             );
             return {
                 count: n,
@@ -1592,9 +2060,7 @@ class Pool {
                 results,
                 summary,
             };
-            },
-            label ? `[stress×${n}] ${label}` : `stress×${n}`,
-        );
+        }
     }
 
     async _chatDispatch(params = {}) {
@@ -1620,14 +2086,14 @@ class Pool {
             Boolean(preferFixedRole) && this.hasActiveRole(preferFixedRole);
         const needVision = messagesHaveImages(rest.messages);
 
-        try {
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            let backend = useFixed
-                ? this.pickFixed(preferFixedRole, tried)
-                : null;
-            if (!backend) {
-                backend = this.pick(
-                    tried,
+        // 후보 백엔드 선택기(라우팅·failover 반영). 슬롯 세마포어가 이 함수로
+        // 빈 슬롯 있는 백엔드를 고르고, 없으면 릴리스될 때까지 대기시킨다.
+        const pickBackend = (skip = new Set()) => {
+            const excl = this._mergeExclude(tried, skip);
+            let b = useFixed ? this.pickFixed(preferFixedRole, excl) : null;
+            if (!b) {
+                b = this.pick(
+                    excl,
                     preferredTier,
                     allowOtherTiers,
                     preferredDevice,
@@ -1635,77 +2101,93 @@ class Pool {
                     needVision,
                 );
             }
-            if (!backend) break;
-            tried.add(backend.url);
+            return b;
+        };
 
-            this._updateModelJob(jobId, {
-                tier: backend.tier,
-                alias: backend.alias || null,
-                backendUrl: backend.url,
-            });
-
-            backend.inFlight++;
-            backend.totalRequests++;
-            backend.chatRequests++;
-            const started = Date.now();
-            try {
-                const fitted = fitMessagesForBackend(
-                    rest.messages,
-                    backend,
-                    rest.maxTokens,
-                );
-                if (fitted.notes?.length) {
-                    logger.warn(
-                        `프롬프트 맞춤 @ ${backend.alias || backend.url} ctx=${fitted.ctx} est=${fitted.est}/${fitted.budget}: ${fitted.notes.join("; ")}`,
-                    );
-                }
-                const result = await chatCompletion({
-                    baseUrl: backend.url,
-                    ...rest,
-                    messages: fitted.messages,
+        try {
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                // 슬롯 세마포어: 빈 슬롯 생길 때까지 대기 후 inFlight++ 된 백엔드 획득.
+                // 빈 슬롯이 나면 스트레스(priority 0)보다 대화(10)에 먼저 넘긴다 →
+                // 스트레스 백로그에 밀려 "다 끝나야 답 오는" 문제 해소.
+                const backend = await this.acquireBackendSlot(pickBackend, {
+                    priority:
+                        _kind === "stress" ? SLOT_PRI_STRESS : SLOT_PRI_CHAT,
                 });
-                backend.lastLatencyMs = Date.now() - started;
-                backend.totalLatencyMs += backend.lastLatencyMs;
-                recordChat({
+                if (!backend) break;
+                tried.add(backend.url);
+
+                this._updateModelJob(jobId, {
                     tier: backend.tier,
-                    usage: result.raw?.usage ?? null,
-                    ms: backend.lastLatencyMs,
-                });
-                jobOk = true;
-                return {
-                    result,
+                    alias: backend.alias || null,
                     backendUrl: backend.url,
-                    tier: backend.tier,
-                    device: backend.device,
-                    alias: backend.alias,
-                    skills: backend.skills,
-                    skill: backend.skills[0] ?? null,
-                };
-            } catch (err) {
-                backend.totalErrors++;
-                backend.lastError = err.message;
-                lastErr = err;
-                this._emitError("solve", backend, err);
-                if (!err.retryable) throw err;
-                backend.healthy = false;
-                logger.warn(
-                    `백엔드 실패 → 페일오버 시도 (${backend.url}): ${err.message}`,
-                );
-            } finally {
-                backend.inFlight--;
-                this.completed.push(Date.now());
-            }
-        }
+                });
 
-        const healthyCount = this.backends.filter(
-            (b) => b.healthy && b.canChat,
-        ).length;
-        if (healthyCount === 0) {
-            throw new Error(
-                "사용 가능한 llama-server 백엔드가 없습니다(모두 비정상 또는 해결 역할 비활성).",
+                backend.totalRequests++;
+                backend.chatRequests++;
+                const started = Date.now();
+                try {
+                    const fitted = fitMessagesForBackend(
+                        rest.messages,
+                        backend,
+                        rest.maxTokens,
+                    );
+                    if (fitted.notes?.length) {
+                        logger.warn(
+                            `프롬프트 맞춤 @ ${backend.alias || backend.url} ctx=${fitted.ctx} est=${fitted.est}/${fitted.budget}: ${fitted.notes.join("; ")}`,
+                        );
+                    }
+                    const result = await chatCompletion({
+                        baseUrl: backend.url,
+                        ...rest,
+                        messages: fitted.messages,
+                    });
+                    backend.lastLatencyMs = Date.now() - started;
+                    backend.totalLatencyMs += backend.lastLatencyMs;
+                    recordChat({
+                        tier: backend.tier,
+                        usage: result.raw?.usage ?? null,
+                        ms: backend.lastLatencyMs,
+                    });
+                    jobOk = true;
+                    return {
+                        result,
+                        backendUrl: backend.url,
+                        tier: backend.tier,
+                        device: backend.device,
+                        alias: backend.alias,
+                        skills: backend.skills,
+                        skill: backend.skills[0] ?? null,
+                    };
+                } catch (err) {
+                    backend.totalErrors++;
+                    backend.lastError = err.message;
+                    lastErr = err;
+                    this._emitError("solve", backend, err);
+                    if (!err.retryable) throw err;
+                    // 연결 실패(backendDown)일 때만 즉시 unhealthy 처리.
+                    // 500·타임아웃은 요청/과부하 문제라 페일오버만 하고 상태는
+                    // 헬스체크에 맡긴다(부하 중 모델 깜빡임 방지).
+                    if (err.backendDown) backend.healthy = false;
+                    logger.warn(
+                        `백엔드 실패 → 페일오버 시도 (${backend.url}): ${err.message}`,
+                    );
+                } finally {
+                    this.releaseBackendSlot(backend);
+                    this.completed.push(Date.now());
+                }
+            }
+
+            const healthyCount = this.backends.filter(
+                (b) => b.healthy && b.canChat,
+            ).length;
+            if (healthyCount === 0) {
+                throw new Error(
+                    "사용 가능한 llama-server 백엔드가 없습니다(모두 비정상 또는 해결 역할 비활성).",
+                );
+            }
+            throw (
+                lastErr ?? new Error("요청을 처리할 백엔드를 찾지 못했습니다.")
             );
-        }
-        throw lastErr ?? new Error("요청을 처리할 백엔드를 찾지 못했습니다.");
         } finally {
             this._finishModelJob(jobId, {
                 ok: jobOk,
@@ -1761,14 +2243,13 @@ class Pool {
             Boolean(preferFixedRole) && this.hasActiveRole(preferFixedRole);
         const needVision = messagesHaveImages(rest.messages);
 
-        try {
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            let backend = useFixed
-                ? this.pickFixed(preferFixedRole, tried)
-                : null;
-            if (!backend) {
-                backend = this.pick(
-                    tried,
+        // 후보 백엔드 선택기(라우팅·failover 반영). 슬롯 세마포어용.
+        const pickBackend = (skip = new Set()) => {
+            const excl = this._mergeExclude(tried, skip);
+            let b = useFixed ? this.pickFixed(preferFixedRole, excl) : null;
+            if (!b) {
+                b = this.pick(
+                    excl,
                     preferredTier,
                     allowOtherTiers,
                     preferredDevice,
@@ -1776,104 +2257,118 @@ class Pool {
                     needVision,
                 );
             }
-            if (!backend) break;
-            tried.add(backend.url);
+            return b;
+        };
 
-            this._updateModelJob(jobId, {
-                tier: backend.tier,
-                alias: backend.alias || null,
-                backendUrl: backend.url,
-            });
+        try {
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                // 슬롯 세마포어: 빈 슬롯 생길 때까지 대기 후 inFlight++ 된 백엔드 획득.
+                // 빈 슬롯이 나면 스트레스(priority 0)보다 대화(10)에 먼저 넘긴다 →
+                // 스트레스 백로그에 밀려 "다 끝나야 답 오는" 문제 해소.
+                const backend = await this.acquireBackendSlot(pickBackend, {
+                    priority:
+                        _kind === "stress" ? SLOT_PRI_STRESS : SLOT_PRI_CHAT,
+                });
+                if (!backend) break;
+                tried.add(backend.url);
 
-            backend.inFlight++;
-            backend.totalRequests++;
-            backend.chatRequests++;
-            const started = Date.now();
-            let gotToken = false;
-            try {
-                const fitted = fitMessagesForBackend(
-                    rest.messages,
-                    backend,
-                    rest.maxTokens,
-                );
-                if (fitted.notes?.length) {
-                    logger.warn(
-                        `프롬프트 맞춤 @ ${backend.alias || backend.url} ctx=${fitted.ctx} est=${fitted.est}/${fitted.budget}: ${fitted.notes.join("; ")}`,
-                    );
-                }
-                onMeta?.({
-                    backend: backend.url,
+                this._updateModelJob(jobId, {
                     tier: backend.tier,
-                    device: backend.device,
-                    alias: backend.alias,
-                    skills: backend.skills,
-                    skill: backend.skills[0] ?? null,
-                    model: backend.model,
-                });
-                const out = await chatCompletionStream({
-                    baseUrl: backend.url,
-                    ...rest,
-                    messages: fitted.messages,
-                    onToken: (t) => {
-                        gotToken = true;
-                        onToken?.(t);
-                    },
-                });
-                const totalMs = Date.now() - started;
-                backend.lastLatencyMs = totalMs;
-                backend.totalLatencyMs += totalMs;
-                recordChat({
-                    tier: backend.tier,
-                    usage: out.usage ?? null,
-                    ms: totalMs,
-                });
-                jobOk = true;
-                return {
-                    ...out,
+                    alias: backend.alias || null,
                     backendUrl: backend.url,
-                    tier: backend.tier,
-                    device: backend.device,
-                    alias: backend.alias,
-                    skills: backend.skills,
-                    skill: backend.skills[0] ?? null,
-                    model: backend.model,
-                    ttftMs: out.firstTokenAt
-                        ? out.firstTokenAt - started
-                        : null,
-                    totalMs,
-                };
-            } catch (err) {
-                backend.totalErrors++;
-                backend.lastError = err.message;
-                lastErr = err;
-                this._emitError("solve", backend, err);
-                if (gotToken || !err.retryable) throw err;
-                backend.healthy = false;
-                logger.warn(
-                    `스트리밍 백엔드 실패 → 페일오버 시도 (${backend.url}): ${err.message}`,
-                );
-            } finally {
-                backend.inFlight--;
-                this.completed.push(Date.now());
-            }
-        }
+                });
 
-        const healthyCount = this.backends.filter(
-            (b) => b.healthy && b.canChat,
-        ).length;
-        if (healthyCount === 0) {
-            throw new Error(
-                "사용 가능한 llama-server 백엔드가 없습니다(모두 비정상 또는 해결 역할 비활성).",
+                backend.totalRequests++;
+                backend.chatRequests++;
+                const started = Date.now();
+                let gotToken = false;
+                try {
+                    const fitted = fitMessagesForBackend(
+                        rest.messages,
+                        backend,
+                        rest.maxTokens,
+                    );
+                    if (fitted.notes?.length) {
+                        logger.warn(
+                            `프롬프트 맞춤 @ ${backend.alias || backend.url} ctx=${fitted.ctx} est=${fitted.est}/${fitted.budget}: ${fitted.notes.join("; ")}`,
+                        );
+                    }
+                    onMeta?.({
+                        backend: backend.url,
+                        tier: backend.tier,
+                        device: backend.device,
+                        alias: backend.alias,
+                        skills: backend.skills,
+                        skill: backend.skills[0] ?? null,
+                        model: backend.model,
+                    });
+                    const out = await chatCompletionStream({
+                        baseUrl: backend.url,
+                        ...rest,
+                        messages: fitted.messages,
+                        onToken: (t) => {
+                            gotToken = true;
+                            onToken?.(t);
+                        },
+                    });
+                    const totalMs = Date.now() - started;
+                    backend.lastLatencyMs = totalMs;
+                    backend.totalLatencyMs += totalMs;
+                    recordChat({
+                        tier: backend.tier,
+                        usage: out.usage ?? null,
+                        ms: totalMs,
+                    });
+                    jobOk = true;
+                    return {
+                        ...out,
+                        backendUrl: backend.url,
+                        tier: backend.tier,
+                        device: backend.device,
+                        alias: backend.alias,
+                        skills: backend.skills,
+                        skill: backend.skills[0] ?? null,
+                        model: backend.model,
+                        ttftMs: out.firstTokenAt
+                            ? out.firstTokenAt - started
+                            : null,
+                        totalMs,
+                    };
+                } catch (err) {
+                    backend.totalErrors++;
+                    backend.lastError = err.message;
+                    lastErr = err;
+                    this._emitError("solve", backend, err);
+                    if (gotToken || !err.retryable) throw err;
+                    // 연결 실패(backendDown)일 때만 즉시 unhealthy 처리.
+                    // 500·타임아웃은 요청/과부하 문제라 페일오버만 하고 상태는
+                    // 헬스체크에 맡긴다(부하 중 모델 깜빡임 방지).
+                    if (err.backendDown) backend.healthy = false;
+                    logger.warn(
+                        `스트리밍 백엔드 실패 → 페일오버 시도 (${backend.url}): ${err.message}`,
+                    );
+                } finally {
+                    this.releaseBackendSlot(backend);
+                    this.completed.push(Date.now());
+                }
+            }
+
+            const healthyCount = this.backends.filter(
+                (b) => b.healthy && b.canChat,
+            ).length;
+            if (healthyCount === 0) {
+                throw new Error(
+                    "사용 가능한 llama-server 백엔드가 없습니다(모두 비정상 또는 해결 역할 비활성).",
+                );
+            }
+            throw (
+                lastErr ??
+                new Error(
+                    preferredTier
+                        ? `스트리밍 가능한 ${preferredTier} 백엔드를 찾지 못했습니다(해결 풀에 해당 티어가 없거나 전용 역할만 켜져 있음).`
+                        : "스트리밍 가능한 백엔드를 찾지 못했습니다.",
+                )
             );
-        }
-        throw (
-            lastErr ??
-            new Error(
-                preferredTier
-                    ? `스트리밍 가능한 ${preferredTier} 백엔드를 찾지 못했습니다(해결 풀에 해당 티어가 없거나 전용 역할만 켜져 있음).`
-                    : "스트리밍 가능한 백엔드를 찾지 못했습니다.",
-            )
-        );
         } finally {
             this._finishModelJob(jobId, {
                 ok: jobOk,
@@ -1889,15 +2384,39 @@ class Pool {
     async embed(input) {
         const texts = Array.isArray(input) ? input : [input];
         if (!texts.length || !this.hasActiveRole("embedding")) return null;
+        const hasFree = this.backends.some(
+            (b) =>
+                b.embeddingEnabled && b.healthy && this._backendHasFreeSlot(b),
+        );
+        if (!hasFree && this._interactive.size > 0) {
+            logger.info(
+                "임베딩 생략(실시간 대화 · 슬롯 없음) → 키워드 회상 폴백",
+            );
+            return null;
+        }
         const tried = new Set();
         let lastErr = null;
         for (let i = 0; i < this.backends.length; i++) {
-            const backend = this.pickFixed("embedding", tried);
+            const backend = await this.acquireBackendSlot(
+                (skip = new Set()) =>
+                    this.pickFixed(
+                        "embedding",
+                        this._mergeExclude(tried, skip),
+                    ),
+                { priority: SLOT_PRI_INFRA },
+            );
             if (!backend) break;
             tried.add(backend.url);
-            backend.inFlight++;
             backend.totalRequests++;
+            const jobId = this._trackModelJob({
+                preview: "임베딩",
+                kind: "embed",
+                tier: backend.tier,
+                alias: backend.alias || null,
+                backendUrl: backend.url,
+            });
             const started = Date.now();
+            let jobOk = false;
             try {
                 const out = await createEmbeddings({
                     baseUrl: backend.url,
@@ -1905,6 +2424,7 @@ class Pool {
                 });
                 backend.lastLatencyMs = Date.now() - started;
                 backend.totalLatencyMs += backend.lastLatencyMs;
+                jobOk = true;
                 return {
                     vectors: out.vectors,
                     backendUrl: backend.url,
@@ -1925,12 +2445,19 @@ class Pool {
                     continue;
                 }
                 if (!err.retryable) break;
-                backend.healthy = false;
+                // 연결 실패(backendDown)일 때만 즉시 unhealthy 처리.
+                // 500·타임아웃은 요청/과부하 문제라 페일오버만 하고 상태는
+                // 헬스체크에 맡긴다(부하 중 모델 깜빡임 방지).
+                if (err.backendDown) backend.healthy = false;
                 logger.warn(
                     `임베딩 실패 → 페일오버 (${backend.url}): ${err.message}`,
                 );
             } finally {
-                backend.inFlight--;
+                this.releaseBackendSlot(backend);
+                this._finishModelJob(jobId, {
+                    ok: jobOk,
+                    error: lastErr?.message || null,
+                });
             }
         }
         // 임베딩 실패해도 RAG 키워드 검색으로 넘어갈 수 있게 null 반환 (chat health 유지)
@@ -1948,126 +2475,38 @@ class Pool {
     }
 
     /**
-   * 보안검증 (최종 답변 직전 워크플로우).
-   * 보안검증 기능이 켜진 백엔드 중, 보안 관리에서 배정한 정책 본문으로 판정.
-   * 정책이 비어 있으면 통과. 모호하면 허용(fail-open).
-   * @param {"pre_final"|"input"|"output"} _stage
-   */
-  async runSecurityCheck(text, _stage = "pre_final") {
-    if (!this.hasActiveRole("security")) {
-      return { allow: true, skipped: true, reason: "보안검증 역할 없음" };
-    }
-    const snippet = String(text ?? "").slice(0, 5000);
-    // 검토 대상은 답변 초안만 (질문·정책 문구를 quote 로 쓰면 허위차단 남발)
-    const draftOnly = (() => {
-      const m = snippet.match(
-        /【최종 직전 답변\(검토 대상\)】\s*([\s\S]*)/,
-      );
-      return (m ? m[1] : snippet).trim();
-    })();
-    const tried = new Set();
-    let lastErr = null;
-    let sawEmptyPolicy = false;
-
-        const parseSecurity = (raw, policyText) => {
-            // 첫 JSON 객체 (중첩 최소화 — 모델이 한 줄로 내는 전제)
-            const m = String(raw ?? "").match(/\{[\s\S]*?\}/);
-            if (!m) {
-                return {
-                    allow: true,
-                    reason: "보안검증 JSON 없음 → 허용",
-                    ambiguous: true,
-                };
-            }
-            let j;
-            try {
-                j = JSON.parse(m[0]);
-            } catch {
-                return {
-                    allow: true,
-                    reason: "보안검증 JSON 파싱 실패 → 허용",
-                    ambiguous: true,
-                };
-            }
-            const explicitFalse =
-                j.allow === false ||
-                j.allow === "false" ||
-                j.allow === 0 ||
-                j.safe === false;
-            const reason =
-                String(j.reason ?? j.message ?? "").trim() || "blocked";
-            if (!explicitFalse) {
-                return {
-                    allow: true,
-                    reason: reason === "blocked" ? "ok" : reason,
-                };
-            }
-
-            const quote = String(
-                j.quote ?? j.span ?? j.evidence ?? j.match ?? "",
-            )
-                .replace(/\s+/g, " ")
-                .trim();
-            const draftFlat = draftOnly.replace(/\s+/g, " ");
-
-            // 허위차단 방지: 초안에 실제로 있는 짧은 인용(2~24자)이 필수
-            const quoteOk =
-                quote.length >= 2 &&
-                quote.length <= 24 &&
-                draftFlat.includes(quote);
-
-            if (!quoteOk) {
-                return {
-                    allow: true,
-                    reason: `보안검증 근거 부족(quote 없음/불일치/과장 “${reason.slice(0, 40)}”) → 허용`,
-                    ambiguous: true,
-                };
-            }
-
-            // 스키마 예시·포괄 라벨을 reason 으로 베끼는 경우 (short_label «분석» 등)
-            const junkReason =
-                /^(short_?label|long_?label|label|blocked|violation|policy|reason|unsafe|harmful|offensive|abuse|욕설|혐오|위반|차단)$/i.test(
-                    reason,
-                ) ||
-                /general questions|coding help|fiction|research|Stage=|티어 하한|llm-router|PIPELINE|You are|allow\s*=|짧은한국어|SECURITY POLICY|POLICY:|최종 직전|너무\s*짧|짧은\s*답|일반적인\s*대화|인사|greeting|hello|하이|short_label|contains_offensive|inappropriate|violates?\s*policy/i.test(
-                    reason,
-                );
-            if (junkReason || reason.length < 2) {
-                return {
-                    allow: true,
-                    reason: `보안검증 사유 무효(“${reason.slice(0, 40)}”) → 허용`,
-                    ambiguous: true,
-                };
-            }
-
-            // 욕설·혐오 정책: quote 자체가 금칙/욕설 신호여야 함 (일반 단어 «분석» 차단 방지)
-            const abusePolicy =
-                /욕설|혐오|비하|협박|차별|profanity|abuse|hate|insult|slur/i.test(
-                    String(policyText || ""),
-                );
-            const ABUSE_HIT =
-                /씨발|시발|씨빨|병신|좆|지랄|꺼져|닥쳐|미친\s*놈|미친\s*년|개새|쓰레기\s*년|한남충|한녀|느금마|니미|씹|ㅅㅂ|ㅄ|fuck|shit|bitch|asshole|cunt|nigger|faggot/i;
-            const BENIGN_QUOTE =
-                /^(분석|요약|확인|개선|내용|답변|요청|회의|담당|기능|체크|삭제|채팅|사용자|의견|이해|동료|메시지|최종|초안|비판|병합|리뷰|배포|예산|일정)$/;
-            if (abusePolicy) {
-                if (BENIGN_QUOTE.test(quote) || !ABUSE_HIT.test(quote)) {
-                    return {
-                        allow: true,
-                        reason: `욕설 근거 없음(quote “${quote.slice(0, 20)}”) → 허용`,
-                        ambiguous: true,
-                    };
-                }
-            }
-
-            return { allow: false, reason: `${reason} «${quote.slice(0, 40)}»` };
-        };
+     * 보안검증 (최종 답변 직전 워크플로우).
+     * 보안검증 기능이 켜진 백엔드 중, 보안 관리에서 배정한 정책 본문으로 판정.
+     * 정책이 비어 있으면 통과. 모호하면 허용(fail-open).
+     * @param {"pre_final"|"input"|"output"} _stage
+     */
+    async runSecurityCheck(text, _stage = "pre_final") {
+        if (!this.hasActiveRole("security")) {
+            return { allow: true, skipped: true, reason: "보안검증 역할 없음" };
+        }
+        const snippet = String(text ?? "").slice(0, config.security.inputMaxChars);
+        // 검토 대상은 답변 초안만 (질문·정책 문구를 quote 로 쓰면 허위차단 남발)
+        const draftOnly = (() => {
+            const m = snippet.match(
+                /【최종 직전 답변\(검토 대상\)】\s*([\s\S]*)/,
+            );
+            return (m ? m[1] : snippet).trim();
+        })();
+        const tried = new Set();
+        let lastErr = null;
+        let sawEmptyPolicy = false;
 
         for (let i = 0; i < this.backends.length; i++) {
-            const backend = this.pickFixed("security", tried);
+            const backend = await this.acquireBackendSlot(
+                (skip = new Set()) =>
+                    this.pickFixed("security", this._mergeExclude(tried, skip)),
+                { priority: SLOT_PRI_INFRA },
+            );
             if (!backend) break;
             tried.add(backend.url);
             const policy = String(backend.securityPolicy || "").trim();
             if (!policy) {
+                this.releaseBackendSlot(backend);
                 sawEmptyPolicy = true;
                 continue;
             }
@@ -2087,8 +2526,7 @@ Do NOT copy placeholder reasons. If unsure → {"allow":true,"reason":"ok"}.
 Judge ONLY 【최종 직전 답변(검토 대상)】.
 
 POLICY:
-${policy.slice(0, 6000)}`;
-            backend.inFlight++;
+${policy.slice(0, config.security.policyBodyMaxChars)}`;
             backend.totalRequests++;
             backend.securityRequests++;
             const started = Date.now();
@@ -2100,13 +2538,13 @@ ${policy.slice(0, 6000)}`;
                         { role: "user", content: snippet || "(empty)" },
                     ],
                     temperature: 0,
-                    maxTokens: 120,
+                    maxTokens: config.security.judgeMaxTokens,
                     enableThinking: false,
                 });
                 backend.lastLatencyMs = Date.now() - started;
                 backend.totalLatencyMs += backend.lastLatencyMs;
                 const raw = String(result.content || result.reasoning || "");
-                const parsed = parseSecurity(raw, policy);
+                const parsed = parseSecurityVerdict(raw, policy, draftOnly);
                 if (parsed.ambiguous) {
                     logger.warn(
                         `보안검증 모호 → 허용 @ ${backend.alias || backend.url}: ${String(raw).replace(/\s+/g, " ").slice(0, 120)}`,
@@ -2130,9 +2568,12 @@ ${policy.slice(0, 6000)}`;
                 lastErr = err;
                 this._emitError("security", backend, err);
                 if (!err.retryable) break;
-                backend.healthy = false;
+                // 연결 실패(backendDown)일 때만 즉시 unhealthy 처리.
+                // 500·타임아웃은 요청/과부하 문제라 페일오버만 하고 상태는
+                // 헬스체크에 맡긴다(부하 중 모델 깜빡임 방지).
+                if (err.backendDown) backend.healthy = false;
             } finally {
-                backend.inFlight--;
+                this.releaseBackendSlot(backend);
             }
         }
         if (sawEmptyPolicy && !lastErr) {
@@ -2166,15 +2607,13 @@ ${policy.slice(0, 6000)}`;
             }
         }
         const now = Date.now();
-        this.completed = this.completed.filter((t) => now - t < 60000);
+        this.completed = this.completed.filter((t) => now - t < config.poolStatsWindowMs);
         return {
             totalBackends: backends.length,
             healthyBackends: backends.filter((b) => {
                 const r = b.roles || {};
                 return (
-                    b.healthy &&
-                    (r.solve ?? r.chat) &&
-                    CHAT_TIERS.has(b.tier)
+                    b.healthy && (r.solve ?? r.chat) && CHAT_TIERS.has(b.tier)
                 );
             }).length,
             totalInFlight: backends.reduce((s, b) => s + b.inFlight, 0),

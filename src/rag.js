@@ -4,6 +4,7 @@
 import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { config } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data", "rag");
@@ -12,8 +13,8 @@ const IMAGES_DIR = path.join(DATA_DIR, "images");
 
 export const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 
-const CHUNK_CHARS = 600; // 청크 목표 길이(문자)
-const CHUNK_OVERLAP = 100; // 청크 간 겹침(문맥 보존)
+const CHUNK_CHARS = config.rag.chunkChars; // 청크 목표 길이(문자)
+const CHUNK_OVERLAP = config.rag.chunkOverlap; // 청크 간 겹침(문맥 보존)
 
 // 메모리 상태: 문서 목록 + BM25 인덱스
 let docs = []; // [{ id, name, createdAt, chunkCount }]
@@ -170,7 +171,7 @@ async function ensureChunkEmbeddings(list, opts = {}) {
     if (!embedBatch) return false;
     const need = list.filter((c) => !Array.isArray(c.embedding));
     if (!need.length) return list.some((c) => Array.isArray(c.embedding));
-    const BATCH = 8;
+    const BATCH = config.rag.embedBatch;
     const maxBatches =
         Number.isFinite(opts.maxBatches) && opts.maxBatches >= 0
             ? opts.maxBatches
@@ -327,10 +328,10 @@ function hitFrom(c, score, mode) {
 }
 
 // BM25 검색: 질의와 가장 관련성 높은 청크 topK 반환
-export function retrieve(query, k = 4) {
+export function retrieve(query, k = config.rag.topK) {
     if (!chunks.length) return [];
-    const k1 = 1.5;
-    const b = 0.75;
+    const k1 = config.bm25.k1;
+    const b = config.bm25.b;
     const N = chunks.length;
     const qTokens = [...new Set(tokenize(query))];
 
@@ -358,7 +359,7 @@ export function retrieve(query, k = 4) {
  * 임베딩이 충분히 준비된 청크만 의미 검색, 아니면 즉시 BM25.
  * 요청마다 전체 코퍼스 임베딩을 await 하지 않는다 (스트리밍 TTFT 보호).
  */
-export async function retrieveAsync(query, k = 4) {
+export async function retrieveAsync(query, k = config.rag.topK) {
     await load();
     if (!chunks.length) return [];
     const embedded = chunks.filter((c) => Array.isArray(c.embedding));
@@ -366,7 +367,7 @@ export async function retrieveAsync(query, k = 4) {
 
     // 벡터 커버리지 낮으면 BM25 즉시.
     // 요청 경로에서 임베딩/워밍을 돌리지 않음 — 같은 GPU large 와 스트리밍이 경합함.
-    if (!embedBatch || coverage < 0.5 || !embedded.length) {
+    if (!embedBatch || coverage < config.rag.vectorCoverageMin || !embedded.length) {
         return retrieve(query, k);
     }
 
@@ -376,7 +377,7 @@ export async function retrieveAsync(query, k = 4) {
         if (Array.isArray(qv)) {
             const scored = embedded
                 .map((c) => ({ c, score: cosine(qv, c.embedding) }))
-                .filter((s) => s.score > 0.05)
+                .filter((s) => s.score > config.rag.cosineCutoff)
                 .sort((a, b) => b.score - a.score)
                 .slice(0, k)
                 .map((s) => hitFrom(s.c, s.score, "embedding"));

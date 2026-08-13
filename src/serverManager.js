@@ -2,12 +2,13 @@
 // servers.json 정의를 읽어 개별 모델 서버를 기동/종료한다.
 // 종료 시 프로세스를 실제로 내려 VRAM/CPU 메모리가 해제된다.
 import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
-import { existsSync, openSync, readSync, closeSync } from "node:fs";
+import { existsSync, openSync } from "node:fs";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config, normalizeSkill, normalizeSkills } from "./config.js";
+import { readGgufBlockCount } from "./ggufReader.js";
 import { serverUrl, isLocalDef } from "./serverUrl.js";
 import {
     isWindows,
@@ -66,7 +67,7 @@ export async function loadModelConfig() {
                         : undefined,
                 ctx: Number.isFinite(Number(m.ctx))
                     ? Number(m.ctx)
-                    : Number(defaults.ctx) || 4096,
+                    : Number(defaults.ctx) || config.llamaDefaultCtx,
                 ngl: Number.isFinite(Number(m.ngl))
                     ? Number(m.ngl)
                     : Number.isFinite(Number(defaults.ngl))
@@ -182,7 +183,7 @@ export async function setRunningConfig(name, def) {
         ...prev,
         running: {
             ngl: Number(def?.ngl) || 0,
-            ctx: Number(def?.ctx) > 0 ? Number(def.ctx) : 4096,
+            ctx: Number(def?.ctx) > 0 ? Number(def.ctx) : config.llamaDefaultCtx,
             parallel: resolveParallel(def),
             gpu: String(def?.gpu ?? "").trim(),
             at: new Date().toISOString(),
@@ -246,7 +247,7 @@ export async function ensureRunningBaselines(defs) {
             ...(rec && typeof rec === "object" ? rec : {}),
             running: {
                 ngl: Number(d.ngl) || 0,
-                ctx: Number(d.ctx) > 0 ? Number(d.ctx) : 4096,
+                ctx: Number(d.ctx) > 0 ? Number(d.ctx) : config.llamaDefaultCtx,
                 parallel: resolveParallel(d),
                 gpu: String(d.gpu ?? "").trim(),
                 at: new Date().toISOString(),
@@ -275,12 +276,14 @@ async function saveServerDefs(defs) {
 /** 정의 목록·실제 LISTENING 포트를 피해서 빈 포트 선택 */
 async function pickFreePort(defs) {
     const used = new Set(defs.map((d) => Number(d.port)));
-    for (let p = 8080; p < 8200; p++) {
+    for (let p = config.serverManager.portScanStart; p < config.serverManager.portScanEnd; p++) {
         if (used.has(p)) continue;
         if (await findPidByPort(p)) continue;
         return p;
     }
-    throw new Error("사용 가능한 포트(8080~8199)를 찾지 못했습니다.");
+    throw new Error(
+        `사용 가능한 포트(${config.serverManager.portScanStart}~${config.serverManager.portScanEnd - 1})를 찾지 못했습니다.`,
+    );
 }
 
 function pickName(defs, tier) {
@@ -346,7 +349,7 @@ export async function addServerDef({
         ctx:
             Number.isFinite(Number(ctx)) && Number(ctx) > 0
                 ? Number(ctx)
-                : (pickNum(entry?.ctx, defaults.ctx, template?.ctx) ?? 4096),
+                : (pickNum(entry?.ctx, defaults.ctx, template?.ctx) ?? config.llamaDefaultCtx),
         ngl:
             Number.isFinite(Number(ngl)) && Number(ngl) >= 0
                 ? Number(ngl)
@@ -356,8 +359,8 @@ export async function addServerDef({
             if (Number.isFinite(p) && p >= 1) return Math.floor(p);
             const fromTpl = Number(template?.parallel);
             if (Number.isFinite(fromTpl) && fromTpl >= 1) return Math.floor(fromTpl);
-            // large 는 기본 2, 그 외는 .env LLAMA_PARALLEL
-            if (tier === "large") return 2;
+            // large 는 기본 config.serverManager.largeTierParallel, 그 외는 .env LLAMA_PARALLEL
+            if (tier === "large") return config.serverManager.largeTierParallel;
             return Math.max(1, Number(config.llamaParallel) || 4);
         })(),
         gpu:
@@ -462,8 +465,8 @@ export async function updateServerDef(name, patch = {}) {
     }
     if (Object.prototype.hasOwnProperty.call(patch, "ctx")) {
         const c = Number(patch.ctx);
-        if (!Number.isFinite(c) || c < 512) {
-            throw new Error("ctx 는 512 이상 숫자여야 합니다.");
+        if (!Number.isFinite(c) || c < config.llamaCtxMin) {
+            throw new Error(`ctx 는 ${config.llamaCtxMin} 이상 숫자여야 합니다.`);
         }
         def.ctx = Math.floor(c);
     }
@@ -472,7 +475,7 @@ export async function updateServerDef(name, patch = {}) {
         if (!Number.isFinite(p) || p < 1) {
             throw new Error("parallel 은 1 이상 숫자여야 합니다.");
         }
-        def.parallel = Math.min(32, Math.floor(p));
+        def.parallel = Math.min(config.llamaParallelCap, Math.floor(p));
     }
     if (Object.prototype.hasOwnProperty.call(patch, "gpu")) {
         def.gpu = String(patch.gpu ?? "").trim();
@@ -866,102 +869,7 @@ export async function stopServer(def) {
 }
 
 // ---- GPU 메모리 사전 점검 ------------------------------------------------
-
-/**
- * GGUF 메타에서 레이어 수(*.block_count)를 읽는다. 실패 시 null.
- */
-function readGgufBlockCount(absPath) {
-    let fd;
-    try {
-        fd = openSync(absPath, "r");
-        const head = Buffer.alloc(24);
-        if (readSync(fd, head, 0, 24, 0) < 24) return null;
-        if (head.toString("utf8", 0, 4) !== "GGUF") return null;
-        const kvCount = Number(head.readBigUInt64LE(16));
-        if (!Number.isFinite(kvCount) || kvCount <= 0 || kvCount > 20000) return null;
-
-        let pos = 24;
-        const scratch = Buffer.alloc(16);
-
-        const readExact = (n) => {
-            const b = n <= scratch.length ? scratch : Buffer.alloc(n);
-            const got = readSync(fd, b, 0, n, pos);
-            if (got !== n) return null;
-            pos += n;
-            return b;
-        };
-        const readU32 = () => {
-            const b = readExact(4);
-            return b ? b.readUInt32LE(0) : null;
-        };
-        const readU64 = () => {
-            const b = readExact(8);
-            return b ? Number(b.readBigUInt64LE(0)) : null;
-        };
-        const readI32 = () => {
-            const b = readExact(4);
-            return b ? b.readInt32LE(0) : null;
-        };
-        const readI64 = () => {
-            const b = readExact(8);
-            return b ? Number(b.readBigInt64LE(0)) : null;
-        };
-        const readString = () => {
-            const len = readU64();
-            if (len == null || len < 0 || len > 1_000_000) return null;
-            if (len === 0) return "";
-            const b = Buffer.alloc(len);
-            const got = readSync(fd, b, 0, len, pos);
-            pos += len;
-            return got === len ? b.toString("utf8") : null;
-        };
-        const skipValue = (type) => {
-            const sizes = {
-                0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8,
-            };
-            if (type === 8) return readString() != null;
-            if (type === 9) {
-                const at = readU32();
-                const ac = readU64();
-                if (at == null || ac == null) return false;
-                for (let i = 0; i < ac; i++) if (!skipValue(at)) return false;
-                return true;
-            }
-            const sz = sizes[type];
-            if (!sz) return false;
-            pos += sz;
-            return true;
-        };
-        const readScalar = (type) => {
-            if (type === 4) return readU32();
-            if (type === 5) return readI32();
-            if (type === 10) return readU64();
-            if (type === 11) return readI64();
-            skipValue(type);
-            return null;
-        };
-
-        for (let i = 0; i < kvCount; i++) {
-            const key = readString();
-            const type = readU32();
-            if (key == null || type == null) return null;
-            if (key.endsWith(".block_count")) {
-                const v = readScalar(type);
-                return Number.isFinite(v) && v > 0 ? Math.floor(v) : null;
-            }
-            if (!skipValue(type)) return null;
-        }
-        return null;
-    } catch {
-        return null;
-    } finally {
-        if (fd != null) {
-            try {
-                closeSync(fd);
-            } catch {}
-        }
-    }
-}
+// GGUF 메타(레이어 수) 리더는 src/ggufReader.js 로 분리 (readGgufBlockCount import).
 
 /**
  * GPU 오프로드 비율 (0~1).
@@ -991,7 +899,7 @@ export function gpuOffloadFraction(ngl, layerCount) {
 export function resolveParallel(def) {
     const p = Number(def?.parallel);
     return Number.isFinite(p) && p >= 1
-        ? Math.min(32, Math.floor(p))
+        ? Math.min(config.llamaParallelCap, Math.floor(p))
         : Math.max(1, Number(config.llamaParallel) || 4);
 }
 
@@ -1068,7 +976,7 @@ async function gpuFreeMb(gpuId) {
         const { stdout } = await execFileAsync(
             "nvidia-smi",
             ["--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
-            execOpts({ timeout: 4000 }),
+            execOpts({ timeout: config.nvidiaSmiTimeoutMs }),
         );
         const rows = stdout
             .trim()
@@ -1099,7 +1007,7 @@ async function gpuMemUsedByPid(pid) {
         const { stdout } = await execFileAsync(
             "nvidia-smi",
             ["--query-compute-apps=pid,used_gpu_memory", "--format=csv,noheader,nounits"],
-            execOpts({ timeout: 4000 }),
+            execOpts({ timeout: config.nvidiaSmiTimeoutMs }),
         );
         let total = 0;
         let found = false;
@@ -1228,7 +1136,7 @@ export async function startServer(def, opts = {}) {
         }
 
         const slots = resolveParallel(def);
-        const perReqCtx = Number(def.ctx) > 0 ? Number(def.ctx) : 4096;
+        const perReqCtx = Number(def.ctx) > 0 ? Number(def.ctx) : config.llamaDefaultCtx;
         const args = [
             "-m", modelPath,
             "--host", config.llamaBindHost,

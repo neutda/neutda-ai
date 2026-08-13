@@ -1,12 +1,19 @@
 import { config } from "./config.js";
 
 class LlamaError extends Error {
-  constructor(message, { retryable = false, status, notSupported = false } = {}) {
+  constructor(
+    message,
+    { retryable = false, status, notSupported = false, backendDown = false } = {},
+  ) {
     super(message);
     this.name = "LlamaError";
     this.retryable = retryable;
     this.status = status;
     this.notSupported = Boolean(notSupported);
+    // backendDown=true 는 "서버가 응답조차 못 하는 상태(연결 실패)".
+    // HTTP 5xx·타임아웃은 서버가 살아있거나 단지 바쁜 것이므로 false —
+    // 이걸로 백엔드를 unhealthy 처리하면 부하 중 모델이 깜빡인다.
+    this.backendDown = Boolean(backendDown);
   }
 }
 
@@ -46,8 +53,11 @@ export async function chatCompletion({ baseUrl, messages, temperature, maxTokens
       // 타임아웃은 다른 백엔드로 재시도 가능
       throw new LlamaError(`모델 응답 타임아웃 (${config.requestTimeoutMs}ms 초과)`, { retryable: true });
     }
-    // 연결 실패도 재시도 가능
-    throw new LlamaError(`llama-server 연결 실패: ${err.message}`, { retryable: true });
+    // 연결 실패 = 서버가 응답 못 함 → 백엔드 다운으로 간주
+    throw new LlamaError(`llama-server 연결 실패: ${err.message}`, {
+      retryable: true,
+      backendDown: true,
+    });
   } finally {
     clearTimeout(timeout);
   }
@@ -109,7 +119,10 @@ export async function chatCompletionStream({ baseUrl, messages, temperature, max
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === "AbortError") throw new LlamaError(`모델 응답 타임아웃 (${config.requestTimeoutMs}ms 초과)`, { retryable: true });
-    throw new LlamaError(`llama-server 연결 실패: ${err.message}`, { retryable: true });
+    throw new LlamaError(`llama-server 연결 실패: ${err.message}`, {
+      retryable: true,
+      backendDown: true,
+    });
   }
 
   if (!response.ok) {
@@ -175,7 +188,7 @@ export async function chatCompletionStream({ baseUrl, messages, temperature, max
 }
 
 /** 백엔드에 로드된 모델 이름을 조회한다(파일명만). 실패 시 null */
-export async function fetchModel(baseUrl, timeoutMs = 3000) {
+export async function fetchModel(baseUrl, timeoutMs = config.modelFetchTimeoutMs) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -256,7 +269,7 @@ export async function createEmbeddings({ baseUrl, input, model }) {
 }
 
 /** 특정 백엔드가 떠 있는지 확인 (응답시간 ms 포함) */
-export async function checkHealth(baseUrl, timeoutMs = 3000) {
+export async function checkHealth(baseUrl, timeoutMs = config.healthCheckTimeoutMs) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   const started = Date.now();
