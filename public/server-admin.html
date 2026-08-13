@@ -1,0 +1,1949 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · 서버/모델관리</title>
+        <link rel="stylesheet" href="/dashboard.css" />
+        <style>
+            .admin {
+                display: grid;
+                grid-template-columns: 260px 1fr;
+                gap: 16px;
+                align-items: stretch;
+                min-height: 0;
+                height: 100%;
+            }
+            .app-main.admin-shell {
+                padding: 16px 20px;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+            .app-main.admin-shell .admin {
+                flex: 1;
+                min-height: 0;
+            }
+            /* ===== 좌측 LNB ===== */
+            .lnb {
+                background: var(--card, #161b22);
+                border: 1px solid var(--border, #30363d);
+                border-radius: 10px;
+                padding: 8px;
+                position: sticky;
+                top: 0;
+                align-self: start;
+                max-height: 100%;
+                overflow: auto;
+            }
+            .lnb .lnb-item {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 9px 10px;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 13px;
+                color: #c9d1d9;
+                border: 1px solid transparent;
+            }
+            .lnb .lnb-item:hover {
+                background: #1c2129;
+            }
+            .lnb .lnb-item.active {
+                background: rgba(108, 140, 255, 0.16);
+                border-color: rgba(108, 140, 255, 0.4);
+                color: #a9c0ff;
+            }
+            .lnb .lnb-item .sub {
+                margin-left: auto;
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+            }
+            .lnb .lnb-sec {
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+                padding: 10px 10px 4px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .dotpill {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: var(--err, #f85149);
+                flex: 0 0 auto;
+            }
+            .dotpill.up {
+                background: var(--ok, #3fb950);
+            }
+            /* ===== 우측 메인 ===== */
+            .node-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                flex-wrap: wrap;
+                margin-bottom: 10px;
+            }
+            .node-head .id {
+                font-weight: 700;
+                font-size: 16px;
+            }
+            .node-head .host {
+                color: var(--muted, #8b949e);
+                font-size: 12px;
+                margin-left: 6px;
+            }
+            .mini-res {
+                display: grid;
+                grid-template-columns: 148px minmax(0, 1fr);
+                gap: 10px;
+                margin: 8px 0 14px;
+                align-items: stretch;
+            }
+            .mini-res .m-sys {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                min-width: 0;
+            }
+            .mini-res .m-sys .m {
+                flex: 1 1 auto;
+            }
+            .mini-res .m-gpus {
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 8px;
+                min-width: 0;
+                align-content: start;
+            }
+            .mini-res[data-gpus="2"] .m-gpus,
+            .mini-res[data-gpus="3"] .m-gpus,
+            .mini-res[data-gpus="4"] .m-gpus {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .mini-res[data-gpus="3"] .m-gpus > .m:last-child:nth-child(3) {
+                grid-column: 1 / -1;
+            }
+            .mini-res[data-gpus="5"] .m-gpus,
+            .mini-res[data-gpus="6"] .m-gpus,
+            .mini-res[data-gpus="7"] .m-gpus,
+            .mini-res[data-gpus="8"] .m-gpus,
+            .mini-res.gpus-many .m-gpus {
+                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            }
+            .mini-res .m {
+                min-width: 0;
+            }
+            .mini-res .m .lab {
+                display: flex;
+                justify-content: space-between;
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+                margin-bottom: 3px;
+            }
+            @media (max-width: 900px) {
+                .mini-res[data-gpus="2"] .m-gpus,
+                .mini-res[data-gpus="3"] .m-gpus,
+                .mini-res[data-gpus="4"] .m-gpus {
+                    grid-template-columns: 1fr;
+                }
+            }
+            @media (max-width: 720px) {
+                .mini-res {
+                    grid-template-columns: 1fr;
+                }
+                .mini-res .m-sys {
+                    flex-direction: row;
+                }
+            }
+            table.srv {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+            }
+            table.srv th,
+            table.srv td {
+                padding: 7px 8px;
+                border-top: 1px solid var(--border, #30363d);
+                text-align: left;
+                vertical-align: middle;
+            }
+            table.srv th {
+                color: var(--muted, #8b949e);
+                font-weight: 500;
+                border-top: 0;
+            }
+            table.srv .acts {
+                text-align: right;
+                white-space: nowrap;
+                display: flex;
+                justify-content: flex-end;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 6px;
+            }
+            table.srv tr.res-row > td {
+                padding: 4px 8px 10px;
+                border-top: 0;
+                background: rgba(13, 17, 23, 0.45);
+            }
+            table.srv .res-edit {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 6px 10px;
+                font-size: 12px;
+                color: #c9d1d9;
+            }
+            table.srv .res-edit .res-k {
+                color: var(--muted, #8b949e);
+                font-size: 11px;
+            }
+            table.srv input.res-in,
+            table.srv select.res-in {
+                background: #0d1117;
+                color: #c9d1d9;
+                border: 1px solid var(--border, #30363d);
+                border-radius: 5px;
+                padding: 3px 6px;
+                font-size: 12px;
+                width: 72px;
+                box-sizing: border-box;
+            }
+            table.srv select.res-in {
+                width: auto;
+                min-width: 140px;
+                max-width: 220px;
+            }
+            table.srv .res-note {
+                font-size: 10px;
+                color: var(--muted, #8b949e);
+                margin-left: 4px;
+            }
+            table.srv .res-state {
+                font-size: 11px;
+                font-weight: 600;
+                padding: 2px 8px;
+                border-radius: 999px;
+                border: 1px solid var(--border, #30363d);
+                margin-left: 4px;
+            }
+            table.srv .res-state.live {
+                color: var(--ok, #3fb950);
+                border-color: rgba(63, 185, 80, 0.45);
+                background: rgba(63, 185, 80, 0.1);
+            }
+            table.srv .res-state.pending {
+                color: var(--warn, #d29922);
+                border-color: rgba(210, 153, 34, 0.45);
+                background: rgba(210, 153, 34, 0.1);
+            }
+            table.srv .res-state.unknown {
+                color: var(--muted, #8b949e);
+            }
+            table.srv .res-state.off {
+                color: var(--muted, #8b949e);
+            }
+            .editor .run-grid {
+                display: grid;
+                grid-template-columns: 56px 1fr auto auto;
+                gap: 6px 8px;
+                align-items: center;
+            }
+            .editor .run-grid .span2 {
+                grid-column: 2 / -1;
+            }
+            .editor input.run-in,
+            .editor select.run-in {
+                background: #161b22;
+                color: #c9d1d9;
+                border: 1px solid var(--border, #30363d);
+                border-radius: 7px;
+                padding: 6px 9px;
+                font-size: 13px;
+                width: 100%;
+                box-sizing: border-box;
+                min-width: 0;
+            }
+            .editor input.run-in.sm {
+                max-width: 100px;
+            }
+            button.mini {
+                background: #21262d;
+                color: #c9d1d9;
+                border: 1px solid var(--border, #30363d);
+                border-radius: 6px;
+                padding: 3px 9px;
+                font-size: 12px;
+                cursor: pointer;
+                line-height: 1.5;
+            }
+            button.mini:hover {
+                border-color: var(--accent, #6c8cff);
+            }
+            button.mini:disabled {
+                opacity: 0.5;
+                cursor: default;
+            }
+            button.mini.warn {
+                color: var(--warn, #d29922);
+            }
+            button.mini.danger {
+                color: var(--err, #f85149);
+            }
+            button.mini.go {
+                color: var(--ok, #3fb950);
+            }
+            .role-chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 3px 10px;
+                border-radius: 999px;
+                font-size: 11px;
+                border: 1px solid var(--border, #30363d);
+                color: var(--muted, #8b949e);
+                cursor: pointer;
+                user-select: none;
+                margin: 1px 2px;
+                transition: background 0.15s, border-color 0.15s, color 0.15s;
+            }
+            .role-chip.on {
+                background: rgba(108, 140, 255, 0.18);
+                border-color: rgba(108, 140, 255, 0.5);
+                color: #a9c0ff;
+            }
+            .role-chip:hover {
+                border-color: var(--accent, #6c8cff);
+            }
+            /* ===== 설정 모달 (한 화면·스크롤 최소화) ===== */
+            .editor-row > td {
+                padding: 0 !important;
+                border: 0 !important;
+            }
+            .editor-backdrop {
+                position: fixed;
+                inset: 0;
+                background: rgba(1, 4, 9, 0.65);
+                z-index: 90;
+            }
+            .editor {
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                z-index: 100;
+                width: min(520px, calc(100vw - 28px));
+                max-height: 90vh;
+                display: flex;
+                flex-direction: column;
+                background: #0d1117;
+                border: 1px solid rgba(108, 140, 255, 0.4);
+                border-radius: 12px;
+                box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+                overflow: hidden;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            .editor-top {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                padding: 10px 14px;
+                border-bottom: 1px solid var(--border, #30363d);
+                flex: 0 0 auto;
+            }
+            .editor-top .title {
+                font-size: 14px;
+                font-weight: 700;
+            }
+            .editor-top .sub {
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+                margin-top: 1px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                max-width: 360px;
+            }
+            .editor-scroll {
+                overflow-x: hidden;
+                overflow-y: auto;
+                padding: 12px 14px 4px;
+                flex: 1 1 auto;
+                min-height: 0;
+                overscroll-behavior: contain;
+            }
+            .editor-form {
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+                min-width: 0;
+            }
+            .editor .row {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                min-width: 0;
+            }
+            .editor .row-h {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 8px;
+            }
+            .editor .row-h h4 {
+                margin: 0;
+                font-size: 12px;
+                color: #e7e9ee;
+                font-weight: 650;
+            }
+            .editor .row-h .hint {
+                font-size: 10.5px;
+                color: var(--muted, #8b949e);
+                margin: 0;
+                white-space: nowrap;
+            }
+            .editor input[type="text"],
+            .editor input.skill-in {
+                background: #161b22;
+                color: #c9d1d9;
+                border: 1px solid var(--border, #30363d);
+                border-radius: 7px;
+                padding: 7px 10px;
+                font-size: 13px;
+                width: 100%;
+                box-sizing: border-box;
+                min-width: 0;
+            }
+            .editor input[type="text"]:focus,
+            .editor input.skill-in:focus {
+                outline: none;
+                border-color: var(--accent, #6c8cff);
+            }
+            .chip-wrap {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+                min-width: 0;
+            }
+            .chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                padding: 5px 10px;
+                border-radius: 999px;
+                border: 1px solid var(--border, #30363d);
+                background: #161b22;
+                color: #c9d1d9;
+                font-size: 12px;
+                cursor: pointer;
+                user-select: none;
+                line-height: 1.2;
+                max-width: 100%;
+            }
+            .chip .ck {
+                width: 12px;
+                height: 12px;
+                border-radius: 3px;
+                border: 1.5px solid #484f58;
+                display: inline-grid;
+                place-items: center;
+                font-size: 9px;
+                color: transparent;
+                flex: 0 0 auto;
+            }
+            .chip.on {
+                border-color: rgba(108, 140, 255, 0.55);
+                background: rgba(108, 140, 255, 0.14);
+                color: #d6e0ff;
+            }
+            .chip.on .ck {
+                background: var(--accent, #6c8cff);
+                border-color: var(--accent, #6c8cff);
+                color: #fff;
+            }
+            .chip.sec.on {
+                border-color: rgba(63, 185, 80, 0.5);
+                background: rgba(63, 185, 80, 0.1);
+                color: #c8f0d0;
+            }
+            .chip.sec.on .ck {
+                background: var(--ok, #3fb950);
+                border-color: var(--ok, #3fb950);
+            }
+            .fixed-grid {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+            }
+            .fixed-card {
+                display: inline-flex;
+                align-items: center;
+                gap: 7px;
+                padding: 5px 9px;
+                border-radius: 999px;
+                border: 1px solid var(--border, #30363d);
+                background: #161b22;
+                cursor: pointer;
+                user-select: none;
+            }
+            .fixed-card.on {
+                border-color: rgba(108, 140, 255, 0.55);
+                background: rgba(108, 140, 255, 0.14);
+            }
+            .fixed-card .sw {
+                width: 28px;
+                height: 16px;
+                border-radius: 999px;
+                background: #30363d;
+                position: relative;
+                flex: 0 0 auto;
+                transition: background 0.15s;
+            }
+            .fixed-card .sw::after {
+                content: "";
+                position: absolute;
+                top: 2px;
+                left: 2px;
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: #c9d1d9;
+                transition: left 0.15s;
+            }
+            .fixed-card.on .sw {
+                background: var(--accent, #6c8cff);
+            }
+            .fixed-card.on .sw::after {
+                left: 14px;
+                background: #fff;
+            }
+            .fixed-card .nm {
+                font-size: 12px;
+                font-weight: 600;
+                color: #e7e9ee;
+            }
+            .tags {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 5px;
+                min-width: 0;
+            }
+            .tag {
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                padding: 3px 7px 3px 9px;
+                border-radius: 999px;
+                background: rgba(108, 140, 255, 0.14);
+                border: 1px solid rgba(108, 140, 255, 0.35);
+                color: #c9d1d9;
+                font-size: 11px;
+            }
+            .tag button {
+                border: 0;
+                background: transparent;
+                color: var(--muted, #8b949e);
+                cursor: pointer;
+                font-size: 13px;
+                line-height: 1;
+                padding: 0 2px;
+            }
+            .tag button:hover {
+                color: var(--err, #f85149);
+            }
+            .tag-row {
+                display: flex;
+                gap: 6px;
+                align-items: center;
+                min-width: 0;
+            }
+            .tag-row input {
+                flex: 1;
+                min-width: 0;
+            }
+            .editor-foot {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin: 0;
+                padding: 10px 14px;
+                border-top: 1px solid var(--border, #30363d);
+                flex: 0 0 auto;
+                background: #0d1117;
+            }
+            .editor-foot .msg {
+                margin-left: auto;
+                font-size: 12px;
+                color: var(--muted, #8b949e);
+            }
+            .editor-foot .msg.ok {
+                color: var(--ok, #3fb950);
+            }
+            .editor-foot .msg.err {
+                color: var(--err, #f85149);
+            }
+            .summary-roles {
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+                margin-top: 4px;
+                line-height: 1.35;
+            }
+            body.editor-open {
+                overflow: hidden;
+            }
+
+            .add-form {
+                background: var(--card, #161b22);
+                border: 1px solid var(--border, #30363d);
+                border-radius: 10px;
+                padding: 12px 14px;
+                margin-bottom: 14px;
+            }
+            .add-form .row {
+                display: flex;
+                gap: 8px;
+                margin-bottom: 8px;
+                flex-wrap: wrap;
+                align-items: center;
+            }
+            .add-form label {
+                font-size: 12px;
+                color: var(--muted, #8b949e);
+                min-width: 40px;
+            }
+            .add-form label.help {
+                cursor: help;
+                border-bottom: 1px dotted var(--muted, #8b949e);
+            }
+            .add-form .hint-line {
+                width: 100%;
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+                line-height: 1.4;
+                margin: -2px 0 6px;
+            }
+            .add-form select,
+            .add-form input {
+                background: #0d1117;
+                color: #c9d1d9;
+                border: 1px solid var(--border, #30363d);
+                border-radius: 6px;
+                padding: 5px 7px;
+                font-size: 12px;
+            }
+            .add-form select {
+                flex: 1 1 180px;
+                min-width: 0;
+            }
+            .add-form input.small {
+                width: 72px;
+            }
+            .add-form select.gpu-sel {
+                flex: 0 1 auto;
+                min-width: 160px;
+                max-width: 280px;
+            }
+            .vram {
+                font-size: 12px;
+                color: var(--muted, #8b949e);
+            }
+            .empty {
+                color: var(--muted, #8b949e);
+                padding: 30px;
+                text-align: center;
+            }
+            .ov-list {
+                display: flex;
+                flex-direction: column;
+                gap: 14px;
+            }
+            .ov-node {
+                background: var(--card, #161b22);
+                border: 1px solid var(--border, #30363d);
+                border-radius: 10px;
+                padding: 12px 14px;
+            }
+            .ov-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                flex-wrap: wrap;
+                margin-bottom: 6px;
+            }
+            .ov-node .dotpill {
+                display: inline-block;
+                vertical-align: middle;
+                margin-right: 4px;
+            }
+            .ov-node .mini-res {
+                margin: 6px 0 10px;
+            }
+        </style>
+            <link rel="stylesheet" href="/nav.css" />
+    </head>
+    <body>
+        <div class="wrap">
+            <header>
+                <h1>서버/모델관리</h1>
+                <div class="tools">
+                    <span id="updated" class="updated"></span>
+                </div>
+            </header>
+            <div class="app-main admin-shell">
+            <div class="admin">
+                <aside class="lnb" id="lnb"></aside>
+                <main id="main">
+                    <div class="empty">불러오는 중…</div>
+                </main>
+            </div>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const escAttr = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/</g, "&lt;");
+            const gb = (mb) => (Number(mb || 0) / 1024).toFixed(1) + " GB";
+            const meterClass = (p) =>
+                p >= 90 ? "meter crit" : p >= 70 ? "meter warn" : "meter";
+
+            const FIXED = [
+                ["solve", "해결", "일반 질의·채팅 응답을 담당합니다"],
+                ["router", "라우터", "요청을 어떤 모델/역할로 보낼지 고릅니다"],
+                ["planner", "설계", "복잡한 작업을 단계로 나눕니다"],
+                ["embedding", "임베딩", "검색·RAG용 벡터 임베딩을 만듭니다"],
+                ["security", "보안검증", "응답·입력을 보안 정책으로 검사합니다"],
+            ];
+
+            // 상태
+            let nodes = []; // /api/agents
+            let backByUrl = new Map(); // url → pool backend (roles/health)
+            let roleCatalog = []; // /api/roles
+            let secCatalog = { enabled: false, policies: [] };
+            let selected = "__all__";
+            let openEditor = null; // `${agentId}::${name}`
+            let openAdd = null; // agentId
+            const mcCache = {}; // agentId → modelconfig
+            let frozen = false; // 편집 중 재렌더 정지
+
+            const nodeById = (id) => nodes.find((n) => n.id === id);
+
+            async function load() {
+                if (frozen) return;
+                try {
+                    const [ag, st, rl, sc] = await Promise.all([
+                        fetch("/api/agents").then((r) => r.json()),
+                        fetch("/api/status").then((r) => r.json()),
+                        fetch("/api/roles").then((r) => r.json()).catch(() => null),
+                        fetch("/api/security-policies")
+                            .then((r) => r.json())
+                            .catch(() => null),
+                    ]);
+                    nodes = ag.agents || [];
+                    backByUrl = new Map((st.backends || []).map((b) => [b.url, b]));
+                    if (rl?.roles) roleCatalog = rl.roles;
+                    if (sc) secCatalog = sc;
+                    if (selected !== "__all__" && !nodeById(selected)) {
+                        selected = "__all__";
+                    }
+                    render();
+                    $("updated").textContent =
+                        "갱신 " + new Date().toLocaleTimeString();
+                } catch (e) {
+                    $("main").innerHTML = `<div class="err">조회 실패: ${e.message}</div>`;
+                }
+            }
+
+            function render() {
+                renderLNB();
+                renderMain();
+            }
+
+            function renderLNB() {
+                const items = [
+                    `<div class="lnb-item ${selected === "__all__" ? "active" : ""}" data-sel="__all__">
+                        <span>📊 전체 서버</span><span class="sub">${nodes.length}</span>
+                    </div>`,
+                    `<div class="lnb-sec">하위 관리서버</div>`,
+                ];
+                if (!nodes.length) {
+                    items.push(
+                        `<div class="muted" style="padding:8px 10px;font-size:12px">등록된 노드 없음</div>`,
+                    );
+                }
+                for (const n of nodes) {
+                    items.push(
+                        `<div class="lnb-item ${selected === n.id ? "active" : ""}" data-sel="${escAttr(n.id)}">
+                            <span class="dotpill ${n.status === "up" ? "up" : ""}"></span>
+                            <span>${escAttr(n.id)}</span>
+                            <span class="sub">${(n.servers || []).length}</span>
+                        </div>`,
+                    );
+                }
+                $("lnb").innerHTML = items.join("");
+            }
+
+            function miniMeter(lab, pct, sub, body = "") {
+                const p = pct == null ? 0 : pct;
+                return `<div class="m">
+                    <div class="lab"><span>${lab}</span><span>${pct == null ? "–" : pct + "%"}</span></div>
+                    ${body || `<div class="${meterClass(p)}"><span style="width:${p}%"></span></div>`}
+                    ${sub ? `<div class="lab" style="margin-top:2px"><span>${sub}</span><span></span></div>` : ""}
+                </div>`;
+            }
+
+            const GPU_PROC_COLORS = [
+                "#3fb950",
+                "#6c8cff",
+                "#d29922",
+                "#39c5cf",
+                "#e879a9",
+                "#8b9dc3",
+            ];
+
+            function gpuMiniBody(g) {
+                const total = Number(g.memTotalMb) || 0;
+                const used = Number(g.memUsedMb) || 0;
+                const procs = Array.isArray(g.processes) ? g.processes : [];
+                const rows = [];
+                let accounted = 0;
+                for (let i = 0; i < procs.length; i++) {
+                    const p = procs[i];
+                    const mb = Number(p.memUsedMb) || 0;
+                    if (mb <= 0) continue;
+                    accounted += mb;
+                    const base =
+                        p.serverAlias ||
+                        p.serverName ||
+                        p.processName ||
+                        (p.pid != null ? `PID ${p.pid}` : "unknown");
+                    rows.push({
+                        label:
+                            p.port != null ? `${base} (:${p.port})` : base,
+                        mb,
+                        estimated: !!p.estimated,
+                        color: GPU_PROC_COLORS[i % GPU_PROC_COLORS.length],
+                    });
+                }
+                const other = Math.max(0, used - accounted);
+                if (other >= 16) rows.push({ label: "기타", mb: other, color: "#5a6270" });
+                const p = g.memUsagePct == null ? 0 : g.memUsagePct;
+                if (!rows.length) {
+                    return `<div class="${meterClass(p)}"><span style="width:${p}%"></span></div>`;
+                }
+                const segs = rows
+                    .map((r) => {
+                        const w = total > 0 ? Math.max(0.3, (r.mb / total) * 100) : 0;
+                        return `<span style="width:${w}%;background:${r.color}" title="${escAttr(r.label)}: ${gb(r.mb)}"></span>`;
+                    })
+                    .join("");
+                const legend = rows
+                    .map((r) => {
+                        const share = total > 0 ? Math.round((r.mb / total) * 100) : 0;
+                        const est = r.estimated ? " · 추정" : "";
+                        return `<div class="gpu-proc-row"><span class="swatch" style="background:${r.color}"></span><span class="lab">${escAttr(r.label)}</span><span class="val">${gb(r.mb)} · ${share}%${est}</span></div>`;
+                    })
+                    .join("");
+                return `<div class="${meterClass(p)} stacked">${segs}</div><div class="gpu-procs">${legend}</div>`;
+            }
+
+            function resHtml(m) {
+                if (!m) return `<div class="muted" style="font-size:12px">메트릭 대기…</div>`;
+                const sys = [
+                    miniMeter("CPU", m.cpu?.usagePct, `${m.cpu?.cores ?? "–"} 코어`),
+                    miniMeter(
+                        "RAM",
+                        m.mem?.usagePct,
+                        `${gb(m.mem?.usedMb)} / ${gb(m.mem?.totalMb)}`,
+                    ),
+                ];
+                const gpus = [];
+                for (const g of m.gpus || [])
+                    gpus.push(
+                        miniMeter(
+                            `GPU${g.index}${g.name ? ` · ${escAttr(String(g.name).replace(/^NVIDIA\s+/i, ""))}` : ""}`,
+                            g.memUsagePct,
+                            `VRAM ${gb(g.memUsedMb)} / ${gb(g.memTotalMb)}`,
+                            gpuMiniBody(g),
+                        ),
+                    );
+                if (!gpus.length) {
+                    gpus.push(
+                        `<div class="m"><div class="lab"><span>GPU</span><span>–</span></div><div class="lab" style="margin-top:2px"><span>nvidia-smi 사용 불가</span><span></span></div></div>`,
+                    );
+                }
+                const n = (m.gpus || []).length;
+                const many = n >= 5 ? " gpus-many" : "";
+                return `<div class="mini-res${many}" data-gpus="${n}"><div class="m-sys">${sys.join("")}</div><div class="m-gpus">${gpus.join("")}</div></div>`;
+            }
+
+            function renderMain() {
+                if (selected === "__all__") return renderOverview();
+                const n = nodeById(selected);
+                if (!n) {
+                    $("main").innerHTML = `<div class="empty">노드를 선택하세요.</div>`;
+                    return;
+                }
+                renderNode(n);
+            }
+
+            function renderOverview() {
+                if (!nodes.length) {
+                    $("main").innerHTML = `<div class="empty">등록된 하위 관리서버가 없습니다.<br />각 머신에서 <code>npm run agent</code> 로 등록하세요.</div>`;
+                    return;
+                }
+                $("main").innerHTML = `
+                    <div class="node-head"><div class="id">전체 서버 <span class="muted" style="font-size:13px;font-weight:400">· ${nodes.length}개 노드 · 각 서버에서 기동·설정 가능</span></div></div>
+                    <div class="ov-list">${nodes.map((n) => nodeBlock(n)).join("")}</div>`;
+                for (const n of nodes) if (openAdd === n.id) populateModels(n.id);
+                fillEditorGpus();
+            }
+
+            function roleOn(roles, key) {
+                return key === "solve" ? !!(roles.solve ?? roles.chat) : !!roles[key];
+            }
+
+            function roleChips(agentId, s) {
+                const b = backByUrl.get(s.url);
+                const roles = b?.roles || {};
+                return FIXED.map(([key, label]) => {
+                    const on = roleOn(roles, key);
+                    return `<span class="role-chip ${on ? "on" : ""}" title="클릭하여 ${escAttr(label)} 토글" data-act="fixed" data-id="${escAttr(agentId)}" data-name="${escAttr(s.name)}" data-role="${key}" data-on="${on ? 1 : 0}">${escAttr(label)}</span>`;
+                }).join("");
+            }
+
+            function roleSummary(s) {
+                const b = backByUrl.get(s.url) || {};
+                const names = (b.roleIds || [])
+                    .map((id) => roleCatalog.find((r) => r.id === id)?.name)
+                    .filter(Boolean);
+                const skills = b.customSkills || b.skills || [];
+                const bits = [];
+                if (names.length) bits.push(names.slice(0, 3).join(", ") + (names.length > 3 ? ` 외 ${names.length - 3}` : ""));
+                if (skills.length) bits.push(`특기 ${skills.length}`);
+                return bits.length
+                    ? `<div class="summary-roles">${escAttr(bits.join(" · "))}</div>`
+                    : "";
+            }
+
+            function pickHtml(kind, items, selectedIds) {
+                if (!items?.length) {
+                    return `<div class="muted" style="font-size:12px">${
+                        kind === "role"
+                            ? "등록된 공통 역할 없음"
+                            : "등록된 보안 정책 없음"
+                    }</div>`;
+                }
+                const sec = kind === "sec" ? " sec" : "";
+                return `<div class="chip-wrap" data-group="${kind}">${items
+                    .map((it) => {
+                        const on = selectedIds.has(it.id);
+                        const desc = it.description || it.desc || "";
+                        return `<button type="button" class="chip${sec} ${on ? "on" : ""}" title="${escAttr(desc || it.name)}" data-act="toggle-pick" data-kind="${kind}" data-pid="${escAttr(it.id)}" data-on="${on ? 1 : 0}"><span class="ck">✓</span>${escAttr(it.name)}</button>`;
+                    })
+                    .join("")}</div>`;
+            }
+
+            function skillTagsHtml(skills) {
+                return (skills || [])
+                    .map(
+                        (sk) =>
+                            `<span class="tag" data-skill="${escAttr(sk)}">${escAttr(sk)}<button type="button" data-act="rm-skill" title="삭제">×</button></span>`,
+                    )
+                    .join("");
+            }
+
+            function editorHtml(agentId, s) {
+                const b = backByUrl.get(s.url) || {};
+                const roles = b.roles || {};
+                const myIds = new Set(b.roleIds || []);
+                const mySec = new Set(b.securityIds || []);
+                const skills = b.customSkills || b.skills || [];
+                const fixedCards = FIXED.map(([key, label, desc]) => {
+                    const on = roleOn(roles, key);
+                    return `<div class="fixed-card ${on ? "on" : ""}" title="${escAttr(desc)}" data-act="fixed" data-id="${escAttr(agentId)}" data-name="${escAttr(s.name)}" data-role="${key}" data-on="${on ? 1 : 0}">
+                        <div class="sw"></div>
+                        <div class="nm">${escAttr(label)}</div>
+                    </div>`;
+                }).join("");
+                const secOn = roleOn(roles, "security");
+                return `<tr class="editor-row" data-id="${escAttr(agentId)}" data-name="${escAttr(s.name)}"><td colspan="6">
+                    <div class="editor-backdrop" data-act="close-editor"></div>
+                    <div class="editor" role="dialog" aria-modal="true">
+                        <div class="editor-top">
+                            <div style="min-width:0">
+                                <div class="title">모델 설정</div>
+                                <div class="sub">${escAttr(s.alias || s.name)} · ${escAttr(s.name)} · :${s.port}</div>
+                            </div>
+                            <button type="button" class="mini" data-act="close-editor">닫기</button>
+                        </div>
+                        <div class="editor-scroll">
+                            <div class="editor-form">
+                                <div class="row">
+                                    <div class="row-h"><h4>표시 이름</h4><span class="hint">목록용 별칭</span></div>
+                                    <input type="text" data-f="alias" value="${escAttr(s.alias || s.name)}" placeholder="예: 빠른 채팅 모델" />
+                                </div>
+                                <div class="row">
+                                    <div class="row-h"><h4>실행 설정</h4><span class="hint">저장 후 재시작해야 프로세스에 반영</span></div>
+                                    <div class="run-grid">
+                                        <span class="hint">ngl</span>
+                                        <input class="run-in sm" type="number" min="0" data-f="ngl" value="${s.ngl != null ? Number(s.ngl) : 0}" />
+                                        <button type="button" class="mini" data-act="ed-cpu-ngl">CPU로</button>
+                                        <span></span>
+                                        <span class="hint">ctx</span>
+                                        <input class="run-in sm" type="number" min="512" step="512" data-f="ctx" value="${s.ctx != null ? Number(s.ctx) : 4096}" />
+                                        <button type="button" class="mini" data-act="ed-reset-ctx">초기화</button>
+                                        <span></span>
+                                        <span class="hint" title="llama --parallel 동시 슬롯. 총 ctx = ctx×parallel">parallel</span>
+                                        <input class="run-in sm" type="number" min="1" max="32" data-f="parallel" value="${s.parallel != null ? Number(s.parallel) : (s.tier === "large" ? 2 : 4)}" />
+                                        <span class="hint muted">동시</span>
+                                        <span></span>
+                                        <span class="hint">GPU</span>
+                                        <select class="run-in span2" data-f="gpu" data-gpu-for="${escAttr(agentId)}" data-gpu-pref="${escAttr(s.gpu || "")}"></select>
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div class="row-h"><h4>고정 역할</h4><span class="hint">즉시 적용</span></div>
+                                    <div class="fixed-grid">${fixedCards}</div>
+                                </div>
+                                <div class="row">
+                                    <div class="row-h"><h4>공통 역할</h4><span class="hint">저장 시 반영 · 설명은 툴팁</span></div>
+                                    ${pickHtml("role", roleCatalog, myIds)}
+                                </div>
+                                <div class="row" data-sec-row>
+                                    <div class="row-h"><h4>보안 정책</h4><span class="hint">${secOn ? "저장 시 반영" : "보안검증 켜면 배정"}</span></div>
+                                    ${
+                                        secOn
+                                            ? pickHtml("sec", secCatalog.policies || [], mySec)
+                                            : `<div class="muted" style="font-size:12px">보안검증 꺼짐</div>`
+                                    }
+                                </div>
+                                <div class="row">
+                                    <div class="row-h"><h4>커스텀 특기</h4><span class="hint">Enter로 추가</span></div>
+                                    <div class="tags" data-f="skill-tags">${skillTagsHtml(skills)}</div>
+                                    <div class="tag-row">
+                                        <input class="skill-in" type="text" data-f="skill-in" placeholder="예: 코드 리뷰" />
+                                        <button type="button" class="mini" data-act="add-skill">추가</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="editor-foot">
+                            <button class="mini go" data-act="save-editor" data-id="${escAttr(agentId)}" data-name="${escAttr(s.name)}">저장</button>
+                            <button class="mini go" data-act="save-restart" data-id="${escAttr(agentId)}" data-name="${escAttr(s.name)}" title="저장 후 llama 재시작">저장+재시작</button>
+                            <button class="mini" data-act="close-editor">취소</button>
+                            <span class="msg" data-f="editor-msg"></span>
+                        </div>
+                    </div>
+                </td></tr>`;
+            }
+
+            function resourceRow(agentId, s) {
+                const ngl = s.ngl != null ? Number(s.ngl) : 0;
+                const ctx = s.ctx != null ? Number(s.ctx) : 4096;
+                const parallel =
+                    s.parallel != null
+                        ? Number(s.parallel)
+                        : s.tier === "large"
+                          ? 2
+                          : 4;
+                const gpu = s.gpu != null ? String(s.gpu).trim() : "";
+                const gpus = nodeById(agentId)?.metrics?.gpus || [];
+                let gpuOpts;
+                if (!gpus.length) {
+                    gpuOpts = `<option value="">GPU 없음</option>`;
+                    if (gpu)
+                        gpuOpts += `<option value="${escAttr(gpu)}" selected>${escAttr(gpu)}</option>`;
+                } else {
+                    gpuOpts = gpus
+                        .map((g, i) => {
+                            const want = gpu.split(",")[0];
+                            const on =
+                                want !== ""
+                                    ? String(g.index) === want
+                                    : i === 0;
+                            const free =
+                                g.memTotalMb != null && g.memUsedMb != null
+                                    ? ` · ${((g.memTotalMb - g.memUsedMb) / 1024).toFixed(1)}GB`
+                                    : "";
+                            return `<option value="${g.index}"${on ? " selected" : ""}>${g.index}${g.name ? ` · ${escAttr(g.name)}` : ""}${free}</option>`;
+                        })
+                        .join("");
+                    const want = gpu.split(",")[0];
+                    if (want && !gpus.some((g) => String(g.index) === want)) {
+                        gpuOpts += `<option value="${escAttr(gpu)}" selected>${escAttr(gpu)}</option>`;
+                    }
+                }
+                const run = s.runningConfig;
+                const runHint = run
+                    ? `실행중 ngl=${run.ngl} ctx=${run.ctx} parallel=${run.parallel ?? "–"} gpu=${run.gpu || "–"}`
+                    : "";
+                let stateHtml;
+                if (!s.pid) {
+                    stateHtml = `<span class="res-state off" title="프로세스 미기동">미기동</span>`;
+                } else if (s.needsRestart === true) {
+                    stateHtml = `<span class="res-state pending" title="${escAttr(runHint)}">적용됨 · 재시작 필요</span>`;
+                } else if (s.needsRestart === false) {
+                    stateHtml = `<span class="res-state live" title="${escAttr(runHint)}">실행중, 모든 설정 반영 완료</span>`;
+                } else {
+                    stateHtml = `<span class="res-state unknown" title="기동 기록 없음 — 한 번 재시작하면 추적됩니다">상태 미확인</span>`;
+                }
+                return `<tr class="res-row">
+                    <td colspan="6">
+                        <div class="res-edit" data-res-id="${escAttr(agentId)}" data-res-name="${escAttr(s.name)}">
+                            <span class="res-k">ngl</span>
+                            <input class="res-in" data-rf="ngl" type="number" min="0" value="${ngl}" />
+                            <span class="res-k">ctx</span>
+                            <input class="res-in" data-rf="ctx" type="number" min="512" step="512" value="${ctx}" />
+                            <span class="res-k">par</span>
+                            <input class="res-in" data-rf="parallel" type="number" min="1" max="32" value="${parallel}" title="--parallel 동시 슬롯" />
+                            <span class="res-k">GPU</span>
+                            <select class="res-in" data-rf="gpu">${gpuOpts}</select>
+                            <button type="button" class="mini go" data-act="save-res" data-id="${escAttr(agentId)}" data-name="${escAttr(s.name)}">적용</button>
+                            <button type="button" class="mini" data-act="save-res-restart" data-id="${escAttr(agentId)}" data-name="${escAttr(s.name)}" title="적용 후 재시작">적용+재시작</button>
+                            ${stateHtml}
+                        </div>
+                    </td>
+                </tr>`;
+            }
+
+            function serverRow(agentId, s) {
+                const b = backByUrl.get(s.url);
+                const healthy = b?.healthy;
+                const running = !!(s.pid || healthy);
+                const pill = healthy
+                    ? '<span class="pill up"><span class="dot"></span>정상</span>'
+                    : '<span class="pill down"><span class="dot"></span>다운</span>';
+                const chips = roleChips(agentId, s);
+                const btn = (act, cls, label) =>
+                    `<button class="mini ${cls}" data-act="${act}" data-id="${escAttr(agentId)}" data-name="${escAttr(s.name)}">${label}</button>`;
+                const rows = [
+                    `<tr>
+                        <td>${escAttr(s.alias || s.name)}<div class="muted" style="font-size:11px">${escAttr(s.name)} · :${s.port}</div></td>
+                        <td><span class="tier tier-${s.tier}">${s.tier}</span></td>
+                        <td><span class="dev dev-${s.device || "na"}">${(s.device || "–").toUpperCase()}</span></td>
+                        <td>${pill}</td>
+                        <td style="max-width:260px">${chips}${roleSummary(s)}</td>
+                        <td class="acts">${[
+                            running ? "" : btn("start", "go", "기동"),
+                            running ? btn("stop", "", "종료") : "",
+                            running ? btn("restart", "warn", "재시작") : "",
+                            btn("edit", "", "설정"),
+                            btn("del", "danger", "삭제"),
+                        ].filter(Boolean).join("")}</td>
+                    </tr>`,
+                    resourceRow(agentId, s),
+                ];
+                if (openEditor === `${agentId}::${s.name}`)
+                    rows.push(editorHtml(agentId, s));
+                return rows.join("");
+            }
+
+            function addFormHtml(agentId) {
+                if (openAdd !== agentId) return "";
+                return `<div class="add-form" data-id="${escAttr(agentId)}">
+                    <div class="row">
+                        <label>티어</label>
+                        <select data-f="tier"><option value="small">small</option><option value="medium" selected>medium</option><option value="large">large</option></select>
+                        <select data-f="model"><option value="">모델 로딩…</option></select>
+                    </div>
+                    <div class="row">
+                        <label class="help" title="GPU에 올릴 Transformer 레이어 수(llama.cpp -ngl).&#10;0 = CPU만 사용&#10;레이어 수 이상 또는 99 = 전체 GPU 오프로드&#10;클수록 빠르지만 VRAM을 더 씁니다.">GPU 레이어 (ngl)</label>
+                        <input class="small" data-f="ngl" type="number" min="0" value="99" />
+                        <button type="button" class="mini go" data-act="opt-ngl" data-id="${escAttr(agentId)}" title="남은 VRAM에 맞춰 ngl 자동 설정">최적화</button>
+                        <button type="button" class="mini" data-act="cpu-ngl" data-id="${escAttr(agentId)}" title="ngl=0 · CPU만 사용">CPU로</button>
+                        <label class="help" title="컨텍스트 길이(토큰).&#10;대화·문서가 길수록 크게.&#10;클수록 KV 캐시로 VRAM(또는 RAM)을 더 씁니다.">ctx</label>
+                        <input class="small" data-f="ctx" type="number" min="512" step="512" value="4096" />
+                        <button type="button" class="mini go" data-act="opt-ctx" data-id="${escAttr(agentId)}" title="현재 ngl 기준으로 남은 VRAM에 맞는 최대 ctx">최적화</button>
+                        <button type="button" class="mini" data-act="reset-ctx" data-id="${escAttr(agentId)}" title="ctx=4096">초기화</button>
+                        <label class="help" title="llama-server --parallel&#10;동시 처리 슬롯 수.&#10;총 컨텍스트 = ctx × parallel (VRAM↑)&#10;large 권장 2 · medium 4~8">parallel</label>
+                        <input class="small" data-f="parallel" type="number" min="1" max="32" value="4" />
+                        <label class="help" title="사용할 GPU 장치 번호(CUDA_VISIBLE_DEVICES).&#10;예: 0 = 첫 번째 GPU&#10;ngl=0(CPU)일 때는 무시됩니다.">GPU 번호</label>
+                        <select class="gpu-sel" data-f="gpu" title="감지된 GPU 목록"></select>
+                        <label>별칭</label><input data-f="alias" placeholder="(선택)" style="flex:1 1 140px" />
+                    </div>
+                    <div class="hint-line">
+                        <b>ngl</b> = GPU 레이어 수 (0=CPU) ·
+                        <b>ctx</b> = 요청당 컨텍스트 ·
+                        <b>parallel</b> = 동시 슬롯 (총 ctx=ctx×parallel) ·
+                        <b>GPU 번호</b> = 쓸 카드 인덱스
+                    </div>
+                    <div class="row">
+                        <button class="mini" data-act="do-add" data-id="${escAttr(agentId)}" data-start="0">추가</button>
+                        <button class="mini go" data-act="do-add" data-id="${escAttr(agentId)}" data-start="1">추가 + 기동</button>
+                        <button class="mini" data-act="close-add">취소</button>
+                        <span class="vram" data-f="vram"></span>
+                    </div>
+                </div>`;
+            }
+
+            // 노드 1개의 완전한 제어 블록 (전체 서버 개요·노드 상세가 공유)
+            function nodeBlock(n) {
+                const rows =
+                    (n.servers || []).map((s) => serverRow(n.id, s)).join("") ||
+                    `<tr><td colspan="6" class="muted">관리 중인 모델 서버가 없습니다.</td></tr>`;
+                return `<div class="ov-node" data-node="${escAttr(n.id)}">
+                    <div class="node-head" style="margin-bottom:6px">
+                        <div>
+                            <span class="pill ${n.status === "up" ? "up" : "down"}"><span class="dot"></span>${n.status}</span>
+                            <span class="id">${escAttr(n.id)}</span><span class="host">${escAttr(n.host)}</span>
+                        </div>
+                        <div>
+                            <button class="mini" data-act="toggle-add" data-id="${escAttr(n.id)}">＋ 모델 추가</button>
+                            <button class="mini warn" data-act="restart-agent" data-id="${escAttr(n.id)}">에이전트 재시작</button>
+                        </div>
+                    </div>
+                    ${resHtml(n.metrics)}
+                    ${addFormHtml(n.id)}
+                    <table class="srv">
+                        <thead><tr><th>모델 서버</th><th>티어</th><th>장치</th><th>상태</th><th>역할</th><th class="acts">제어</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>`;
+            }
+
+            function renderNode(n) {
+                $("main").innerHTML = nodeBlock(n);
+                if (openAdd === n.id) populateModels(n.id);
+                fillEditorGpus();
+            }
+
+            // ===== 모델 추가 폼 =====
+            async function loadMc(id) {
+                if (mcCache[id]) return mcCache[id];
+                const d = await fetch(
+                    `/api/agents/${encodeURIComponent(id)}/modelconfig`,
+                ).then((r) => r.json());
+                mcCache[id] = d;
+                return d;
+            }
+            const addForm = () => document.querySelector(".add-form");
+
+            function fillGpuSelectEl(sel, id, preferred) {
+                if (!sel) return;
+                const gpus = nodeById(id)?.metrics?.gpus || [];
+                const pref =
+                    preferred != null && String(preferred).trim() !== ""
+                        ? String(preferred).trim()
+                        : sel.value || "";
+                if (!gpus.length) {
+                    sel.innerHTML = `<option value="">GPU 없음 (nvidia-smi)</option>`;
+                    if (pref) {
+                        sel.insertAdjacentHTML(
+                            "beforeend",
+                            `<option value="${escAttr(pref)}" selected>${escAttr(pref)}</option>`,
+                        );
+                    }
+                    return;
+                }
+                sel.innerHTML = gpus
+                    .map((g, i) => {
+                        const want = pref.split(",")[0];
+                        const on =
+                            want !== ""
+                                ? String(g.index) === want
+                                : i === 0;
+                        const free =
+                            g.memTotalMb != null && g.memUsedMb != null
+                                ? ` · 여유 ${((g.memTotalMb - g.memUsedMb) / 1024).toFixed(1)}GB`
+                                : "";
+                        const label = `GPU ${g.index}${g.name ? ` · ${g.name}` : ""}${free}`;
+                        return `<option value="${escAttr(String(g.index))}"${on ? " selected" : ""}>${escAttr(label)}</option>`;
+                    })
+                    .join("");
+                const ids = new Set(gpus.map((g) => String(g.index)));
+                const want = pref.split(",")[0];
+                if (want && !ids.has(want)) {
+                    sel.insertAdjacentHTML(
+                        "beforeend",
+                        `<option value="${escAttr(pref)}" selected>${escAttr(pref)} (지정값)</option>`,
+                    );
+                }
+            }
+
+            function fillGpuSelect(id, preferred) {
+                const form = addForm();
+                fillGpuSelectEl(form?.querySelector('[data-f="gpu"]'), id, preferred);
+            }
+
+            function fillEditorGpus() {
+                for (const sel of document.querySelectorAll(".editor [data-gpu-for]")) {
+                    fillGpuSelectEl(sel, sel.dataset.gpuFor, sel.dataset.gpuPref);
+                }
+            }
+
+            async function populateModels(id) {
+                const form = addForm();
+                if (!form) return;
+                fillGpuSelect(id);
+                const tier = form.querySelector('[data-f="tier"]').value;
+                const modelSel = form.querySelector('[data-f="model"]');
+                let mc;
+                try {
+                    mc = await loadMc(id);
+                } catch (e) {
+                    modelSel.innerHTML = `<option value="">카탈로그 오류</option>`;
+                    return;
+                }
+                const models = (mc.tiers?.[tier]?.models || []).filter((m) => m.exists);
+                modelSel.innerHTML = models.length
+                    ? models
+                          .map(
+                              (m) =>
+                                  `<option value="${escAttr(m.id)}">${escAttr(m.label)}${m.vramEstimateMb ? ` (~${(m.vramEstimateMb / 1024).toFixed(1)}GB)` : ""}</option>`,
+                          )
+                          .join("")
+                    : `<option value="">사용 가능한 모델 없음</option>`;
+                syncDefaults(id);
+            }
+            function selEntry(id) {
+                const form = addForm();
+                const mc = mcCache[id];
+                if (!form || !mc) return null;
+                const tier = form.querySelector('[data-f="tier"]').value;
+                const mid = form.querySelector('[data-f="model"]').value;
+                return (mc.tiers?.[tier]?.models || []).find((m) => m.id === mid) || null;
+            }
+            function syncDefaults(id) {
+                const form = addForm();
+                const e = selEntry(id);
+                if (!form || !e) return;
+                form.querySelector('[data-f="ngl"]').value = e.ngl ?? 0;
+                form.querySelector('[data-f="ctx"]').value = e.ctx ?? 4096;
+                const tier = form.querySelector('[data-f="tier"]')?.value;
+                const parInput = form.querySelector('[data-f="parallel"]');
+                if (parInput) {
+                    parInput.value =
+                        e.parallel != null
+                            ? e.parallel
+                            : tier === "large"
+                              ? 2
+                              : 4;
+                }
+                fillGpuSelect(id, e.gpu != null && e.gpu !== "" ? e.gpu : undefined);
+                estimate(id);
+            }
+            async function estimateVramReq(id, opts = {}) {
+                const form = addForm();
+                const e = selEntry(id);
+                if (!form || !e) return null;
+                const ngl =
+                    opts.ngl != null
+                        ? Number(opts.ngl)
+                        : Number(form.querySelector('[data-f="ngl"]').value);
+                const ctx =
+                    opts.ctx != null
+                        ? Number(opts.ctx)
+                        : Number(form.querySelector('[data-f="ctx"]').value);
+                const parallel =
+                    opts.parallel != null
+                        ? Number(opts.parallel)
+                        : Number(form.querySelector('[data-f="parallel"]')?.value) ||
+                          4;
+                return fetch(
+                    `/api/agents/${encodeURIComponent(id)}/servers/estimate-vram`,
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            name: e.id,
+                            model: e.path,
+                            mmproj: e.mmproj,
+                            ngl,
+                            ctx,
+                            parallel,
+                            gpu: form.querySelector('[data-f="gpu"]').value.trim(),
+                        }),
+                    },
+                ).then((r) => r.json());
+            }
+
+            async function estimate(id) {
+                const form = addForm();
+                const out = form?.querySelector('[data-f="vram"]');
+                if (!form || !out) return;
+                out.textContent = "VRAM 추정 중…";
+                try {
+                    const d = await estimateVramReq(id);
+                    if (!d || d.error) {
+                        out.textContent = d?.error || "";
+                        return;
+                    }
+                    const need = d.requiredMb
+                        ? `필요 ~${(d.requiredMb / 1024).toFixed(1)}GB`
+                        : "CPU 전용";
+                    const free =
+                        d.freeMb != null ? ` / 여유 ${(d.freeMb / 1024).toFixed(1)}GB` : "";
+                    const tight =
+                        d.requiredMb && d.freeMb != null && d.freeMb < d.requiredMb;
+                    out.innerHTML = `<span style="color:${tight ? "var(--err)" : "var(--muted)"}">${need}${free}${tight ? " ⚠ 부족" : ""}</span>`;
+                } catch (e2) {
+                    out.textContent = "";
+                }
+            }
+
+            /** 남은 VRAM에 맞춰 최대 ngl 탐색 (여유 15% 남김) */
+            async function optimizeNgl(id) {
+                const form = addForm();
+                const out = form?.querySelector('[data-f="vram"]');
+                const nglInput = form?.querySelector('[data-f="ngl"]');
+                if (!form || !selEntry(id) || !nglInput) {
+                    alert("모델을 먼저 선택하세요.");
+                    return;
+                }
+                if (out) out.textContent = "ngl 최적화 중…";
+                try {
+                    const full = await estimateVramReq(id, { ngl: 99 });
+                    if (!full || full.error) throw new Error(full?.error || "추정 실패");
+                    if (full.freeMb == null) {
+                        throw new Error("GPU 가용 VRAM을 확인할 수 없습니다 (nvidia-smi).");
+                    }
+                    const layers = Math.max(1, Number(full.detail?.layers) || 99);
+                    const budget = full.freeMb * 0.85;
+                    let best = 0;
+                    if ((full.requiredMb || 0) <= budget) {
+                        best = layers >= 99 ? 99 : layers;
+                    } else {
+                        let lo = 1;
+                        let hi = layers;
+                        while (lo <= hi) {
+                            const mid = (lo + hi) >> 1;
+                            const est = await estimateVramReq(id, { ngl: mid });
+                            if (est?.error) throw new Error(est.error);
+                            if ((est.requiredMb || 0) <= budget) {
+                                best = mid;
+                                lo = mid + 1;
+                            } else {
+                                hi = mid - 1;
+                            }
+                        }
+                    }
+                    nglInput.value = best;
+                    await estimate(id);
+                    if (out) {
+                        const note =
+                            best === 0
+                                ? " · 가용 VRAM 부족 → CPU(ngl=0) 권장"
+                                : best >= layers || best >= 99
+                                  ? ` · 전체 오프로드 (ngl=${best})`
+                                  : ` · 부분 오프로드 ${best}/${layers}층`;
+                        out.insertAdjacentHTML(
+                            "beforeend",
+                            `<span class="muted">${note}</span>`,
+                        );
+                    }
+                } catch (err) {
+                    if (out) out.textContent = "";
+                    alert(err.message || "최적화 실패");
+                }
+            }
+
+            const CTX_STEPS = [
+                512, 1024, 2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152,
+                65536, 98304, 131072,
+            ];
+
+            /** 현재 ngl 기준으로 남은 VRAM에 맞는 최대 ctx */
+            async function optimizeCtx(id) {
+                const form = addForm();
+                const out = form?.querySelector('[data-f="vram"]');
+                const ctxInput = form?.querySelector('[data-f="ctx"]');
+                const ngl = Number(form?.querySelector('[data-f="ngl"]')?.value || 0);
+                if (!form || !selEntry(id) || !ctxInput) {
+                    alert("모델을 먼저 선택하세요.");
+                    return;
+                }
+                if (out) out.textContent = "ctx 최적화 중…";
+                try {
+                    if (ngl <= 0) {
+                        ctxInput.value = 4096;
+                        await estimate(id);
+                        if (out) {
+                            out.insertAdjacentHTML(
+                                "beforeend",
+                                `<span class="muted"> · CPU 모드 → ctx=4096</span>`,
+                            );
+                        }
+                        return;
+                    }
+                    const probe = await estimateVramReq(id, { ctx: 4096 });
+                    if (!probe || probe.error) throw new Error(probe?.error || "추정 실패");
+                    if (probe.freeMb == null) {
+                        throw new Error("GPU 가용 VRAM을 확인할 수 없습니다 (nvidia-smi).");
+                    }
+                    const budget = probe.freeMb * 0.85;
+                    let best = 512;
+                    for (let i = CTX_STEPS.length - 1; i >= 0; i--) {
+                        const c = CTX_STEPS[i];
+                        const est = await estimateVramReq(id, { ctx: c });
+                        if (est?.error) throw new Error(est.error);
+                        if ((est.requiredMb || 0) <= budget) {
+                            best = c;
+                            break;
+                        }
+                    }
+                    // 512도 안 들어가면 최소값 유지 + 경고
+                    const tight512 = await estimateVramReq(id, { ctx: 512 });
+                    if ((tight512?.requiredMb || 0) > budget) {
+                        best = 512;
+                    }
+                    ctxInput.value = best;
+                    await estimate(id);
+                    if (out) {
+                        const note =
+                            (tight512?.requiredMb || 0) > budget
+                                ? " · ctx 최소도 VRAM 부족 — ngl을 낮추세요"
+                                : ` · ctx=${best} (현재 ngl 기준)`;
+                        out.insertAdjacentHTML(
+                            "beforeend",
+                            `<span class="muted">${note}</span>`,
+                        );
+                    }
+                } catch (err) {
+                    if (out) out.textContent = "";
+                    alert(err.message || "ctx 최적화 실패");
+                }
+            }
+
+            async function call(method, path, body) {
+                const r = await fetch(path, {
+                    method,
+                    headers: body ? { "Content-Type": "application/json" } : undefined,
+                    body: body ? JSON.stringify(body) : undefined,
+                });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(d.error || `${method} 실패`);
+                return d;
+            }
+
+            // ===== 이벤트 =====
+            document.body.addEventListener("click", async (ev) => {
+                const selEl = ev.target.closest("[data-sel]");
+                if (selEl) {
+                    selected = selEl.dataset.sel;
+                    openEditor = null;
+                    openAdd = null;
+                    frozen = false;
+                    document.body.classList.remove("editor-open");
+                    render();
+                    return;
+                }
+                const el = ev.target.closest("[data-act]");
+                if (!el) return;
+                const { act, id, name, role } = el.dataset;
+
+                if (act === "toggle-add") {
+                    openAdd = openAdd === id ? null : id;
+                    frozen = !!openAdd || !!openEditor;
+                    renderMain();
+                    return;
+                }
+                if (act === "close-add") {
+                    openAdd = null;
+                    frozen = !!openEditor;
+                    renderMain();
+                    return;
+                }
+                if (act === "opt-ngl") {
+                    el.disabled = true;
+                    try {
+                        await optimizeNgl(id);
+                    } finally {
+                        el.disabled = false;
+                    }
+                    return;
+                }
+                if (act === "cpu-ngl") {
+                    const form = addForm();
+                    const nglInput = form?.querySelector('[data-f="ngl"]');
+                    if (nglInput) {
+                        nglInput.value = 0;
+                        await estimate(id);
+                    }
+                    return;
+                }
+                if (act === "opt-ctx") {
+                    el.disabled = true;
+                    try {
+                        await optimizeCtx(id);
+                    } finally {
+                        el.disabled = false;
+                    }
+                    return;
+                }
+                if (act === "reset-ctx") {
+                    const form = addForm();
+                    const ctxInput = form?.querySelector('[data-f="ctx"]');
+                    if (ctxInput) {
+                        ctxInput.value = 4096;
+                        await estimate(id);
+                    }
+                    return;
+                }
+                if (act === "ed-cpu-ngl") {
+                    const ngl = el.closest(".editor")?.querySelector('[data-f="ngl"]');
+                    if (ngl) ngl.value = 0;
+                    return;
+                }
+                if (act === "ed-reset-ctx") {
+                    const ctx = el.closest(".editor")?.querySelector('[data-f="ctx"]');
+                    if (ctx) ctx.value = 4096;
+                    return;
+                }
+                if (act === "edit") {
+                    const key = `${id}::${name}`;
+                    openEditor = openEditor === key ? null : key;
+                    frozen = !!openAdd || !!openEditor;
+                    document.body.classList.toggle("editor-open", !!openEditor);
+                    renderMain();
+                    return;
+                }
+                if (act === "close-editor") {
+                    openEditor = null;
+                    frozen = !!openAdd;
+                    document.body.classList.remove("editor-open");
+                    renderMain();
+                    return;
+                }
+                if (act === "fixed") {
+                    const enabled = el.dataset.on !== "1";
+                    el.classList.toggle("on", enabled);
+                    el.dataset.on = enabled ? "1" : "0";
+                    try {
+                        await call("POST", `/api/agents/${encodeURIComponent(id)}/servers/${encodeURIComponent(name)}/role`, {
+                            role,
+                            enabled,
+                        });
+                        const srv = nodeById(id)?.servers?.find((x) => x.name === name);
+                        if (srv) {
+                            let b = backByUrl.get(srv.url);
+                            if (!b) {
+                                b = { url: srv.url, roles: {} };
+                                backByUrl.set(srv.url, b);
+                            }
+                            b.roles = { ...(b.roles || {}) };
+                            if (role === "solve") {
+                                b.roles.solve = enabled;
+                                b.roles.chat = enabled;
+                            } else {
+                                b.roles[role] = enabled;
+                            }
+                        }
+                        if (role === "security") {
+                            const editor = el.closest(".editor");
+                            const target = editor?.querySelector("[data-sec-row]");
+                            if (target) {
+                                const hint = target.querySelector(".hint");
+                                target.querySelector(".chip-wrap, .muted")?.remove();
+                                if (hint) {
+                                    hint.textContent = enabled
+                                        ? "저장 시 반영"
+                                        : "보안검증 켜면 배정";
+                                }
+                                const mySec = new Set(backByUrl.get(srv?.url)?.securityIds || []);
+                                if (enabled) {
+                                    target.insertAdjacentHTML(
+                                        "beforeend",
+                                        pickHtml("sec", secCatalog.policies || [], mySec),
+                                    );
+                                } else {
+                                    target.insertAdjacentHTML(
+                                        "beforeend",
+                                        `<div class="muted" style="font-size:12px">보안검증 꺼짐</div>`,
+                                    );
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        el.classList.toggle("on", !enabled);
+                        el.dataset.on = enabled ? "0" : "1";
+                        alert(e.message);
+                    }
+                    setTimeout(load, 500);
+                    return;
+                }
+                if (act === "toggle-pick") {
+                    const on = el.dataset.on !== "1";
+                    el.classList.toggle("on", on);
+                    el.dataset.on = on ? "1" : "0";
+                    return;
+                }
+                if (act === "add-skill") {
+                    const box = el.closest(".editor");
+                    const inp = box?.querySelector('[data-f="skill-in"]');
+                    const tags = box?.querySelector('[data-f="skill-tags"]');
+                    const v = (inp?.value || "").trim();
+                    if (!v || !tags) return;
+                    const exists = [...tags.querySelectorAll("[data-skill]")].some(
+                        (t) => t.dataset.skill === v,
+                    );
+                    if (!exists) tags.insertAdjacentHTML("beforeend", skillTagsHtml([v]));
+                    inp.value = "";
+                    inp.focus();
+                    return;
+                }
+                if (act === "rm-skill") {
+                    el.closest(".tag")?.remove();
+                    return;
+                }
+
+                const P = `/api/agents/${encodeURIComponent(id)}`;
+                el.disabled = true;
+                const prev = el.textContent;
+                el.textContent = "…";
+
+                /** 리소스 행(.res-edit) 실행설정을 servers.json 에 먼저 저장 */
+                async function patchResEditIfAny() {
+                    const box =
+                        el.closest(".res-edit") ||
+                        document.querySelector(
+                            `.res-edit[data-res-id="${CSS.escape(id)}"][data-res-name="${CSS.escape(name)}"]`,
+                        );
+                    if (!box || !name) return null;
+                    const nglV = Number(box.querySelector('[data-rf="ngl"]')?.value);
+                    const ctxV = Number(box.querySelector('[data-rf="ctx"]')?.value);
+                    const parV = Number(box.querySelector('[data-rf="parallel"]')?.value);
+                    const gpuV = box.querySelector('[data-rf="gpu"]')?.value.trim() ?? "";
+                    const body = {
+                        ngl: Number.isFinite(nglV) ? nglV : 0,
+                        ctx: Number.isFinite(ctxV) && ctxV >= 512 ? ctxV : 4096,
+                        parallel:
+                            Number.isFinite(parV) && parV >= 1
+                                ? Math.min(32, Math.floor(parV))
+                                : 4,
+                        gpu: nglV > 0 ? gpuV : "",
+                    };
+                    await call("PATCH", `${P}/servers/${encodeURIComponent(name)}`, body);
+                    const srv = nodeById(id)?.servers?.find((x) => x.name === name);
+                    if (srv) {
+                        srv.ngl = body.ngl;
+                        srv.ctx = body.ctx;
+                        srv.parallel = body.parallel;
+                        srv.gpu = body.gpu;
+                        srv.device = body.ngl > 0 ? "gpu" : "cpu";
+                    }
+                    return body;
+                }
+
+                try {
+                    if (act === "restart-agent") {
+                        if (!confirm(`에이전트 "${id}" 를 재시작할까요?\n(관리 중인 llama 프로세스는 유지됩니다)`)) return;
+                        await call("POST", `${P}/restart`);
+                    } else if (act === "start") {
+                        await call("POST", `${P}/servers/${encodeURIComponent(name)}/start`);
+                    } else if (act === "stop") {
+                        await call("POST", `${P}/servers/${encodeURIComponent(name)}/stop`);
+                    } else if (act === "restart") {
+                        // 재시작만 누르면 입력값이 버려지던 문제 → 현재 par/ngl/ctx 먼저 저장
+                        await patchResEditIfAny();
+                        await call("POST", `${P}/servers/${encodeURIComponent(name)}/restart`);
+                    } else if (act === "del") {
+                        if (!confirm(`모델 서버 "${name}" 를 삭제할까요?`)) return;
+                        await call("DELETE", `${P}/servers/${encodeURIComponent(name)}`);
+                    } else if (act === "save-editor" || act === "save-restart") {
+                        const box = el.closest(".editor");
+                        const msg = box.querySelector('[data-f="editor-msg"]');
+                        const roleIds = [...box.querySelectorAll('.chip[data-kind="role"].on')].map(
+                            (c) => c.dataset.pid,
+                        );
+                        const securityIds = [...box.querySelectorAll('.chip[data-kind="sec"].on')].map(
+                            (c) => c.dataset.pid,
+                        );
+                        const pending = box.querySelector('[data-f="skill-in"]')?.value.trim();
+                        const skills = [...box.querySelectorAll("[data-skill]")].map(
+                            (t) => t.dataset.skill,
+                        );
+                        if (pending && !skills.includes(pending)) skills.push(pending);
+                        const alias = box.querySelector('[data-f="alias"]').value.trim();
+                        const nglV = Number(box.querySelector('[data-f="ngl"]')?.value);
+                        const ctxV = Number(box.querySelector('[data-f="ctx"]')?.value);
+                        const parV = Number(box.querySelector('[data-f="parallel"]')?.value);
+                        const gpuV = box.querySelector('[data-f="gpu"]')?.value.trim() ?? "";
+                        const body = {
+                            roleIds,
+                            skills,
+                            alias,
+                            ngl: Number.isFinite(nglV) ? nglV : 0,
+                            ctx: Number.isFinite(ctxV) && ctxV >= 512 ? ctxV : 4096,
+                            parallel:
+                                Number.isFinite(parV) && parV >= 1
+                                    ? Math.min(32, Math.floor(parV))
+                                    : 4,
+                            gpu: nglV > 0 ? gpuV : "",
+                        };
+                        if (box.querySelector('.chip[data-kind="sec"], [data-sec-row]'))
+                            body.securityIds = securityIds;
+                        await call("PATCH", `${P}/servers/${encodeURIComponent(name)}`, body);
+                        const srvEd = nodeById(id)?.servers?.find((x) => x.name === name);
+                        if (srvEd) {
+                            srvEd.ngl = body.ngl;
+                            srvEd.ctx = body.ctx;
+                            srvEd.parallel = body.parallel;
+                            srvEd.gpu = body.gpu;
+                            srvEd.device = body.ngl > 0 ? "gpu" : "cpu";
+                            if (act === "save-restart") {
+                                srvEd.runningConfig = {
+                                    ngl: body.ngl,
+                                    ctx: body.ctx,
+                                    parallel: body.parallel,
+                                    gpu: body.gpu,
+                                };
+                                srvEd.needsRestart = false;
+                            } else if (srvEd.pid) {
+                                const r = srvEd.runningConfig;
+                                srvEd.needsRestart = r
+                                    ? Number(r.ngl) !== body.ngl ||
+                                      Number(r.ctx) !== body.ctx ||
+                                      Number(r.parallel || 0) !== body.parallel ||
+                                      String(r.gpu || "") !== String(body.gpu || "")
+                                    : true;
+                            }
+                        }
+                        if (act === "save-restart") {
+                            await call("POST", `${P}/servers/${encodeURIComponent(name)}/restart`);
+                        }
+                        if (msg) {
+                            msg.textContent =
+                                act === "save-restart"
+                                    ? "저장·재시작됨"
+                                    : "저장됨 (실행 설정은 재시작 후 반영)";
+                            msg.className = "msg ok";
+                        }
+                        openEditor = null;
+                        frozen = !!openAdd;
+                        document.body.classList.remove("editor-open");
+                    } else if (act === "save-res" || act === "save-res-restart") {
+                        const box = el.closest(".res-edit");
+                        if (!box) return;
+                        const nglV = Number(box.querySelector('[data-rf="ngl"]')?.value);
+                        const ctxV = Number(box.querySelector('[data-rf="ctx"]')?.value);
+                        const parV = Number(box.querySelector('[data-rf="parallel"]')?.value);
+                        const gpuV = box.querySelector('[data-rf="gpu"]')?.value.trim() ?? "";
+                        await call("PATCH", `${P}/servers/${encodeURIComponent(name)}`, {
+                            ngl: Number.isFinite(nglV) ? nglV : 0,
+                            ctx: Number.isFinite(ctxV) && ctxV >= 512 ? ctxV : 4096,
+                            parallel:
+                                Number.isFinite(parV) && parV >= 1
+                                    ? Math.min(32, Math.floor(parV))
+                                    : 4,
+                            gpu: nglV > 0 ? gpuV : "",
+                        });
+                        // 로컬 목록도 즉시 반영
+                        const srv = nodeById(id)?.servers?.find((x) => x.name === name);
+                        if (srv) {
+                            srv.ngl = Number.isFinite(nglV) ? nglV : 0;
+                            srv.ctx = Number.isFinite(ctxV) && ctxV >= 512 ? ctxV : 4096;
+                            srv.parallel =
+                                Number.isFinite(parV) && parV >= 1
+                                    ? Math.min(32, Math.floor(parV))
+                                    : 4;
+                            srv.gpu = nglV > 0 ? gpuV : "";
+                            srv.device = srv.ngl > 0 ? "gpu" : "cpu";
+                            if (act === "save-res-restart") {
+                                srv.runningConfig = {
+                                    ngl: srv.ngl,
+                                    ctx: srv.ctx,
+                                    parallel: srv.parallel,
+                                    gpu: srv.gpu,
+                                };
+                                srv.needsRestart = false;
+                            } else if (srv.pid) {
+                                const r = srv.runningConfig;
+                                srv.needsRestart = r
+                                    ? Number(r.ngl) !== srv.ngl ||
+                                      Number(r.ctx) !== srv.ctx ||
+                                      Number(r.parallel || 0) !== Number(srv.parallel || 0) ||
+                                      String(r.gpu || "") !== String(srv.gpu || "")
+                                    : true;
+                            }
+                        }
+                        if (act === "save-res-restart") {
+                            await call("POST", `${P}/servers/${encodeURIComponent(name)}/restart`);
+                        }
+                        renderMain();
+                        frozen = !!openAdd || !!openEditor;
+                    } else if (act === "do-add") {
+                        const e = selEntry(id);
+                        if (!e) {
+                            alert("모델을 선택하세요.");
+                            return;
+                        }
+                        const form = addForm();
+                        const g = (f) => form.querySelector(`[data-f="${f}"]`);
+                        const nglV = Number(g("ngl").value);
+                        const start = el.dataset.start !== "0";
+                        await call("POST", `${P}/servers`, {
+                            tier: g("tier").value,
+                            modelId: e.id,
+                            model: e.path,
+                            mmproj: e.mmproj || undefined,
+                            ctx: Number(g("ctx").value),
+                            parallel: Number(g("parallel")?.value) || undefined,
+                            ngl: nglV,
+                            gpu: nglV > 0 ? g("gpu").value.trim() : "",
+                            alias: g("alias").value.trim() || undefined,
+                            start,
+                        });
+                        openAdd = null;
+                        frozen = !!openEditor;
+                    }
+                } catch (e) {
+                    alert(e.message);
+                } finally {
+                    el.disabled = false;
+                    el.textContent = prev;
+                    setTimeout(load, act === "restart-agent" ? 2500 : 500);
+                }
+            });
+
+            document.body.addEventListener("focusin", (ev) => {
+                if (ev.target.closest?.(".res-edit, .editor")) {
+                    frozen = true;
+                }
+            });
+            document.body.addEventListener("focusout", (ev) => {
+                // 같은 편집 영역으로 포커스가 이동하면 유지
+                setTimeout(() => {
+                    const a = document.activeElement;
+                    if (a?.closest?.(".res-edit, .editor, .add-form")) {
+                        frozen = true;
+                        return;
+                    }
+                    frozen = !!openAdd || !!openEditor;
+                }, 0);
+            });
+
+            document.body.addEventListener("keydown", (ev) => {
+                if (ev.key !== "Enter") return;
+                const inp = ev.target.closest?.('[data-f="skill-in"]');
+                if (!inp) return;
+                ev.preventDefault();
+                inp.closest(".editor")?.querySelector('[data-act="add-skill"]')?.click();
+            });
+
+            document.body.addEventListener("change", (ev) => {
+                const f = ev.target.closest("[data-f]");
+                if (!f) return;
+                const form = ev.target.closest(".add-form");
+                if (!form) return;
+                const id = form.dataset.id;
+                if (f.dataset.f === "tier") populateModels(id);
+                else if (f.dataset.f === "model") syncDefaults(id);
+                else if (["ngl", "ctx", "parallel", "gpu"].includes(f.dataset.f)) estimate(id);
+            });
+
+            load();
+            setInterval(load, 2000);
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>

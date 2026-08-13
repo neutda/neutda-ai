@@ -1,4 +1,4 @@
-// llama-server 프로세스 제어 (Windows).
+// llama-server 프로세스 제어 (OS=WINDOW | LINUX).
 // servers.json 정의를 읽어 개별 모델 서버를 기동/종료한다.
 // 종료 시 프로세스를 실제로 내려 VRAM/CPU 메모리가 해제된다.
 import { readFile, writeFile, mkdir, stat } from "node:fs/promises";
@@ -7,7 +7,14 @@ import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { normalizeSkill, normalizeSkills } from "./config.js";
+import { config, normalizeSkill, normalizeSkills } from "./config.js";
+import { serverUrl, isLocalDef } from "./serverUrl.js";
+import {
+    isWindows,
+    execOpts,
+    llamaServerBinaryNames,
+    llamaProcessNameHint,
+} from "./platform.js";
 import {
     loadRolesSync,
     normalizeRoleIds,
@@ -145,7 +152,9 @@ async function saveStatusMap(map) {
 
 export async function setStartError(name, error) {
     const map = await loadStatusMap();
+    const prev = map[name] && typeof map[name] === "object" ? map[name] : {};
     map[name] = {
+        ...prev,
         error: String(error || "기동 실패"),
         at: new Date().toISOString(),
     };
@@ -154,9 +163,98 @@ export async function setStartError(name, error) {
 
 export async function clearStartError(name) {
     const map = await loadStatusMap();
-    if (!map[name]) return;
-    delete map[name];
+    const prev = map[name];
+    if (!prev || typeof prev !== "object") return;
+    if (prev.error == null && prev.at == null) return;
+    const next = { ...prev };
+    delete next.error;
+    delete next.at;
+    if (next.running || next.pendingRestart) map[name] = next;
+    else delete map[name];
     await saveStatusMap(map);
+}
+
+/** 기동 성공 시 실제 프로세스에 올린 ngl/ctx/gpu/parallel 기록 (+ 재시작 대기 해제) */
+export async function setRunningConfig(name, def) {
+    const map = await loadStatusMap();
+    const prev = map[name] && typeof map[name] === "object" ? map[name] : {};
+    map[name] = {
+        ...prev,
+        running: {
+            ngl: Number(def?.ngl) || 0,
+            ctx: Number(def?.ctx) > 0 ? Number(def.ctx) : 4096,
+            parallel: resolveParallel(def),
+            gpu: String(def?.gpu ?? "").trim(),
+            at: new Date().toISOString(),
+        },
+    };
+    delete map[name].error;
+    delete map[name].at;
+    delete map[name].pendingRestart;
+    await saveStatusMap(map);
+}
+
+/** ngl/ctx/gpu 적용만 하고 재시작 전인 상태 */
+export async function setPendingRestart(name, pending = true) {
+    const map = await loadStatusMap();
+    const prev = map[name] && typeof map[name] === "object" ? map[name] : {};
+    if (pending) {
+        map[name] = { ...prev, pendingRestart: true };
+    } else if (prev.pendingRestart) {
+        const next = { ...prev };
+        delete next.pendingRestart;
+        if (next.running || next.error) map[name] = next;
+        else delete map[name];
+    } else {
+        return;
+    }
+    await saveStatusMap(map);
+}
+
+function configSig(c) {
+    const par =
+        Number(c?.parallel) > 0
+            ? Math.floor(Number(c.parallel))
+            : "";
+    return `${Number(c?.ngl) || 0}|${Number(c?.ctx) || 0}|${par}|${String(c?.gpu ?? "").trim()}`;
+}
+
+/**
+ * 재시작 필요 여부.
+ * - 실행 중 + pendingRestart(적용만 함) → true
+ * - 실행 중 + running 기록과 정의 불일치 → true
+ * - 실행 중 + 기록 없음 → null(미확인)
+ */
+export function computeNeedsRestart(def, pid, statusRec) {
+    if (pid && statusRec?.pendingRestart) return true;
+    if (!pid) return false;
+    const running = statusRec?.running;
+    if (!running) return null;
+    return configSig(running) !== configSig(def);
+}
+
+/** 이미 떠 있는데 running 기록이 없으면 현재 정의를 베이스라인으로 기록 */
+export async function ensureRunningBaselines(defs) {
+    const map = await loadStatusMap();
+    let changed = false;
+    for (const d of defs) {
+        const pid = await findPidByPort(d.port);
+        if (!pid) continue;
+        const rec = map[d.name];
+        if (rec?.running || rec?.pendingRestart) continue;
+        map[d.name] = {
+            ...(rec && typeof rec === "object" ? rec : {}),
+            running: {
+                ngl: Number(d.ngl) || 0,
+                ctx: Number(d.ctx) > 0 ? Number(d.ctx) : 4096,
+                parallel: resolveParallel(d),
+                gpu: String(d.gpu ?? "").trim(),
+                at: new Date().toISOString(),
+            },
+        };
+        changed = true;
+    }
+    if (changed) await saveStatusMap(map);
 }
 
 /** servers.json 의 LLM 서버 정의 목록 */
@@ -205,6 +303,7 @@ export async function addServerDef({
     modelId,
     ctx,
     ngl,
+    parallel,
     gpu,
     alias,
     skill,
@@ -252,6 +351,15 @@ export async function addServerDef({
             Number.isFinite(Number(ngl)) && Number(ngl) >= 0
                 ? Number(ngl)
                 : (pickNum(entry?.ngl, defaults.ngl, template?.ngl) ?? 0),
+        parallel: (() => {
+            const p = Number(parallel);
+            if (Number.isFinite(p) && p >= 1) return Math.floor(p);
+            const fromTpl = Number(template?.parallel);
+            if (Number.isFinite(fromTpl) && fromTpl >= 1) return Math.floor(fromTpl);
+            // large 는 기본 2, 그 외는 .env LLAMA_PARALLEL
+            if (tier === "large") return 2;
+            return Math.max(1, Number(config.llamaParallel) || 4);
+        })(),
         gpu:
             gpu !== undefined && gpu !== null
                 ? String(gpu)
@@ -292,7 +400,7 @@ export async function addServerDef({
 }
 
 /**
- * 서버 정의 일부 갱신 (alias, roleIds, skills/커스텀, router).
+ * 서버 정의 일부 갱신 (alias, roleIds, skills/커스텀, router, ngl, ctx, gpu).
  * 변경된 정의를 반환. 없으면 null.
  */
 export async function updateServerDef(name, patch = {}) {
@@ -335,7 +443,7 @@ export async function updateServerDef(name, patch = {}) {
         // 보안검증 기능이 꺼진 서버에는 배정 불가
         if (!def.security && Array.isArray(patch.securityIds) && patch.securityIds.length) {
             throw new Error(
-                `"${def.name}" 은(는) 보안검증 기능이 꺼져 있어 보안 정책을 입힐 수 없습니다. 모델 관리에서 보안검증을 먼저 켜세요.`,
+                `"${def.name}" 은(는) 보안검증 기능이 꺼져 있어 보안 정책을 입힐 수 없습니다. 서버/모델관리에서 보안검증을 먼저 켜세요.`,
             );
         }
         const list = normalizeSecurityIds(
@@ -344,6 +452,30 @@ export async function updateServerDef(name, patch = {}) {
         );
         if (list.length) def.securityIds = list;
         else delete def.securityIds;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "ngl")) {
+        const n = Number(patch.ngl);
+        if (!Number.isFinite(n) || n < 0) {
+            throw new Error("ngl 은 0 이상 숫자여야 합니다.");
+        }
+        def.ngl = Math.floor(n);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "ctx")) {
+        const c = Number(patch.ctx);
+        if (!Number.isFinite(c) || c < 512) {
+            throw new Error("ctx 는 512 이상 숫자여야 합니다.");
+        }
+        def.ctx = Math.floor(c);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "parallel")) {
+        const p = Number(patch.parallel);
+        if (!Number.isFinite(p) || p < 1) {
+            throw new Error("parallel 은 1 이상 숫자여야 합니다.");
+        }
+        def.parallel = Math.min(32, Math.floor(p));
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "gpu")) {
+        def.gpu = String(patch.gpu ?? "").trim();
     }
     defs[idx] = def;
     await saveServerDefs(defs);
@@ -507,35 +639,201 @@ export async function removeServerDef(name) {
 
 /** 해당 포트를 LISTENING 중인 PID (없으면 null) */
 export async function findPidByPort(port) {
-    try {
-        const { stdout } = await execFileAsync("netstat", ["-ano", "-p", "TCP"], {
-            windowsHide: true,
-            maxBuffer: 4 * 1024 * 1024,
-        });
-        for (const line of stdout.split(/\r?\n/)) {
-            const m = line
-                .trim()
-                .match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i);
-            if (m && Number(m[1]) === Number(port)) return Number(m[2]);
+    const p = Number(port);
+    if (!Number.isFinite(p) || p <= 0) return null;
+
+    if (isWindows) {
+        try {
+            const { stdout } = await execFileAsync(
+                "netstat",
+                ["-ano", "-p", "TCP"],
+                execOpts({ maxBuffer: 4 * 1024 * 1024 }),
+            );
+            for (const line of stdout.split(/\r?\n/)) {
+                const m = line
+                    .trim()
+                    .match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i);
+                if (m && Number(m[1]) === p) return Number(m[2]);
+            }
+        } catch {
+            // netstat 실패
         }
+        return null;
+    }
+
+    // Linux: ss → lsof → /proc/net/tcp 폴백
+    try {
+        const { stdout } = await execFileAsync(
+            "ss",
+            ["-ltnpH", `sport = :${p}`],
+            execOpts({ maxBuffer: 2 * 1024 * 1024 }),
+        );
+        const m = stdout.match(/pid=(\d+)/i);
+        if (m) return Number(m[1]);
     } catch {
-        // netstat 실패 시 미확인 → null
+        // ss 없거나 권한 부족
+    }
+    try {
+        const { stdout } = await execFileAsync(
+            "lsof",
+            ["-nP", `-iTCP:${p}`, "-sTCP:LISTEN", "-t"],
+            execOpts({ maxBuffer: 1024 * 1024 }),
+        );
+        const pid = Number(String(stdout).trim().split(/\r?\n/)[0]);
+        if (Number.isFinite(pid) && pid > 0) return pid;
+    } catch {
+        // lsof 실패
     }
     return null;
 }
 
+/**
+ * metrics.gpus[].processes 에 로컬 모델 서버 이름/별칭·점유(MB)를 붙인다.
+ * Windows WDDM 에서는 nvidia-smi 가 프로세스 VRAM 을 [N/A] 로내므로
+ * 실행 중 서버는 estimateVram 으로 보강하고, 합이 실측 used 를 넘으면 비례 축소한다.
+ */
+export async function enrichMetricsWithServers(metrics) {
+    if (!metrics?.gpus?.length) return metrics;
+    const defs = (await loadServerDefs()).filter((d) => isLocalDef(d));
+    if (!defs.length) return metrics;
+
+    const servers = (
+        await Promise.all(
+            defs.map(async (d) => {
+                const pid = await findPidByPort(d.port);
+                if (!pid) return null;
+                const { requiredMb } = await estimateVram(d);
+                const gpuRaw = String(d.gpu ?? "").trim();
+                const gpuIndex = gpuRaw === "" ? 0 : Number(gpuRaw.split(",")[0]) || 0;
+                return {
+                    pid,
+                    serverName: d.name,
+                    serverAlias: d.alias || d.name,
+                    port: d.port,
+                    ngl: Number(d.ngl) || 0,
+                    gpuIndex,
+                    estimatedMb: Math.max(0, Number(requiredMb) || 0),
+                };
+            }),
+        )
+    ).filter(Boolean);
+
+    const byPid = new Map(servers.map((s) => [s.pid, s]));
+    const multiGpu = metrics.gpus.length > 1;
+
+    for (const g of metrics.gpus) {
+        const raw = Array.isArray(g.processes) ? g.processes : [];
+        const pidsOnGpu = new Set(raw.map((p) => p.pid));
+        const hasRealMem = raw.some((p) => (Number(p.memUsedMb) || 0) > 0);
+
+        for (const p of raw) {
+            const hit = byPid.get(p.pid);
+            if (!hit) continue;
+            p.serverName = hit.serverName;
+            p.serverAlias = hit.serverAlias;
+            p.port = hit.port;
+            if (!(Number(p.memUsedMb) > 0) && hit.estimatedMb > 0) {
+                p.memUsedMb = hit.estimatedMb;
+                p.estimated = true;
+            }
+        }
+
+        if (hasRealMem) {
+            // 실측 있는 환경: 서버 매칭·양의 메모리만 남김
+            g.processes = raw.filter(
+                (p) =>
+                    byPid.has(p.pid) ||
+                    (Number(p.memUsedMb) || 0) > 0,
+            );
+            continue;
+        }
+
+        // WDDM 등: 이 GPU 위 실행 서버(또는 단일 GPU면 전체) 추정 분해
+        let list = servers.filter((s) => {
+            if (s.estimatedMb <= 0) return false;
+            if (pidsOnGpu.has(s.pid)) return true;
+            if (!multiGpu) return s.gpuIndex === g.index || s.gpuIndex === 0;
+            return s.gpuIndex === g.index;
+        });
+        // pid 가 이 GPU 프로세스 목록에 있으면 그쪽을 우선
+        const onThis = list.filter((s) => pidsOnGpu.has(s.pid));
+        if (onThis.length) list = onThis;
+
+        const used = Number(g.memUsedMb) || 0;
+        const sumEst = list.reduce((a, s) => a + s.estimatedMb, 0);
+        const scale = sumEst > used && used > 0 ? used / sumEst : 1;
+
+        g.processes = list.map((s) => ({
+            pid: s.pid,
+            processName: llamaProcessNameHint(),
+            memUsedMb: Math.max(1, Math.round(s.estimatedMb * scale)),
+            estimated: true,
+            serverName: s.serverName,
+            serverAlias: s.serverAlias,
+            port: s.port,
+        }));
+        g.processesEstimated = true;
+    }
+    return metrics;
+}
+
 /** PID 의 프로세스 이미지 이름 (소문자, 없으면 null) */
 async function processName(pid) {
+    if (isWindows) {
+        try {
+            const { stdout } = await execFileAsync(
+                "tasklist",
+                ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
+                execOpts(),
+            );
+            const m = stdout.match(/^"([^"]+)"/m);
+            return m ? m[1].toLowerCase() : null;
+        } catch {
+            return null;
+        }
+    }
     try {
         const { stdout } = await execFileAsync(
-            "tasklist",
-            ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
-            { windowsHide: true },
+            "ps",
+            ["-p", String(pid), "-o", "comm="],
+            execOpts(),
         );
-        const m = stdout.match(/^"([^"]+)"/m);
-        return m ? m[1].toLowerCase() : null;
+        const name = String(stdout).trim().toLowerCase();
+        return name || null;
     } catch {
-        return null;
+        try {
+            const cmd = await readFile(`/proc/${pid}/comm`, "utf8");
+            return cmd.trim().toLowerCase() || null;
+        } catch {
+            return null;
+        }
+    }
+}
+
+/** llama-server 프로세스만 종료 */
+async function killLlamaPid(pid) {
+    if (isWindows) {
+        await execFileAsync("taskkill", ["/PID", String(pid), "/F"], execOpts());
+        return;
+    }
+    try {
+        process.kill(pid, "SIGTERM");
+    } catch (e) {
+        if (e?.code === "ESRCH") return;
+        throw e;
+    }
+    for (let i = 0; i < 20; i++) {
+        try {
+            process.kill(pid, 0);
+        } catch {
+            return; // 이미 종료
+        }
+        await new Promise((r) => setTimeout(r, 100));
+    }
+    try {
+        process.kill(pid, "SIGKILL");
+    } catch (e) {
+        if (e?.code !== "ESRCH") throw e;
     }
 }
 
@@ -544,6 +842,11 @@ async function processName(pid) {
  * (무관한 프로세스를 죽이지 않도록 이미지 이름 확인)
  */
 export async function stopServer(def) {
+    if (!isLocalDef(def)) {
+        throw new Error(
+            `원격 서버(${def.host})는 부모에서 직접 종료할 수 없습니다 — 하위 관리서버(agent)가 제어합니다.`,
+        );
+    }
     const pid = await findPidByPort(def.port);
     if (!pid) {
         // 의도적 OFF — 이전 기동 실패 사유는 유지(모니터에 남김)
@@ -556,9 +859,7 @@ export async function stopServer(def) {
             `포트 ${def.port} 점유 프로세스(${name ?? `PID ${pid}`})가 llama-server 가 아니어서 종료하지 않습니다.`,
         );
     }
-    await execFileAsync("taskkill", ["/PID", String(pid), "/F"], {
-        windowsHide: true,
-    });
+    await killLlamaPid(pid);
     // 정상 종료는 실패가 아님 → 사유 클리어 후 "OFF" 만 표시
     await clearStartError(def.name).catch(() => {});
     return { ok: true, pid };
@@ -686,6 +987,14 @@ export function gpuOffloadFraction(ngl, layerCount) {
  *
  * @returns {Promise<{ requiredMb: number, detail: object }>}
  */
+/** 동시 처리 슬롯 수(continuous batching). def.parallel 우선, 없으면 config 기본. 최소 1. */
+export function resolveParallel(def) {
+    const p = Number(def?.parallel);
+    return Number.isFinite(p) && p >= 1
+        ? Math.min(32, Math.floor(p))
+        : Math.max(1, Number(config.llamaParallel) || 4);
+}
+
 export async function estimateVram(def) {
     const ngl = Number(def.ngl) || 0;
     if (ngl <= 0) {
@@ -722,8 +1031,10 @@ export async function estimateVram(def) {
         } catch {}
     }
 
-    const ctx = Number(def.ctx) > 0 ? Number(def.ctx) : 4096;
-    // KV·스크래치 대략: 기본 384MB + ctx 2k 당 128MB × 오프로드 비율
+    const perReqCtx = Number(def.ctx) > 0 ? Number(def.ctx) : 4096;
+    const parallel = resolveParallel(def);
+    const ctx = perReqCtx * parallel; // 총 컨텍스트 = 요청당 ctx × 슬롯 수
+    // KV·스크래치 대략: 기본 384MB + (총)ctx 2k 당 128MB × 오프로드 비율
     const kvMb = (384 + (ctx / 2048) * 128) * Math.max(fraction, 0.15);
 
     const requiredMb = Math.round(weightMb + mmprojMb + kvMb);
@@ -736,7 +1047,9 @@ export async function estimateVram(def) {
             weightMb: Math.round(weightMb),
             mmprojMb: Math.round(mmprojMb),
             kvMb: Math.round(kvMb),
-            ctx,
+            ctx: perReqCtx,
+            parallel,
+            totalCtx: ctx,
         },
     };
 }
@@ -755,7 +1068,7 @@ async function gpuFreeMb(gpuId) {
         const { stdout } = await execFileAsync(
             "nvidia-smi",
             ["--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
-            { windowsHide: true, timeout: 4000 },
+            execOpts({ timeout: 4000 }),
         );
         const rows = stdout
             .trim()
@@ -779,25 +1092,102 @@ export async function getGpuFreeMb(gpuId) {
     return gpuFreeMb(gpuId);
 }
 
+/** nvidia-smi 기준 특정 PID 의 GPU 사용량(MB). 없으면 null */
+async function gpuMemUsedByPid(pid) {
+    if (!pid) return null;
+    try {
+        const { stdout } = await execFileAsync(
+            "nvidia-smi",
+            ["--query-compute-apps=pid,used_gpu_memory", "--format=csv,noheader,nounits"],
+            execOpts({ timeout: 4000 }),
+        );
+        let total = 0;
+        let found = false;
+        for (const line of stdout.trim().split(/\r?\n/).filter(Boolean)) {
+            const parts = line.split(",").map((s) => s.trim());
+            if (parts.length < 2) continue;
+            if (Number(parts[0]) !== Number(pid)) continue;
+            found = true;
+            total += Number(parts[1]) || 0;
+        }
+        return found ? total : null;
+    } catch {
+        return null;
+    }
+}
+
+function sameGpuId(a, b) {
+    const ga = String(a ?? "").trim();
+    const gb = String(b ?? "").trim();
+    if (ga === gb) return true;
+    if (!ga && !gb) return true;
+    return ga.split(",")[0] === gb.split(",")[0];
+}
+
 /**
  * GPU 기동 시 가용 VRAM 이 부족하면 예외를 던진다 (시스템 전체 슬로다운 방지).
- * ngl(GPU 레이어 수) 비율을 반영해 필요량을 추정한다.
+ * bonusFreeMb: 곧 해제될(또는 방금 kill 후 아직 안 풀린) 자기 VRAM 보정.
  */
-export async function assertGpuCapacity(def) {
+export async function assertGpuCapacity(def, { bonusFreeMb = 0 } = {}) {
     const { requiredMb, detail } = await estimateVram(def);
     if (requiredMb <= 0) return;
     const freeMb = await gpuFreeMb(def.gpu);
     if (freeMb == null) return; // GPU 조회 불가 → 차단하지 않음
-    if (freeMb < requiredMb) {
+    const availableMb = freeMb + Math.max(0, Number(bonusFreeMb) || 0);
+    if (availableMb < requiredMb) {
         const gb = (mb) => (mb / 1024).toFixed(1);
         const pct = Math.round((detail.fraction ?? 1) * 100);
         throw new Error(
             `GPU 메모리 부족: "${def.name}" 기동에 약 ${gb(requiredMb)}GB 필요 ` +
                 `(ngl=${detail.ngl}/${detail.layers ?? "?"}층 ≈${pct}%, ctx=${detail.ctx})` +
-                ` / 가용 ${gb(freeMb)}GB. ` +
-                `다른 GPU 모델을 내리거나 ngl 을 낮추거나 0(CPU)으로 설정하세요.`,
+                ` / 가용 ${gb(availableMb)}GB` +
+                (bonusFreeMb
+                    ? ` (여유 ${gb(freeMb)} + 회수보정 ~${gb(bonusFreeMb)})`
+                    : "") +
+                `. 다른 GPU 모델을 내리거나 ngl 을 낮추거나 0(CPU)으로 설정하세요.`,
         );
     }
+}
+
+/**
+ * ngl/ctx/gpu 변경 시 VRAM 예상치 검사.
+ * 같은 GPU 에서 재시작·축소면 자기 점유분(실측 우선)을 가용량에 더한다.
+ */
+export async function assertGpuCapacityForUpdate(oldDef, newDef) {
+    const { requiredMb, detail } = await estimateVram(newDef);
+    if (requiredMb <= 0) return { requiredMb: 0, freeMb: null, ok: true };
+    let freeMb = await gpuFreeMb(newDef.gpu);
+    if (freeMb == null) return { requiredMb, freeMb: null, ok: true };
+
+    const sameGpu = sameGpuId(oldDef?.gpu, newDef?.gpu);
+    let reclaimMb = 0;
+    let oldEst = 0;
+    if (sameGpu && Number(oldDef?.ngl) > 0) {
+        oldEst = (await estimateVram(oldDef)).requiredMb || 0;
+        reclaimMb = oldEst;
+        // 동일·축소 재시작은 자기 자리 다시 쓰는 것이므로 통과
+        if (oldEst > 0 && requiredMb <= oldEst * 1.02) {
+            return { requiredMb, freeMb, reclaimMb, ok: true };
+        }
+        const pid = oldDef?.port != null ? await findPidByPort(oldDef.port) : null;
+        if (pid) {
+            const used = await gpuMemUsedByPid(pid);
+            if (used != null) reclaimMb = Math.max(reclaimMb, used);
+        }
+    }
+    const availableMb = freeMb + reclaimMb;
+    if (availableMb < requiredMb) {
+        const gb = (mb) => (mb / 1024).toFixed(1);
+        const pct = Math.round((detail.fraction ?? 1) * 100);
+        throw new Error(
+            `GPU 메모리 부족: "${newDef.name}" 설정에 약 ${gb(requiredMb)}GB 필요 ` +
+                `(ngl=${detail.ngl}/${detail.layers ?? "?"}층 ≈${pct}%, ctx=${detail.ctx})` +
+                ` / 예상 가용 ${gb(availableMb)}GB` +
+                (reclaimMb ? ` (여유 ${gb(freeMb)} + 재시작 회수 ~${gb(reclaimMb)})` : "") +
+                `. ngl·ctx를 낮추거나 다른 GPU를 선택하세요.`,
+        );
+    }
+    return { requiredMb, freeMb: availableMb, reclaimMb, ok: true };
 }
 
 /**
@@ -805,30 +1195,48 @@ export async function assertGpuCapacity(def) {
  * llama-server 를 백그라운드로 띄운다. 로그: llama/logs/server-<port>.log
  * GPU 모델은 기동 전 가용 VRAM 을 점검해 부족하면 차단한다.
  * 실패 시 data/server-status.json 에 사유를 남겨 모니터에 표시한다.
+ * @param {{ bonusFreeMb?: number }} [opts]
  */
-export async function startServer(def) {
+export async function startServer(def, opts = {}) {
     try {
+        if (!isLocalDef(def)) {
+            throw new Error(
+                `원격 서버(${def.host})는 부모에서 직접 기동할 수 없습니다 — 하위 관리서버(agent)가 제어합니다.`,
+            );
+        }
         const existing = await findPidByPort(def.port);
         if (existing) {
             await clearStartError(def.name);
             return { ok: true, alreadyRunning: true, pid: existing };
         }
 
-        await assertGpuCapacity(def);
+        await assertGpuCapacity(def, { bonusFreeMb: opts.bonusFreeMb || 0 });
 
-        let exe = path.join(ROOT, "llama", "llama-server.exe");
-        if (!existsSync(exe)) exe = "llama-server"; // PATH 폴백
+        let exe = null;
+        for (const name of llamaServerBinaryNames()) {
+            const cand = path.join(ROOT, "llama", name);
+            if (existsSync(cand)) {
+                exe = cand;
+                break;
+            }
+        }
+        if (!exe) exe = "llama-server"; // PATH 폴백
 
         const modelPath = path.join(ROOT, def.model);
         if (!existsSync(modelPath)) {
             throw new Error(`모델 파일 없음: ${modelPath}`);
         }
 
+        const slots = resolveParallel(def);
+        const perReqCtx = Number(def.ctx) > 0 ? Number(def.ctx) : 4096;
         const args = [
             "-m", modelPath,
-            "--host", "127.0.0.1",
+            "--host", config.llamaBindHost,
             "--port", String(def.port),
-            "-c", String(def.ctx ?? 4096),
+            // 요청당 컨텍스트(perReqCtx)를 슬롯 수만큼 확보 → 총 컨텍스트 = perReqCtx × slots.
+            // 동시 요청은 continuous batching 으로 병렬 처리(외부 API 동시 호출 대응).
+            "-c", String(perReqCtx * slots),
+            "--parallel", String(slots),
             "-ngl", String(def.ngl ?? 0),
         ];
         if (def.mmproj) {
@@ -853,15 +1261,51 @@ export async function startServer(def) {
             detached: true,
             stdio: ["ignore", out, err],
             env,
-            windowsHide: true,
+            ...execOpts(),
         });
         child.unref();
-        await clearStartError(def.name);
+        await setRunningConfig(def.name, def);
         return { ok: true, pid: child.pid };
     } catch (e) {
         await setStartError(def.name, e.message).catch(() => {});
         throw e;
     }
+}
+
+/**
+ * 종료 후 재기동. 자기 VRAM 이 아직 안 풀린 경우를 bonusFreeMb 로 보정한다.
+ */
+export async function restartServer(def) {
+    const pid = await findPidByPort(def.port);
+    const freeBefore = (await gpuFreeMb(def.gpu)) ?? 0;
+    const usedMb = pid ? await gpuMemUsedByPid(pid) : null;
+    const estMb =
+        Number(def.ngl) > 0 ? (await estimateVram(def)).requiredMb || 0 : 0;
+    const expectReclaim = Math.max(usedMb ?? 0, estMb);
+
+    await stopServer(def).catch(() => {});
+
+    for (let i = 0; i < 25; i++) {
+        if (!(await findPidByPort(def.port))) break;
+        await new Promise((r) => setTimeout(r, 200));
+    }
+    await new Promise((r) => setTimeout(r, 600));
+
+    let stillHeld = 0;
+    if (expectReclaim > 0) {
+        for (let i = 0; i < 12; i++) {
+            const freeAfter = (await gpuFreeMb(def.gpu)) ?? freeBefore;
+            const released = Math.max(0, freeAfter - freeBefore);
+            stillHeld = Math.max(0, expectReclaim - released);
+            if (stillHeld <= expectReclaim * 0.12) {
+                stillHeld = 0;
+                break;
+            }
+            await new Promise((r) => setTimeout(r, 350));
+        }
+    }
+
+    return startServer(def, { bonusFreeMb: stillHeld });
 }
 
 /** 정의 목록 + 실행 상태(PID) + 최근 기동 실패 사유 병합 */
@@ -892,13 +1336,17 @@ export async function serverStatus(defs) {
                 embedding: d.embedding === true,
                 tier: d.tier,
                 port: d.port,
-                url: `http://127.0.0.1:${d.port}`,
+                host: d.host || null,
+                url: serverUrl(d),
                 model: d.model,
                 ctx: d.ctx ?? null,
+                parallel: resolveParallel(d),
                 ngl: d.ngl,
                 gpu: d.gpu ?? "",
                 device: Number(d.ngl) > 0 ? "gpu" : "cpu",
                 pid,
+                runningConfig: errRec?.running ?? null,
+                needsRestart: computeNeedsRestart(d, pid, errRec),
                 startError: pid ? null : (errRec?.error ?? null),
                 startErrorAt: pid ? null : (errRec?.at ?? null),
             };

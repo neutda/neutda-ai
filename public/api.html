@@ -27,20 +27,49 @@
                     sans-serif;
                 background: var(--bg);
                 color: var(--text);
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
             }
             .wrap {
-                max-width: 900px;
-                margin: 0 auto;
-                padding: 22px 20px 64px;
+                max-width: none;
+                width: 100%;
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+                flex: 1;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap > header {
+                flex: 0 0 auto;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                margin: 0;
+                padding: 14px 20px;
+                border-bottom: 1px solid var(--border);
+            }
+            .wrap > header h1 {
+                font-size: 17px;
+                margin: 0;
+            }
+            .app-main {
+                flex: 1;
+                min-height: 0;
+                overflow: auto;
+                padding: 16px 20px 28px;
             }
             h1 {
-                font-size: 18px;
+                font-size: 17px;
                 margin: 0 0 4px;
             }
             p.desc {
+                margin: 0 0 16px;
                 color: var(--muted);
                 font-size: 13px;
-                margin: 0 0 18px;
             }
             label {
                 display: block;
@@ -105,6 +134,51 @@
                 opacity: 0.55;
                 cursor: not-allowed;
             }
+            button.secondary {
+                margin-top: 0;
+                background: transparent;
+                color: var(--text);
+                border: 1px solid var(--border);
+                padding: 8px 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            button.secondary:hover {
+                background: #1c2030;
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .id-actions {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-top: 8px;
+            }
+            .guide {
+                background: rgba(108, 140, 255, 0.08);
+                border: 1px solid rgba(108, 140, 255, 0.25);
+                border-radius: 12px;
+                padding: 14px 16px;
+                margin-bottom: 8px;
+            }
+            .guide h3 {
+                margin: 0 0 8px;
+                font-size: 13px;
+            }
+            .guide ol {
+                margin: 0;
+                padding-left: 18px;
+                color: var(--muted);
+                font-size: 12.5px;
+                line-height: 1.55;
+            }
+            .guide code {
+                color: var(--accent);
+                font-size: 12px;
+            }
+            .guide .id-actions {
+                margin-top: 10px;
+            }
             .card {
                 background: var(--panel);
                 border: 1px solid var(--border);
@@ -168,17 +242,55 @@
                 color: var(--accent);
             }
         </style>
+            <link rel="stylesheet" href="/nav.css" />
     </head>
     <body>
         <div class="wrap">
-            <h1>외부 API 테스트</h1>
+            <header>
+                <h1>외부 API 테스트</h1>
+            </header>
+            <div class="app-main">
             <p class="desc">
                 GET <code>/api/ask</code> 로 질문을 보냅니다.
                 <code>WAIT=N</code>(기본)이면 즉시 "생성중" 응답과 결과 JSON URL
                 을 돌려주고, 결과는 자동으로 가져와 표시합니다.
                 <code>WAIT=Y</code> 면 답변이 끝날 때까지 기다렸다가 최종 결과를
                 바로 반환합니다.
+                기억 테스트는 <code>U_ID</code>(장기) /
+                <code>S_ID</code>(단기)를 넣고 <code>WAIT=Y</code>로 연속
+                호출하는 편이 쉽습니다.
             </p>
+
+            <div class="guide">
+                <h3>기억 기능 빠른 테스트</h3>
+                <ol>
+                    <li>
+                        <strong>단기(S_ID)</strong>: 같은
+                        <code>S_ID</code>로 「내 이름은 민수야」→「내 이름이
+                        뭐야?」 (클라이언트 HISTORY 없이 서버 세션이 이어짐)
+                    </li>
+                    <li>
+                        <strong>장기(U_ID)</strong>: 같은
+                        <code>U_ID</code>로 「나 파이썬 좋아해」보낸 뒤,
+                        <code>S_ID만 새로 만들기</code> 「내가 뭐 좋아한다고
+                        했지?」 → 세션이 바뀌어도 회상
+                    </li>
+                    <li>
+                        둘 다 비우면 기억 비활성(기존 외부 API와 동일)
+                    </li>
+                </ol>
+                <div class="id-actions">
+                    <button type="button" class="secondary" id="fillShort">
+                        단기 시나리오 채우기
+                    </button>
+                    <button type="button" class="secondary" id="fillLong">
+                        장기 시나리오 채우기
+                    </button>
+                    <button type="button" class="secondary" id="fillLongRecall">
+                        장기 회상 질문 + 새 S_ID
+                    </button>
+                </div>
+            </div>
 
             <div class="row">
                 <div>
@@ -216,16 +328,57 @@
                         ></label
                     >
                     <select id="wait">
-                        <option value="N">N (즉시응답 + 폴링)</option>
                         <option value="Y">Y (완료까지 대기)</option>
+                        <option value="N">N (즉시응답 + 폴링)</option>
                     </select>
+                </div>
+            </div>
+
+            <div class="row">
+                <div>
+                    <label
+                        >U_ID
+                        <span class="hint">(장기·개인기억, 선택)</span></label
+                    >
+                    <input
+                        id="uid"
+                        placeholder="예: user-demo-1"
+                        autocomplete="off"
+                    />
+                    <div class="id-actions">
+                        <button type="button" class="secondary" id="newUid">
+                            새 U_ID
+                        </button>
+                        <button type="button" class="secondary" id="clearUid">
+                            비우기
+                        </button>
+                    </div>
+                </div>
+                <div>
+                    <label
+                        >S_ID
+                        <span class="hint">(단기·세션기억, 선택)</span></label
+                    >
+                    <input
+                        id="sid"
+                        placeholder="예: sess-demo-1"
+                        autocomplete="off"
+                    />
+                    <div class="id-actions">
+                        <button type="button" class="secondary" id="newSid">
+                            새 S_ID
+                        </button>
+                        <button type="button" class="secondary" id="clearSid">
+                            비우기
+                        </button>
+                    </div>
                 </div>
             </div>
 
             <label>질문 (q)</label>
             <textarea
                 id="q"
-                placeholder="예: 대한민국의 수도는 어디야?"
+                placeholder="예: 나 파이썬 좋아해 / 내가 뭐 좋아한다고 했지?"
             ></textarea>
 
             <button id="send">요청 보내기</button>
@@ -245,14 +398,16 @@
                 <div class="meta" id="resMeta"></div>
                 <pre id="resRaw"></pre>
             </div>
+            </div>
         </div>
 
         <script>
             const $ = (id) => document.getElementById(id);
+            const LS_UID = "neutda.api.uid";
+            const LS_SID = "neutda.api.sid";
             let resultUrl = null;
             let pollTimer = null;
 
-            // 요청마다 새로 만드는 랜덤 식별 키
             function newRef() {
                 return (
                     "req-" +
@@ -262,62 +417,87 @@
                 );
             }
 
+            function newId(prefix) {
+                return (
+                    prefix +
+                    Date.now().toString(36) +
+                    Math.random().toString(36).slice(2, 6)
+                );
+            }
+
+            function saveIds() {
+                localStorage.setItem(LS_UID, $("uid").value.trim());
+                localStorage.setItem(LS_SID, $("sid").value.trim());
+            }
+
+            function loadIds() {
+                $("uid").value = localStorage.getItem(LS_UID) || "";
+                $("sid").value = localStorage.getItem(LS_SID) || "";
+            }
+
             async function send() {
                 const key = $("key").value.trim();
                 const q = $("q").value.trim();
                 const tier = $("tier").value;
+                const uid = $("uid").value.trim();
+                const sid = $("sid").value.trim();
                 if (!q) {
                     alert("질문(q)을 입력하세요.");
                     return;
                 }
 
+                saveIds();
                 const wait = $("wait").value;
                 const ref = newRef();
                 $("ref").value = ref;
                 const params = new URLSearchParams({ key, q, WAIT: wait, ref });
                 if (tier) params.set("tier", tier);
+                if (uid) params.set("U_ID", uid);
+                if (sid) params.set("S_ID", sid);
                 const url = "/api/ask?" + params.toString();
 
                 $("reqUrl").textContent = location.origin + url;
                 $("resCard").style.display = "none";
                 if (pollTimer) clearInterval(pollTimer);
 
-                if (wait === "Y") {
-                    // WAIT=Y: 즉시응답 없이 결과가 올 때까지 응답을 유지한다.
-                    // 받은 응답이 곧 최종 결과.
-                    $("reqCard").style.display = "none";
-                    $("resCard").style.display = "block";
-                    $("resUrl").textContent = "(WAIT=Y: 응답으로 직접 반환)";
-                    $("resUrl").removeAttribute("href");
-                    renderResult({ status: "waiting" });
+                $("send").disabled = true;
+                try {
+                    if (wait === "Y") {
+                        $("reqCard").style.display = "none";
+                        $("resCard").style.display = "block";
+                        $("resUrl").textContent = "(WAIT=Y: 응답으로 직접 반환)";
+                        $("resUrl").removeAttribute("href");
+                        renderResult({ status: "waiting" });
+                        try {
+                            const r = await fetch(url);
+                            const d = await r.json();
+                            renderResult(d);
+                        } catch (e) {
+                            renderResult({ status: "error", error: e.message });
+                        }
+                        return;
+                    }
+
+                    $("reqCard").style.display = "block";
+                    $("reqTitle").textContent = "즉시 응답";
+                    $("reqResp").textContent = "요청 중…";
                     try {
                         const r = await fetch(url);
                         const d = await r.json();
-                        renderResult(d);
+                        $("reqResp").textContent = JSON.stringify(d, null, 2);
+                        if (!r.ok && d.status !== "error") return;
+                        resultUrl = d.resultUrl;
+                        $("resCard").style.display = "block";
+                        $("resUrl").textContent = location.origin + resultUrl;
+                        $("resUrl").href = resultUrl;
+                        renderResult({ status: "generating" });
+                        poll();
+                        pollTimer = setInterval(poll, 2000);
                     } catch (e) {
-                        renderResult({ status: "error", error: e.message });
+                        $("reqResp").textContent = "요청 실패: " + e.message;
                     }
-                    return;
-                }
-
-                // WAIT=N: 즉시응답 + 결과 링크. 결과는 새로고침으로 확인.
-                $("reqCard").style.display = "block";
-                $("reqTitle").textContent = "즉시 응답";
-                $("reqResp").textContent = "요청 중…";
-                try {
-                    const r = await fetch(url);
-                    const d = await r.json();
-                    $("reqResp").textContent = JSON.stringify(d, null, 2);
-                    if (!r.ok && d.status !== "error") return;
-                    resultUrl = d.resultUrl;
-                    $("resCard").style.display = "block";
-                    $("resUrl").textContent = location.origin + resultUrl;
-                    $("resUrl").href = resultUrl;
-                    renderResult({ status: "generating" });
-                    poll();
-                    pollTimer = setInterval(poll, 2000);
-                } catch (e) {
-                    $("reqResp").textContent = "요청 실패: " + e.message;
+                } finally {
+                    $("send").disabled = false;
                 }
             }
 
@@ -328,8 +508,12 @@
                     badge.textContent = "완료";
                     badge.className = "badge b-done";
                     $("answer").textContent = d.answer || "(빈 응답)";
+                    const mem =
+                        d.U_ID || d.S_ID
+                            ? ` · U_ID: ${d.U_ID ?? "-"} · S_ID: ${d.S_ID ?? "-"}`
+                            : "";
                     $("resMeta").textContent =
-                        `ref: ${d.ref ?? "-"} · 모델: ${d.model ?? "?"} · 티어: ${d.tier ?? "?"}/${d.device ?? "?"} · ${d.elapsedMs ?? "?"}ms`;
+                        `ref: ${d.ref ?? "-"} · 모델: ${d.model ?? "?"} · 티어: ${d.tier ?? "?"}/${d.device ?? "?"}${mem} · ${d.elapsedMs ?? "?"}ms`;
                 } else if (d.status === "error") {
                     badge.textContent = "오류";
                     badge.className = "badge b-err";
@@ -371,6 +555,53 @@
                 }
             }
 
+            $("newUid").addEventListener("click", () => {
+                $("uid").value = newId("user-");
+                saveIds();
+            });
+            $("clearUid").addEventListener("click", () => {
+                $("uid").value = "";
+                saveIds();
+            });
+            $("newSid").addEventListener("click", () => {
+                $("sid").value = newId("sess-");
+                saveIds();
+            });
+            $("clearSid").addEventListener("click", () => {
+                $("sid").value = "";
+                saveIds();
+            });
+            $("uid").addEventListener("change", saveIds);
+            $("sid").addEventListener("change", saveIds);
+
+            $("fillShort").addEventListener("click", () => {
+                if (!$("sid").value.trim()) $("sid").value = newId("sess-");
+                $("wait").value = "Y";
+                $("q").value = "내 이름은 민수야. 기억해줘.";
+                saveIds();
+                $("q").focus();
+            });
+            $("fillLong").addEventListener("click", () => {
+                if (!$("uid").value.trim()) $("uid").value = newId("user-");
+                if (!$("sid").value.trim()) $("sid").value = newId("sess-");
+                $("wait").value = "Y";
+                $("q").value = "나 파이썬 좋아해";
+                saveIds();
+                $("q").focus();
+            });
+            $("fillLongRecall").addEventListener("click", () => {
+                if (!$("uid").value.trim()) {
+                    alert("먼저 U_ID를 넣거나 '장기 시나리오 채우기'를 하세요.");
+                    return;
+                }
+                $("sid").value = newId("sess-");
+                $("wait").value = "Y";
+                $("q").value = "내가 뭐 좋아한다고 했지?";
+                saveIds();
+                $("q").focus();
+            });
+
+            loadIds();
             $("ref").value = newRef();
             $("send").addEventListener("click", send);
         </script>

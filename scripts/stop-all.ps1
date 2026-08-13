@@ -1,20 +1,21 @@
 ﻿<#
-  start-all 로 띄운 Express(node) + 모든 llama-server 를 종료한다.
+  start-all 로 띄운 Express(node) + agent + 모든 llama-server 를 종료한다.
   사용: npm run down
 #>
 [CmdletBinding()]
-param([int]$Port = 3000)
+param(
+    [int]$Port = 0,
+    [int]$AgentPort = 0
+)
 
 $ErrorActionPreference = "SilentlyContinue"
 . "$PSScriptRoot/init-console.ps1"
 
-# Express(해당 포트 점유 node) 종료
-Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-  Select-Object -ExpandProperty OwningProcess -Unique |
-  ForEach-Object { $p = Get-Process -Id $_; Stop-Process -Id $_ -Force; Write-Host "[down] Express 종료 PID=$_ ($($p.ProcessName))" }
+# serve / agent / solo 먼저 종료 (llama 는 아래에서)
+& "$PSScriptRoot/stop-serve-agent.ps1" -Port $Port -AgentPort $AgentPort
 
 # 모든 llama-server 종료
-$llm = Get-Process llama-server
+$llm = Get-Process llama-server -ErrorAction SilentlyContinue
 if ($llm) {
   $llm | ForEach-Object { Stop-Process -Id $_.Id -Force; Write-Host "[down] llama-server 종료 PID=$($_.Id)" }
 } else {

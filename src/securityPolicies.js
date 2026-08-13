@@ -64,7 +64,12 @@ function sanitizePolicy(raw) {
 }
 
 export function loadSecurityPoliciesSync() {
-  if (!existsSync(FILE)) return [];
+  return loadSecurityConfigSync().policies;
+}
+
+/** @returns {{ enabled: boolean, policies: object[] }} */
+export function loadSecurityConfigSync() {
+  if (!existsSync(FILE)) return { enabled: true, policies: [] };
   try {
     const cfg = JSON.parse(readFileSync(FILE, "utf-8"));
     const list = Array.isArray(cfg?.policies)
@@ -82,10 +87,26 @@ export function loadSecurityPoliciesSync() {
       seen.add(p.id);
       out.push(p);
     }
-    return out;
+    return {
+      // 기본 ON. enabled: false 로만 전체 게이트 끔
+      enabled: cfg?.enabled !== false,
+      policies: out,
+    };
   } catch {
-    return [];
+    return { enabled: true, policies: [] };
   }
+}
+
+/** 보안검증 게이트 전역 스위치 */
+export function isSecurityEnabledSync() {
+  return loadSecurityConfigSync().enabled;
+}
+
+export async function setSecurityEnabled(enabled) {
+  const cfg = loadSecurityConfigSync();
+  cfg.enabled = Boolean(enabled);
+  await saveConfig(cfg);
+  return cfg.enabled;
 }
 
 export async function loadSecurityPolicies() {
@@ -93,8 +114,21 @@ export async function loadSecurityPolicies() {
 }
 
 async function savePolicies(policies) {
+  const cfg = loadSecurityConfigSync();
+  await saveConfig({ enabled: cfg.enabled, policies });
+}
+
+async function saveConfig({ enabled, policies }) {
   await mkdir(path.dirname(FILE), { recursive: true });
-  const body = JSON.stringify({ policies }, null, 4) + "\n";
+  const body =
+    JSON.stringify(
+      {
+        enabled: enabled !== false,
+        policies: Array.isArray(policies) ? policies : [],
+      },
+      null,
+      4,
+    ) + "\n";
   await writeFile(FILE, body, "utf-8");
 }
 

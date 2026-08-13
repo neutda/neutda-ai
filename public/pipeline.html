@@ -3,7 +3,7 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>neutda-ai · 파이프라인</title>
+        <title>neutda-ai · 파이프라인 테스트</title>
         <link rel="stylesheet" href="/dashboard.css" />
         <style>
             html,
@@ -22,16 +22,19 @@
                 box-sizing: border-box;
                 display: flex;
                 flex-direction: column;
+                padding: 0;
+                gap: 0;
+            }
+            .pipe-page > .app-main {
+                flex: 1;
+                min-height: 0;
+                overflow: hidden;
                 padding: 12px 20px 12px;
+                display: flex;
+                flex-direction: column;
                 gap: 10px;
             }
-            .pipe-page > header {
-                margin: 0;
-                flex-shrink: 0;
-            }
             .pipe-page > header h1 {
-                margin: 0;
-                font-size: 20px;
                 display: flex;
                 flex-wrap: wrap;
                 align-items: center;
@@ -258,10 +261,24 @@
                 color: var(--muted);
                 margin-left: auto;
             }
+            .step-card .sc-skill {
+                font-size: 10px;
+                color: var(--accent, #3b82f6);
+                border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
+                border-radius: 4px;
+                padding: 1px 6px;
+                margin-left: 6px;
+            }
             .step-card .sc-inst {
                 font-size: 12px;
                 line-height: 1.45;
                 color: var(--text);
+            }
+            .step-card .sc-reads,
+            .step-card .sc-out {
+                font-size: 11px;
+                color: var(--muted);
+                margin-top: 4px;
             }
             .arrow {
                 display: flex;
@@ -426,18 +443,21 @@
                 }
             }
         </style>
+            <link rel="stylesheet" href="/nav.css" />
     </head>
     <body>
         <div class="wrap pipe-page">
             <header>
                 <h1>
-                    파이프라인
+                    파이프라인 테스트
                     <span id="modeBadge" class="route-badge">–</span>
                     <span id="routerBadge" class="route-badge">–</span>
                 </h1>
-                <div><span id="updated" class="updated"></span></div>
+                <div class="tools">
+                    <span id="updated" class="updated"></span>
+                </div>
             </header>
-
+            <div class="app-main">
             <div class="summary mini">
                 <div class="card">
                     <div class="k">파이프라인 실행</div>
@@ -612,6 +632,7 @@
                     </div>
                 </div>
             </div>
+            </div>
         </div>
 
         <script>
@@ -675,15 +696,38 @@
 
                 const chain = p.steps
                     .map(
-                        (s, i) => `
+                        (s, i) => {
+                          const readsRaw = Array.isArray(s.reads) ? s.reads : [];
+                          const readsLabel = readsRaw
+                            .map((r) => {
+                              if (r === "user" || r?.type === "user") return "질문";
+                              if (typeof r === "number") return `#${r + 1}`;
+                              if (r?.type === "step") return `#${(r.i ?? 0) + 1}`;
+                              const n = Number(r);
+                              return Number.isFinite(n) ? `#${n + 1}` : String(r);
+                            })
+                            .join(", ");
+                          const reads = readsLabel
+                            ? `<div class="sc-reads">← 입력: ${esc(readsLabel)}</div>`
+                            : "";
+                          const produces = s.produces
+                            ? `<div class="sc-out">→ ${esc(s.produces)}</div>`
+                            : "";
+                          const skill = s.skill
+                            ? `<span class="sc-skill">${esc(s.skill)}</span>`
+                            : "";
+                          return `
         <div class="step-card">
           <div class="sc-top">
             <span class="sc-i">${i + 1}</span>
             ${tierPill(s.tier)}
             <span class="sc-role">${esc(s.role || "step")}</span>
+            ${skill}
           </div>
           <div class="sc-inst">${esc(s.instruction || "")}</div>
-        </div>`,
+          ${reads}${produces}
+        </div>`;
+                        },
                     )
                     .join('<div class="arrow">↓</div>');
 

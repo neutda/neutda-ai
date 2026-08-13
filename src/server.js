@@ -3,22 +3,54 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
+import { replyLanguageReminder } from "./replyLanguage.js";
 import { toImageUrl } from "./image.js";
 import { pool } from "./pool.js";
+import { serverUrl } from "./serverUrl.js";
+import {
+    registerAgent,
+    deregisterAgent,
+    listAgents,
+    getAgent,
+    startAgentPolling,
+    findAgentByBackendUrl,
+    findAgentByServerName,
+    soleAgentId,
+} from "./agentRegistry.js";
 import { chooseRoute } from "./router.js";
 import {
     createPlan,
     runWorkflow,
     hasSecurityWorkflow,
     runSecurityPreFinal,
-    isTrivialQuestion,
+    isBlankAsk,
 } from "./workflow.js";
-import { needsLongPipeline, runLongContent, chunkText } from "./longContent.js";
+import {
+    needsLongPipeline,
+    runLongContent,
+    chunkText,
+    estimateTokens,
+    isContextOverflowError,
+} from "./longContent.js";
 import { appendHistory, readHistory, clearHistory } from "./history.js";
+import { selectHistoryTurns, formatHistorySnippet } from "./historyContext.js";
 import { getMetrics } from "./metrics.js";
-import { logger, getLogs } from "./logger.js";
+import { logger, getLogs, listLogDates, logDayKey, logFileStats } from "./logger.js";
+import { readLlamaLogs } from "./llamaLogs.js";
+import { isLocalDef } from "./serverUrl.js";
 import * as rag from "./rag.js";
+import * as sessionMemory from "./sessionMemory.js";
+import * as memoryStore from "./memoryStore.js";
+import * as loadSession from "./loadSession.js";
 import { describeImageForRag } from "./ragVision.js";
+import {
+    isRagRequest,
+    formatRagContext,
+    ragSources as buildRagSources,
+    ragSystemAddon,
+    loadRagForRequest,
+    ragRetrieveQuery,
+} from "./ragContext.js";
 import { extractText } from "./extract.js";
 import { loadStats, getStats } from "./stats.js";
 import { parseRouterJson } from "./llmRouter.js";
@@ -36,9 +68,12 @@ import {
     sortDefsByPriority,
     estimateVram,
     getGpuFreeMb,
+    assertGpuCapacityForUpdate,
+    setPendingRestart,
     stripRoleIdFromServers,
     stripSecurityIdFromServers,
     enrichServerWithRoles,
+    enrichMetricsWithServers,
 } from "./serverManager.js";
 import {
     loadRoles,
@@ -51,10 +86,13 @@ import {
 } from "./roles.js";
 import {
     loadSecurityPolicies,
+    loadSecurityConfigSync,
     createSecurityPolicy,
     updateSecurityPolicy,
     deleteSecurityPolicy,
     resolveServerSecurity,
+    setSecurityEnabled,
+    isSecurityEnabledSync,
 } from "./securityPolicies.js";
 import { FIXED_ROLES, isFixedRole } from "./fixedRoles.js";
 import multer from "multer";
@@ -75,7 +113,7 @@ function securityEventBridge(send) {
  * @returns {{ answer, traceExtra, allow, skipped }}
  */
 async function withSecurityPreFinal(q, draft, opts = {}) {
-    if (!hasSecurityWorkflow() || isTrivialQuestion({ ROLE_USER: q })) {
+    if (!hasSecurityWorkflow() || isBlankAsk({ ROLE_USER: q })) {
         return {
             answer: draft,
             traceExtra: [],
@@ -104,10 +142,160 @@ function pipelineStepsOnly(steps) {
     );
 }
 
+/** chat body 에 RAG 검색 결과 부착. strict·0건이면 emptyStrict. */
+/** U_ID / S_ID 정규화 (옵션 문자열). 없으면 null → 기억 비활성 */
+function memoryIds(body) {
+    const rawUid =
+        typeof body?.U_ID === "string"
+            ? body.U_ID
+            : typeof body?.u_id === "string"
+              ? body.u_id
+              : "";
+    const rawSid =
+        typeof body?.S_ID === "string"
+            ? body.S_ID
+            : typeof body?.s_id === "string"
+              ? body.s_id
+              : "";
+    const uid = rawUid.trim();
+    const sid = rawSid.trim();
+    return { uid: uid || null, sid: sid || null };
+}
+
+/** body 에 정규화된 U_ID/S_ID 를 다시 써 둔다 (하위 경로·되쓰기용) */
+function normalizeMemoryIds(body) {
+    if (!body || typeof body !== "object") return { uid: null, sid: null };
+    const { uid, sid } = memoryIds(body);
+    if (uid) body.U_ID = uid;
+    else {
+        delete body.U_ID;
+        delete body.u_id;
+    }
+    if (sid) body.S_ID = sid;
+    else {
+        delete body.S_ID;
+        delete body.s_id;
+    }
+    return { uid, sid };
+}
+
+/** S_ID 있으면 서버 세션 turns 로 HISTORY 교체 (클라이언트 HISTORY 무시) */
+function hydrateSessionHistory(body) {
+    const { sid } = normalizeMemoryIds(body);
+    if (!sid) return;
+    body.HISTORY = sessionMemory.get(sid);
+}
+
+/** U_ID 있으면 개인 기억 회상 → body._memory (문서 RAG 와 별도) */
+async function prepareUserMemory(body) {
+    const { uid } = normalizeMemoryIds(body);
+    if (!uid) {
+        delete body._memory;
+        return;
+    }
+    const q = String(
+        typeof body.ROLE_USER === "string"
+            ? body.ROLE_USER
+            : typeof body.q === "string"
+              ? body.q
+              : "",
+    ).trim();
+    const hits = q ? await memoryStore.recall(uid, q, 4) : [];
+    const context = memoryStore.formatMemoryContext(hits);
+    body._memory = { hits, context };
+    if (hits.length) {
+        logger.info(`개인기억 회상 U_ID=${uid} → ${hits.length}건`);
+    }
+}
+
+/** 채팅 진입: ID 정규화 + 세션 hydrate + 개인 회상 */
+async function prepareChatMemory(body) {
+    normalizeMemoryIds(body);
+    hydrateSessionHistory(body);
+    await prepareUserMemory(body);
+}
+
+/**
+ * 답변 완료 후 단기/장기 되쓰기.
+ * appendHistory(감사로그) 와 별개 — 그 옆에서 호출.
+ * 장기: 사용자 발화만 저장(모델 답변 노이즈 제외). 증류는 Phase 3 후속.
+ */
+async function persistChatMemory(body, question, answer) {
+    const { uid, sid } = memoryIds(body);
+    const q = String(question ?? "").trim();
+    const a = String(answer ?? "");
+    if (!q && !a) return;
+    if (sid) {
+        if (q) sessionMemory.append(sid, { role: "user", content: q });
+        if (a) sessionMemory.append(sid, { role: "assistant", content: a });
+    }
+    if (uid && q && shouldRememberUserUtterance(q)) {
+        try {
+            await memoryStore.remember(uid, q, { source: "user" });
+        } catch (e) {
+            logger.error(`개인기억 저장 실패: ${e.message}`);
+        }
+    }
+}
+
+/** 인사·단답 등 장기기억 가치가 낮은 발화는 skip */
+function shouldRememberUserUtterance(text) {
+    const t = String(text || "").trim();
+    if (t.length < 4) return false;
+    // 순수 인사/감사만이면 저장하지 않음
+    if (
+        /^(안녕|안녕하세요|하이|헬로|hello|hi|ㅎㅎ+|ㅋ+|네|아니요|ㅇㅇ|ㄱㅅ|고마워|감사)[\s!.~]*$/i.test(
+            t,
+        )
+    ) {
+        return false;
+    }
+    return true;
+}
+
+async function prepareChatRag(body, { onStatus } = {}) {
+    if (!isRagRequest(body)) return { active: false };
+    onStatus?.({ phase: "retrieve", message: "문서 검색 중…" });
+    const pack = await loadRagForRequest(body);
+    body._rag = {
+        hits: pack.hits,
+        context: pack.context,
+        sources: pack.sources,
+        strict: pack.strict,
+        topK: pack.topK,
+    };
+                logger.info(
+                    `RAG(chat) 검색 → ${pack.hits.length}건 strict=${pack.strict}` +
+                        (pack.reused ? " (재사용)" : "") +
+                        (pack.retrieveQuery &&
+                        pack.retrieveQuery !==
+                            (typeof body.ROLE_USER === "string"
+                                ? body.ROLE_USER
+                                : "")
+                            ? ` q="…${String(pack.retrieveQuery).slice(-60)}"`
+                            : ""),
+                );
+    return {
+        active: true,
+        emptyStrict: Boolean(pack.emptyStrict),
+        pack,
+        answer: pack.emptyStrict ? "문서 내용에 없습니다." : null,
+    };
+}
+
+function ragResponseFields(body, extra = {}) {
+    if (!body?._rag && !extra.sources) return {};
+    return {
+        rag: true,
+        strict: extra.strict ?? body?._rag?.strict,
+        sources: extra.sources ?? body?._rag?.sources ?? [],
+    };
+}
+
 /** 서버 정의 → 풀 역할 반영 */
 function syncPoolRoles(def) {
     const resolved = resolveServerRoles(def, rolesById(loadRolesSync()));
-    const url = `http://127.0.0.1:${def.port}`;
+    const url = serverUrl(def);
     pool.setRoleAssignment(url, {
         roleIds: resolved.roleIds,
         customSkills: resolved.customSkills,
@@ -123,7 +311,7 @@ async function resyncAllPoolRoles() {
     const map = rolesById(loadRolesSync());
     for (const def of defs) {
         const resolved = resolveServerRoles(def, map);
-        const url = `http://127.0.0.1:${def.port}`;
+        const url = serverUrl(def);
         pool.setRoleAssignment(url, {
             roleIds: resolved.roleIds,
             customSkills: resolved.customSkills,
@@ -154,6 +342,8 @@ async function writeResult(id, data) {
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
+// 첫 화면(루트)은 서버 모니터링으로. 테스트 콘솔은 /index.html 로 접근.
+app.get("/", (_req, res) => res.redirect(302, "/monitor.html"));
 app.use(
     express.static(path.join(__dirname, "..", "public"), {
         etag: false,
@@ -162,6 +352,49 @@ app.use(
         maxAge: 0,
     }),
 );
+
+// ===== 부하 스냅샷 세션 설정 잠금 ====================================
+// recording 중에는 모델/서버/역할/보안 "변경" API 를 전부 409 로 막는다.
+// 세션 = 튜닝 로그이므로 측정 구간 내내 설정이 불변이어야 delta 가 유효.
+// 읽기(GET)·채팅·스냅샷 stop 은 대상 아님. 오직 설정을 바꾸는 쓰기만.
+// (설계: docs/부하-스냅샷-세션.md §2)
+const CONFIG_LOCK_RULES = [
+    ["POST", /^\/api\/servers$/],
+    ["PATCH", /^\/api\/servers\/[^/]+$/],
+    ["DELETE", /^\/api\/servers\/[^/]+$/],
+    ["POST", /^\/api\/servers\/[^/]+\/(start|stop)$/],
+    ["POST", /^\/api\/backends\/(role|security-policy)$/],
+    ["PUT", /^\/api\/security\/enabled$/],
+    ["POST", /^\/api\/roles$/],
+    ["PATCH", /^\/api\/roles\/[^/]+$/],
+    ["DELETE", /^\/api\/roles\/[^/]+$/],
+    ["POST", /^\/api\/security-policies$/],
+    ["PATCH", /^\/api\/security-policies\/[^/]+$/],
+    ["DELETE", /^\/api\/security-policies\/[^/]+$/],
+    ["POST", /^\/api\/agents\/[^/]+\/restart$/],
+    ["POST", /^\/api\/agents\/[^/]+\/servers$/],
+    [
+        "POST",
+        /^\/api\/agents\/[^/]+\/servers\/[^/]+\/(start|stop|restart|role|security-policy)$/,
+    ],
+    ["PATCH", /^\/api\/agents\/[^/]+\/servers\/[^/]+$/],
+    ["DELETE", /^\/api\/agents\/[^/]+\/servers\/[^/]+$/],
+];
+app.use((req, res, next) => {
+    const sess = loadSession.active();
+    if (!sess) return next();
+    const p = req.path;
+    const locked = CONFIG_LOCK_RULES.some(
+        ([m, re]) => m === req.method && re.test(p),
+    );
+    if (!locked) return next();
+    return res.status(409).json({
+        error: "session-locked",
+        sessionId: sess.id,
+        message:
+            "부하 스냅샷 세션 진행 중에는 설정을 변경할 수 없습니다. 세션을 종료한 뒤 변경하세요.",
+    });
+});
 
 /**
  * 요청 body -> OpenAI 형식 messages 로 변환한다.
@@ -173,6 +406,8 @@ app.use(
  *   "TEMPERATURE": 0.7,                   // optional
  *   "content": "이미지 URL/경로/dataURI", // optional (단일 또는 배열)
  *   "HISTORY": [{ role, content }]        // optional (이전 대화 기억용)
+ *   "U_ID": "user-id"                     // optional (장기 개인기억)
+ *   "S_ID": "session-id"                  // optional (단기 세션기억)
  * }
  */
 async function buildMessages(body, promptCharBudget = Infinity) {
@@ -180,6 +415,8 @@ async function buildMessages(body, promptCharBudget = Infinity) {
     const user = body.ROLE_USER;
     const content = body.content;
     const history = Array.isArray(body.HISTORY) ? body.HISTORY : [];
+    const memoryCtx =
+        typeof body?._memory?.context === "string" ? body._memory.context : "";
 
     if (typeof user !== "string" || user.trim() === "") {
         throw new Error(
@@ -190,38 +427,53 @@ async function buildMessages(body, promptCharBudget = Infinity) {
     const messages = [];
     const sysText =
         typeof system === "string" && system.trim() !== "" ? system : "";
-    // 사용자 시스템 지시 + 언어 정책(중국어 드리프트 방지)을 합쳐 시스템 메시지 구성
     const sysParts = [];
     if (sysText) sysParts.push(sysText);
+    if (config.assistantIdentity) sysParts.push(config.assistantIdentity);
     if (config.enforceLanguage) sysParts.push(config.langDirective);
+    sysParts.push(
+        "Never repeat or paraphrase the user's message as your entire reply. " +
+            "Respond as a helpful chat assistant with an original reply in the user's language.",
+    );
+    if (Array.isArray(history) && history.length > 0) {
+        sysParts.push(
+            "Prior conversation turns are included in this request. " +
+                "Use them as context. Do NOT say you cannot remember previous messages or ask the user to paste them again.",
+        );
+    }
+    if (memoryCtx) {
+        sysParts.push(
+            "The following '개인 기억' block contains facts recalled about this user from past sessions. " +
+                "Use them when relevant. Do not invent memories that are not listed.",
+        );
+        sysParts.push(memoryCtx);
+    }
     if (sysParts.length) {
         messages.push({ role: "system", content: sysParts.join("\n\n") });
     }
 
-    // 이전 대화(메모리)를 컨텍스트 초과가 나지 않도록 최신 순으로 예산만큼만 삽입한다.
-    const valid = history.filter(
-        (t) =>
-            t &&
-            (t.role === "user" || t.role === "assistant") &&
-            typeof t.content === "string" &&
-            t.content !== "",
+    // 이전 대화: 긴 턴은 truncate 해서라도 넣고, break로 통째 버리지 않음
+    const histBudget = Math.max(
+        0,
+        Math.min(
+            promptCharBudget - sysText.length - user.length,
+            Math.floor(promptCharBudget * 0.55),
+        ),
     );
-    let remaining = promptCharBudget - sysText.length - user.length;
-    const kept = [];
-    for (let i = valid.length - 1; i >= 0 && remaining > 0; i--) {
-        const turn = valid[i];
-        if (turn.content.length > remaining) break; // 더 오래된 것은 버림
-        remaining -= turn.content.length;
-        kept.push(turn);
-    }
-    kept.reverse();
+    const { turns: kept } = selectHistoryTurns(history, histBudget, {
+        perTurnMax: 800,
+        maxTurns: 12,
+    });
     for (const turn of kept) {
         messages.push({ role: turn.role, content: turn.content });
     }
 
     // 약한 모델(0.5B/3B)은 시스템 지시만으론 언어가 흔들리므로,
     // 질문이 한국어면 사용자 메시지 끝에 한국어 강제 문구를 덧붙인다(생성 직전 recency).
-    const userText = user + koreanReminder(user);
+    const userText =
+        user +
+        koreanReminder(user) +
+        "\n\n(Do not copy or repeat the user's text. Give your own helpful reply.)";
 
     const hasImage =
         content !== undefined && content !== null && content !== "";
@@ -242,12 +494,110 @@ async function buildMessages(body, promptCharBudget = Infinity) {
     return messages;
 }
 
+/** 사용자 발화를 그대로/거의 그대로 따라친 답인지 */
+function isNearEcho(userQ, answer) {
+    const norm = (s) =>
+        String(s ?? "")
+            .normalize("NFC")
+            .replace(/\s+/g, "")
+            .replace(/[.?？!！~…。．，,“”"'‘’·\-_]/g, "")
+            .toLowerCase();
+    const u = norm(userQ);
+    const a = norm(answer);
+    if (u.length < 2 || a.length < 2) return false;
+    if (a === u) return true;
+    // 길이가 비슷할 때만 포함 관계로 에코 판정 (인사가 길어지는 정상 답은 제외)
+    const similarLen =
+        Math.abs(a.length - u.length) <= Math.max(4, Math.floor(u.length * 0.35));
+    if (!similarLen) return false;
+    if (u.length >= 4 && a.includes(u)) return true;
+    if (a.length >= 4 && u.includes(a)) return true;
+    return false;
+}
+
+/**
+ * 에코면 medium 으로 1회 재생성.
+ */
+async function chatWithEchoGuard({
+    body,
+    messages,
+    temperature,
+    maxTokens,
+    enableThinking,
+    preferredTier,
+    preferredDevice,
+    preferredSkill,
+    allowOtherTiers,
+    onMeta,
+}) {
+    const tier = preferredTier;
+
+    const run = (msgs, t) =>
+        pool.chat({
+            messages: msgs,
+            temperature,
+            maxTokens,
+            enableThinking,
+            preferredTier: t,
+            preferredDevice,
+            preferredSkill: t === preferredTier ? preferredSkill : null,
+            allowOtherTiers,
+            onMeta,
+            preview:
+                typeof body?.ROLE_USER === "string"
+                    ? body.ROLE_USER.slice(0, 120)
+                    : "",
+        });
+
+    let out = await run(messages, tier);
+    const q = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
+    if (isNearEcho(q, out.result?.content) && tier !== "large") {
+        logger.warn(
+            `에코 감지 → medium 재시도: "${String(out.result.content).slice(0, 40)}"`,
+        );
+        const retryMessages = [
+            {
+                role: "system",
+                content:
+                    "CRITICAL: Do not echo the user. Give an original helpful reply in the same language.",
+            },
+            ...messages,
+        ];
+        const retry = await run(retryMessages, "medium");
+        if (!isNearEcho(q, retry.result?.content)) {
+            return {
+                content: retry.result.content,
+                reasoning: retry.result.reasoning,
+                tier: retry.tier,
+                device: retry.device,
+                alias: retry.alias,
+                backendUrl: retry.backendUrl,
+                model: retry.model,
+                usage: retry.result.usage,
+                ttftMs: retry.result.ttftMs,
+                echoed: true,
+            };
+        }
+        out = retry;
+    }
+
+    return {
+        content: out.result.content,
+        reasoning: out.result.reasoning,
+        tier: out.tier,
+        device: out.device,
+        alias: out.alias,
+        backendUrl: out.backendUrl,
+        model: out.model,
+        usage: out.result.usage,
+        ttftMs: out.result.ttftMs,
+        echoed: false,
+    };
+}
+
 // 한국어 질문이면 답변 언어를 못박는 짧은 리마인더 (약한 모델의 중국어 드리프트 방지)
 function koreanReminder(text) {
-    if (!config.enforceLanguage) return "";
-    return /[가-힣]/.test(String(text ?? ""))
-        ? "\n\n(답변은 반드시 한국어로만 작성하고, 중국어를 섞지 마세요.)"
-        : "";
+    return replyLanguageReminder(text);
 }
 
 app.get("/health", (_req, res) => {
@@ -262,6 +612,7 @@ app.get("/health", (_req, res) => {
 // 풀/백엔드 모니터링 상태
 app.get("/api/status", (_req, res) => {
     res.json({
+        osMode: config.osMode,
         ...pool.status(),
         routing: {
             ...pool.getRoutingSummary(),
@@ -274,6 +625,215 @@ app.get("/api/status", (_req, res) => {
 // 티어 라우팅 절감 통계
 app.get("/api/stats", (_req, res) => {
     res.json(getStats());
+});
+
+// ===== 부하 스냅샷 세션 (튜닝 계측) =================================
+// 설계: docs/부하-스냅샷-세션.md — Phase 0(delta + 설정 잠금)
+app.post("/api/loadsession/start", async (req, res) => {
+    try {
+        const out = await loadSession.start({
+            label: req.body?.label,
+            note: req.body?.note,
+            force: req.body?.force === true || req.query?.force === "1",
+        });
+        res.status(201).json(out);
+    } catch (err) {
+        const status = err.code === "session-active" ? 409 : 500;
+        res.status(status).json({ error: err.message, code: err.code, activeId: err.activeId });
+    }
+});
+
+app.post("/api/loadsession/stop", async (_req, res) => {
+    try {
+        const report = await loadSession.stop();
+        res.json(report);
+    } catch (err) {
+        const status = err.code === "no-active-session" ? 409 : 500;
+        res.status(status).json({ error: err.message, code: err.code });
+    }
+});
+
+app.get("/api/loadsession/active", (_req, res) => {
+    res.json(loadSession.active());
+});
+
+app.get("/api/loadsession", async (_req, res) => {
+    res.json(await loadSession.list());
+});
+
+app.get("/api/loadsession/:id", async (req, res) => {
+    const s = await loadSession.get(req.params.id);
+    if (!s) return res.status(404).json({ error: "세션을 찾을 수 없습니다." });
+    res.json(s);
+});
+
+app.delete("/api/loadsession/:id", async (req, res) => {
+    try {
+        const out = await loadSession.remove(req.params.id);
+        if (!out.ok) return res.status(404).json({ error: "세션을 찾을 수 없습니다." });
+        res.json(out);
+    } catch (err) {
+        const status = err.code === "session-active" ? 409 : 500;
+        res.status(status).json({ error: err.message, code: err.code });
+    }
+});
+
+// ===== 하위 관리서버(agent) =========================================
+
+// 하위 관리서버 등록/재등록(하트비트). host + 관리 중인 llama 서버 목록 수신.
+app.post("/api/agents/register", (req, res) => {
+    try {
+        const out = registerAgent({
+            id: req.body?.id,
+            agentUrl: req.body?.agentUrl,
+            host: req.body?.host,
+            servers: req.body?.servers,
+        });
+        res.json(out);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// 하위 관리서버 등록 해제(정상 종료) → 관리하던 백엔드도 풀에서 제거
+app.delete("/api/agents/:id", (req, res) => {
+    const ok = deregisterAgent(req.params.id);
+    if (!ok) return res.status(404).json({ error: "등록된 agent 가 아닙니다." });
+    res.json({ ok: true, removed: req.params.id });
+});
+
+// 등록된 하위 관리서버 목록 + 상태 + 최근 메트릭
+app.get("/api/agents", (_req, res) => {
+    res.json({ agents: listAgents() });
+});
+
+/**
+ * 부모 → 특정 agent 로 제어 명령 위임(프록시).
+ * agent 는 자기 머신의 llama 프로세스/파일을 제어한 뒤 결과를 돌려준다.
+ * 서버 목록이 바뀌는 명령(추가/삭제)은 agent 가 곧바로 부모에 재등록해 풀을 갱신한다.
+ */
+async function proxyToAgent(id, method, subPath, body) {
+    const agent = getAgent(id);
+    if (!agent) {
+        return { status: 404, json: { error: `등록된 agent 가 아닙니다: ${id}` } };
+    }
+    const ctrl = new AbortController();
+    // 제어 명령은 모델 로딩·재시작을 포함할 수 있어 폴링보다 넉넉히
+    const timer = setTimeout(() => ctrl.abort(), 60000);
+    try {
+        const res = await fetch(`${agent.agentUrl}${subPath}`, {
+            method,
+            headers: body ? { "Content-Type": "application/json" } : undefined,
+            body: body ? JSON.stringify(body) : undefined,
+            signal: ctrl.signal,
+        });
+        const text = await res.text();
+        let json;
+        try {
+            json = text ? JSON.parse(text) : {};
+        } catch {
+            json = { raw: text };
+        }
+        return { status: res.status, json };
+    } catch (err) {
+        return {
+            status: 502,
+            json: { error: `agent(${id}) 연결 실패: ${err.message}` },
+        };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function sendProxy(res, out) {
+    res.status(out.status).json(out.json);
+}
+
+// agent 자체 재시작
+app.post("/api/agents/:id/restart", async (req, res) => {
+    logger.warn(`하위 관리서버 재시작 요청 ↻ ${req.params.id}`);
+    sendProxy(res, await proxyToAgent(req.params.id, "POST", "/agent/restart"));
+});
+
+// agent 의 모델 카탈로그 (add 폼용)
+app.get("/api/agents/:id/modelconfig", async (req, res) => {
+    sendProxy(res, await proxyToAgent(req.params.id, "GET", "/agent/modelconfig"));
+});
+
+// agent 의 관리 llama 서버 목록 + 실행 상태
+app.get("/api/agents/:id/servers", async (req, res) => {
+    sendProxy(res, await proxyToAgent(req.params.id, "GET", "/agent/servers"));
+});
+
+// agent 머신 기준 VRAM 추정 (배치 판단)
+app.post("/api/agents/:id/servers/estimate-vram", async (req, res) => {
+    sendProxy(
+        res,
+        await proxyToAgent(req.params.id, "POST", "/agent/servers/estimate-vram", req.body),
+    );
+});
+
+// agent 에 llama 서버 추가
+app.post("/api/agents/:id/servers", async (req, res) => {
+    logger.info(`하위 관리서버 llama 추가 요청 ➕ ${req.params.id} [${req.body?.tier}]`);
+    sendProxy(res, await proxyToAgent(req.params.id, "POST", "/agent/servers", req.body));
+});
+
+// agent 의 특정 llama 서버 기동
+app.post("/api/agents/:id/servers/:name/start", async (req, res) => {
+    sendProxy(
+        res,
+        await proxyToAgent(req.params.id, "POST", `/agent/servers/${encodeURIComponent(req.params.name)}/start`),
+    );
+});
+
+// agent 의 특정 llama 서버 종료
+app.post("/api/agents/:id/servers/:name/stop", async (req, res) => {
+    sendProxy(
+        res,
+        await proxyToAgent(req.params.id, "POST", `/agent/servers/${encodeURIComponent(req.params.name)}/stop`),
+    );
+});
+
+// agent 의 특정 llama 서버 재시작
+app.post("/api/agents/:id/servers/:name/restart", async (req, res) => {
+    logger.info(`하위 관리서버 llama 재시작 요청 ↻ ${req.params.id}/${req.params.name}`);
+    sendProxy(
+        res,
+        await proxyToAgent(req.params.id, "POST", `/agent/servers/${encodeURIComponent(req.params.name)}/restart`),
+    );
+});
+
+// agent 의 특정 llama 서버 삭제
+app.delete("/api/agents/:id/servers/:name", async (req, res) => {
+    sendProxy(
+        res,
+        await proxyToAgent(req.params.id, "DELETE", `/agent/servers/${encodeURIComponent(req.params.name)}`),
+    );
+});
+
+// agent 의 특정 llama 서버 역할 변경 (공통역할·커스텀·보안·별칭)
+app.patch("/api/agents/:id/servers/:name", async (req, res) => {
+    sendProxy(
+        res,
+        await proxyToAgent(req.params.id, "PATCH", `/agent/servers/${encodeURIComponent(req.params.name)}`, req.body),
+    );
+});
+
+// agent 의 특정 llama 서버 고정 역할 토글
+app.post("/api/agents/:id/servers/:name/role", async (req, res) => {
+    sendProxy(
+        res,
+        await proxyToAgent(req.params.id, "POST", `/agent/servers/${encodeURIComponent(req.params.name)}/role`, req.body),
+    );
+});
+
+// agent 의 특정 llama 서버 보안 정책 텍스트 저장
+app.post("/api/agents/:id/servers/:name/security-policy", async (req, res) => {
+    sendProxy(
+        res,
+        await proxyToAgent(req.params.id, "POST", `/agent/servers/${encodeURIComponent(req.params.name)}/security-policy`, req.body),
+    );
 });
 
 // ===== 파이프라인(멀티모델 워크플로우) ================================
@@ -356,7 +916,7 @@ app.post("/api/workflow/plan", async (req, res) => {
             mode: "workflow",
             tier: config.longReduceTier,
             difficulty: 100,
-            reason: `긴 입력 ${base.inputChars}자 > ${config.longTriggerChars}자 → ${chunks.length}청크 맵리듀스`,
+            reason: `긴 입력 ${base.inputChars}자/~${estimateTokens(q)}tok (한도 ${config.longTriggerChars}자/${config.longTriggerTokens}tok) → ${chunks.length}청크 맵리듀스`,
             router: null,
             long: {
                 chunks: chunks.length,
@@ -665,7 +1225,7 @@ app.delete("/api/roles/:id", async (req, res) => {
 async function resyncAllPoolSecurity() {
     const defs = await loadServerDefs();
     for (const def of defs) {
-        const url = `http://127.0.0.1:${def.port}`;
+        const url = serverUrl(def);
         const sec = resolveServerSecurity(def);
         pool.setSecurityAssignment(url, {
             securityIds: sec.securityIds,
@@ -679,11 +1239,35 @@ async function resyncAllPoolSecurity() {
 
 app.get("/api/security-policies", async (_req, res) => {
     try {
-        const policies = await loadSecurityPolicies();
-        res.json({ policies });
+        const cfg = loadSecurityConfigSync();
+        res.json({
+            enabled: cfg.enabled,
+            policies: cfg.policies,
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+/** 보안검증 전역 ON/OFF (정책·모델 배정은 유지, 게이트만 끔) */
+app.put("/api/security/enabled", async (req, res) => {
+    try {
+        const raw = req.body?.enabled;
+        if (typeof raw !== "boolean") {
+            return res
+                .status(400)
+                .json({ error: "enabled (boolean) 이 필요합니다." });
+        }
+        const enabled = await setSecurityEnabled(raw);
+        logger.info(`보안검증 전역 ${enabled ? "ON" : "OFF"}`);
+        res.json({ ok: true, enabled });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/api/security/enabled", (_req, res) => {
+    res.json({ enabled: isSecurityEnabledSync() });
 });
 
 app.post("/api/security-policies", async (req, res) => {
@@ -765,6 +1349,7 @@ app.post("/api/servers/estimate-vram", async (req, res) => {
             mmproj: req.body?.mmproj,
             ngl: req.body?.ngl,
             ctx: req.body?.ctx,
+            parallel: req.body?.parallel,
             layers: req.body?.layers,
             gpu: req.body?.gpu,
         });
@@ -775,12 +1360,46 @@ app.post("/api/servers/estimate-vram", async (req, res) => {
     }
 });
 
-// servers.json 정의 + 실행 상태(PID/健康) 목록
+// servers.json 정의 + 실행 상태(PID/健康) 목록.
+// agent 가 등록돼 있으면 모든 노드의 서버를 모아 반환(역할·모니터·채팅과 동일 풀 URL).
+// agent 미등록(부팅 직후)일 때만 로컬 servers.json 폴백.
 app.get("/api/servers", async (_req, res) => {
     try {
+        const byUrl = new Map(pool.backends.map((b) => [b.url, b]));
+        const agentList = listAgents();
+        if (agentList.length) {
+            const chunks = await Promise.all(
+                agentList.map(async (a) => {
+                    const out = await proxyToAgent(a.id, "GET", "/agent/servers");
+                    if (out.status !== 200) {
+                        return (a.servers || []).map((s) => ({
+                            ...s,
+                            agentId: a.id,
+                            running: false,
+                            pid: null,
+                            healthy: byUrl.get(s.url)?.healthy ?? false,
+                            inPool: byUrl.has(s.url),
+                        }));
+                    }
+                    return (out.json.servers || []).map((s) => {
+                        const url = serverUrl({ port: s.port, host: a.host });
+                        return {
+                            ...s,
+                            host: a.host,
+                            url,
+                            agentId: a.id,
+                            running: s.pid != null,
+                            healthy: byUrl.get(url)?.healthy ?? false,
+                            inPool: byUrl.has(url),
+                        };
+                    });
+                }),
+            );
+            return res.json({ servers: chunks.flat() });
+        }
+
         const defs = sortDefsByPriority(await loadServerDefs());
         const list = await serverStatus(defs);
-        const byUrl = new Map(pool.backends.map((b) => [b.url, b]));
         res.json({
             servers: list.map((s) => ({
                 ...s,
@@ -799,10 +1418,43 @@ async function findServerDef(name) {
     return defs.find((d) => d.name === name) ?? null;
 }
 
-// 모델 서버 추가: servers.json 에 영속 + 풀 등록 + 즉시 기동.
-// 이름·포트 자동 할당, 미지정 값은 같은 티어 정의를 템플릿으로 사용.
+/** 서버 제어·역할 변경: 소유 agent 가 있으면 그쪽으로 위임 */
+async function proxyServerIfOwned(res, name, method, suffix = "", body) {
+    const agent = findAgentByServerName(name);
+    if (!agent) return false;
+    sendProxy(
+        res,
+        await proxyToAgent(
+            agent.id,
+            method,
+            `/agent/servers/${encodeURIComponent(name)}${suffix}`,
+            body,
+        ),
+    );
+    return true;
+}
+
+// 모델 서버 추가: agent 등록 시 해당 노드로 위임(단일 노드면 agentId 생략 가능).
+// agent 없으면 로컬 servers.json + 풀 등록(레거시/부팅 전).
 app.post("/api/servers", async (req, res) => {
     try {
+        const agents = listAgents();
+        if (agents.length) {
+            const id =
+                (typeof req.body?.agentId === "string" && req.body.agentId.trim()) ||
+                soleAgentId();
+            if (!id) {
+                return res.status(400).json({
+                    error: '여러 노드가 등록돼 있습니다. "agentId" 를 지정하세요.',
+                });
+            }
+            logger.info(`하위 관리서버 llama 추가 요청 ➕ ${id} [${req.body?.tier}]`);
+            return sendProxy(
+                res,
+                await proxyToAgent(id, "POST", "/agent/servers", req.body),
+            );
+        }
+
         const tier = String(req.body?.tier ?? "").toLowerCase();
         if (!["small", "medium", "large"].includes(tier)) {
             return res.status(400).json({
@@ -815,6 +1467,7 @@ app.post("/api/servers", async (req, res) => {
             modelId: req.body?.modelId,
             ctx: req.body?.ctx,
             ngl: req.body?.ngl,
+            parallel: req.body?.parallel,
             gpu: req.body?.gpu,
             alias: req.body?.alias,
             skill: req.body?.skill,
@@ -822,7 +1475,7 @@ app.post("/api/servers", async (req, res) => {
             roleIds: req.body?.roleIds,
             mmproj: req.body?.mmproj,
         });
-        const url = `http://127.0.0.1:${def.port}`;
+        const url = serverUrl(def);
         const resolved = resolveServerRoles(def, rolesById(loadRolesSync()));
         const secAssign = resolveServerSecurity(def);
         pool.addBackend(
@@ -842,30 +1495,43 @@ app.post("/api/servers", async (req, res) => {
                 security: def.security === true,
                 securityIds: secAssign.securityIds,
                 securityPolicy: secAssign.securityPolicyText,
+                ctx: Number(def.ctx) > 0 ? Number(def.ctx) : 4096,
+                parallel: Number(def.parallel) > 0 ? Number(def.parallel) : undefined,
+                vision: Boolean(def.mmproj && String(def.mmproj).trim()),
             },
         );
-        let r;
-        try {
-            r = await startServer(def);
-        } catch (e) {
-            // 기동 실패(GPU 부족 등) 시 정의·풀 등록 롤백
-            await removeServerDef(def.name).catch(() => {});
-            pool.removeBackend(url);
-            throw e;
+        const shouldStart = req.body?.start !== false;
+        let r = null;
+        if (shouldStart) {
+            try {
+                r = await startServer(def);
+            } catch (e) {
+                // 기동 실패(GPU 부족 등) 시 정의·풀 등록 롤백
+                await removeServerDef(def.name).catch(() => {});
+                pool.removeBackend(url);
+                throw e;
+            }
+            logger.info(
+                `모델 서버 추가+기동 ➕ ${def.name} [${def.tier}] :${def.port} (model=${def.model}, ngl=${def.ngl}, PID ${r.pid ?? "?"})`,
+            );
+        } else {
+            logger.info(
+                `모델 서버 정의 추가 ➕ ${def.name} [${def.tier}] :${def.port} (미기동)`,
+            );
         }
-        logger.info(
-            `모델 서버 추가 ➕ ${def.name} [${def.tier}] :${def.port} (model=${def.model}, ngl=${def.ngl}, PID ${r.pid ?? "?"})`,
-        );
-        res.json({ ok: true, server: def });
+        res.json({ ok: true, server: def, started: shouldStart });
     } catch (err) {
         logger.error(`모델 서버 추가 실패: ${err.message}`);
         res.status(400).json({ error: err.message });
     }
 });
 
-// 모델 서버 정의 수정 (별칭·공통역할·커스텀역할) — servers.json 영속
+// 모델 서버 정의 수정 (별칭·공통역할·커스텀역할) — 소유 agent 또는 로컬 servers.json
 app.patch("/api/servers/:name", async (req, res) => {
     try {
+        if (await proxyServerIfOwned(res, req.params.name, "PATCH", "", req.body)) {
+            return;
+        }
         const patch = {};
         const has = (k) =>
             Object.prototype.hasOwnProperty.call(req.body ?? {}, k);
@@ -874,10 +1540,48 @@ app.patch("/api/servers/:name", async (req, res) => {
         if (has("skills")) patch.skills = req.body.skills; // 커스텀 역할
         else if (has("skill")) patch.skill = req.body.skill;
         if (has("securityIds")) patch.securityIds = req.body.securityIds;
+        if (has("ngl")) patch.ngl = req.body.ngl;
+        if (has("ctx")) patch.ctx = req.body.ctx;
+        if (has("parallel")) patch.parallel = req.body.parallel;
+        if (has("gpu")) patch.gpu = req.body.gpu;
         if (!Object.keys(patch).length) {
             return res.status(400).json({
-                error: "수정할 필드가 없습니다. (alias, roleIds, skills, securityIds)",
+                error: "수정할 필드가 없습니다. (alias, roleIds, skills, securityIds, ngl, ctx, parallel, gpu)",
             });
+        }
+        const runKeys = ["ngl", "ctx", "parallel", "gpu"].filter((k) => has(k));
+        if (runKeys.length) {
+            const defs = await loadServerDefs();
+            const oldDef = defs.find((d) => d.name === req.params.name);
+            if (!oldDef) {
+                return res.status(404).json({
+                    error: `servers.json 에 "${req.params.name}" 정의가 없습니다.`,
+                });
+            }
+            const next = { ...oldDef };
+            if (has("ngl")) {
+                const n = Number(req.body.ngl);
+                if (!Number.isFinite(n) || n < 0) {
+                    return res.status(400).json({ error: "ngl 은 0 이상 숫자여야 합니다." });
+                }
+                next.ngl = Math.floor(n);
+            }
+            if (has("ctx")) {
+                const c = Number(req.body.ctx);
+                if (!Number.isFinite(c) || c < 512) {
+                    return res.status(400).json({ error: "ctx 는 512 이상 숫자여야 합니다." });
+                }
+                next.ctx = Math.floor(c);
+            }
+            if (has("parallel")) {
+                const p = Number(req.body.parallel);
+                if (!Number.isFinite(p) || p < 1) {
+                    return res.status(400).json({ error: "parallel 은 1 이상 숫자여야 합니다." });
+                }
+                next.parallel = Math.min(32, Math.floor(p));
+            }
+            if (has("gpu")) next.gpu = String(req.body.gpu ?? "").trim();
+            await assertGpuCapacityForUpdate(oldDef, next);
         }
         const def = await updateServerDef(req.params.name, patch);
         if (!def) {
@@ -885,7 +1589,10 @@ app.patch("/api/servers/:name", async (req, res) => {
                 error: `servers.json 에 "${req.params.name}" 정의가 없습니다.`,
             });
         }
-        const url = `http://127.0.0.1:${def.port}`;
+        if (runKeys.length) {
+            await setPendingRestart(def.name, true);
+        }
+        const url = serverUrl(def);
         if (has("alias")) {
             pool.setAlias(url, def.alias);
             logger.info(`모델 서버 별칭 변경 ✎ ${def.name} → "${def.alias}"`);
@@ -908,17 +1615,35 @@ app.patch("/api/servers/:name", async (req, res) => {
                 `모델 서버 보안 정책 배정 ✎ ${def.name} · ${sec.securityIds.length}개`,
             );
         }
-        res.json({ ok: true, server });
+        if (runKeys.length) {
+            const b = pool.backends.find((x) => x.url === url);
+            if (b && has("ngl")) b.device = Number(def.ngl) > 0 ? "gpu" : "cpu";
+            if (b && has("ctx")) b.ctx = Number(def.ctx) > 0 ? Number(def.ctx) : 4096;
+            if (b && has("parallel")) {
+                b.parallel =
+                    Number(def.parallel) > 0
+                        ? Math.min(32, Math.floor(Number(def.parallel)))
+                        : b.parallel;
+            }
+            server = enrichServerWithRoles(def);
+            logger.info(
+                `모델 서버 실행설정 ✎ ${def.name} ngl=${def.ngl} ctx=${def.ctx} parallel=${def.parallel ?? "-"} gpu=${def.gpu || "-"} (재시작 후 반영)`,
+            );
+        }
+        res.json({ ok: true, server, needsRestart: runKeys.length > 0 });
     } catch (err) {
         logger.error(`모델 서버 수정 실패 (${req.params.name}): ${err.message}`);
-        const status = /보안검증 기능이 꺼져/.test(err.message) ? 400 : 500;
+        const status = /보안검증 기능이 꺼져|ngl|ctx|parallel|GPU 메모리/.test(err.message)
+            ? 400
+            : 500;
         res.status(status).json({ error: err.message });
     }
 });
 
-// 모델 서버 삭제: 프로세스 종료 + servers.json 정의 제거 + 풀에서 제외
+// 모델 서버 삭제: 소유 agent 위임 또는 로컬 종료+정의 제거
 app.delete("/api/servers/:name", async (req, res) => {
     try {
+        if (await proxyServerIfOwned(res, req.params.name, "DELETE")) return;
         const def = await findServerDef(req.params.name);
         if (!def) {
             return res.status(404).json({
@@ -931,7 +1656,7 @@ app.delete("/api/servers/:name", async (req, res) => {
             logger.warn(`서버 삭제 중 종료 실패(${def.name}): ${e.message}`);
         }
         await removeServerDef(def.name);
-        pool.removeBackend(`http://127.0.0.1:${def.port}`);
+        pool.removeBackend(serverUrl(def));
         logger.warn(`모델 서버 삭제 🗑 ${def.name} [${def.tier}] :${def.port}`);
         res.json({ ok: true, removed: def.name });
     } catch (err) {
@@ -943,6 +1668,7 @@ app.delete("/api/servers/:name", async (req, res) => {
 // 모델 서버 종료 (프로세스 kill → VRAM/메모리 해제)
 app.post("/api/servers/:name/stop", async (req, res) => {
     try {
+        if (await proxyServerIfOwned(res, req.params.name, "POST", "/stop")) return;
         const def = await findServerDef(req.params.name);
         if (!def) {
             return res
@@ -961,9 +1687,10 @@ app.post("/api/servers/:name/stop", async (req, res) => {
     }
 });
 
-// 모델 서버 기동 (servers.json 정의대로 llama-server 실행)
+// 모델 서버 기동 — 소유 agent 가 있으면 그 머신에서 spawn (부모가 직접 띄우지 않음)
 app.post("/api/servers/:name/start", async (req, res) => {
     try {
+        if (await proxyServerIfOwned(res, req.params.name, "POST", "/start")) return;
         const def = await findServerDef(req.params.name);
         if (!def) {
             return res
@@ -973,7 +1700,7 @@ app.post("/api/servers/:name/start", async (req, res) => {
         const r = await startServer(def);
         // 기동 후에도 servers.json 의 router 플래그 복원 (풀 상태 동기화)
         if (def.router === true) {
-            pool.setRoleEnabled(`http://127.0.0.1:${def.port}`, "router", true);
+            pool.setRoleEnabled(serverUrl(def), "router", true);
         }
         logger.info(
             `모델 서버 기동 ▶ ${def.name} [${def.tier}] :${def.port}${r.alreadyRunning ? " (이미 실행 중)" : ` (PID ${r.pid}, 모델 로딩 중)`}${def.router ? " [router]" : ""}`,
@@ -986,7 +1713,7 @@ app.post("/api/servers/:name/start", async (req, res) => {
 });
 
 // 백엔드 고정 역할 개별 on·off (해결·라우터·파이프라인설계·임베딩·보안검증)
-// 모두 servers.json 에 저장 ("chat"→solve, "pipeline"→planner 별칭)
+// agent 소유 URL 이면 해당 노드 servers.json 에 저장 → 재등록으로 풀 동기화
 app.post("/api/backends/role", async (req, res) => {
     const url = typeof req.body?.url === "string" ? req.body.url.trim() : "";
     const role = String(req.body?.role ?? "").toLowerCase();
@@ -995,6 +1722,24 @@ app.post("/api/backends/role", async (req, res) => {
         return res.status(400).json({
             error: `"url"(string), "role"(${FIXED_ROLES.map((r) => `"${r}"`).join("|")}|\"chat\"), "enabled"(boolean) 이 필요합니다.`,
         });
+    }
+    const owner = findAgentByBackendUrl(url);
+    if (owner) {
+        const def = owner.servers.find((s) => serverUrl(s) === url);
+        if (!def) {
+            return res.status(404).json({ error: "해당 URL 의 백엔드를 찾을 수 없습니다." });
+        }
+        const out = await proxyToAgent(
+            owner.id,
+            "POST",
+            `/agent/servers/${encodeURIComponent(def.name)}/role`,
+            { role, enabled },
+        );
+        if (out.status >= 400) return sendProxy(res, out);
+        if (String(role).toLowerCase() === "security" || role === "보안검증") {
+            await resyncAllPoolSecurity();
+        }
+        return res.json({ ok: true, ...pool.status() });
     }
     if (!pool.setRoleEnabled(url, role, enabled)) {
         return res.status(404).json({ error: "해당 URL 의 백엔드를 찾을 수 없습니다." });
@@ -1032,6 +1777,23 @@ app.post("/api/backends/security-policy", async (req, res) => {
             error: `"url"(string), "policy"(string) 이 필요합니다.`,
         });
     }
+    const owner = findAgentByBackendUrl(url);
+    if (owner) {
+        const def = owner.servers.find((s) => serverUrl(s) === url);
+        if (!def) {
+            return res
+                .status(404)
+                .json({ error: "해당 URL 의 백엔드를 찾을 수 없습니다." });
+        }
+        const out = await proxyToAgent(
+            owner.id,
+            "POST",
+            `/agent/servers/${encodeURIComponent(def.name)}/security-policy`,
+            { policy },
+        );
+        if (out.status >= 400) return sendProxy(res, out);
+        return res.json({ ok: true, ...pool.status() });
+    }
     if (!pool.setSecurityPolicy(url, policy)) {
         return res
             .status(404)
@@ -1052,27 +1814,404 @@ app.post("/api/backends/security-policy", async (req, res) => {
     res.json({ ok: true, ...pool.status() });
 });
 
-// 시스템 자원(GPU/CPU/RAM) 실시간 지표
+// 시스템 자원(GPU/CPU/RAM) 실시간 지표 (+ 모델별 VRAM)
 app.get("/api/metrics", async (_req, res) => {
     try {
-        res.json(await getMetrics());
+        res.json(await enrichMetricsWithServers(await getMetrics()));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// 로그 조회 (level=all|info|warn|error)
-app.get("/api/logs", (req, res) => {
-    const level = String(req.query.level || "all");
-    const limit = Number(req.query.limit);
-    const sinceId = Number(req.query.sinceId);
-    res.json({
-        items: getLogs({
-            level,
-            limit: Number.isFinite(limit) ? limit : 300,
-            sinceId: Number.isFinite(sinceId) ? sinceId : 0,
-        }),
+// ===== 로그 (관리서버 Express + 하위 agent + llama 파일) ==============
+
+function tagExpressLogs(items) {
+    return items.map((e) => ({
+        ...e,
+        source: {
+            kind: "express",
+            id: "express",
+            label: "관리서버 (Express)",
+        },
+    }));
+}
+
+function sortLogItems(items) {
+    return [...items].sort((a, b) => {
+        const ta = new Date(a.ts || 0).getTime();
+        const tb = new Date(b.ts || 0).getTime();
+        if (ta !== tb) return ta - tb;
+        const ia = typeof a.id === "number" ? a.id : 0;
+        const ib = typeof b.id === "number" ? b.id : 0;
+        return ia - ib;
     });
+}
+
+function takeLast(items, limit) {
+    if (!limit || items.length <= limit) return items;
+    return items.slice(-limit);
+}
+
+/** YYYY-MM-DD 또는 null */
+function parseLogDate(raw) {
+    const d = String(raw || "").trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
+}
+
+/** 로컬 날짜 키로 항목 필터 (llama 등 파일에 day 분할이 없을 때) */
+function filterItemsByDay(items, day) {
+    if (!day) return items;
+    return items.filter((e) => {
+        if (!e?.ts) return true;
+        const t = new Date(e.ts).getTime();
+        // epoch/무효 시각(구버전 플레이스홀더) → 살아 있는 파일 로그로 간주하고 포함
+        if (!Number.isFinite(t) || t <= 0) return true;
+        return logDayKey(new Date(e.ts)) === day;
+    });
+}
+
+/** 사용 가능한 일별 로그 날짜 */
+app.get("/api/logs/dates", (_req, res) => {
+    try {
+        const today = logDayKey();
+        const dates = listLogDates();
+        res.json({
+            today,
+            dates,
+            dir: "data/logs",
+            files: logFileStats(today),
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/** 클러스터 전체 로그 소스 목록 — 등록된 agent 레지스트리 기준(항상 표시) */
+app.get("/api/logs/sources", async (_req, res) => {
+    try {
+        const sources = [
+            {
+                kind: "express",
+                id: "express",
+                label: "관리서버 (Express)",
+            },
+        ];
+        // solo: agent 메모리는 Express 와 동일 버퍼 → 중복 제외
+        const skipAgentMem = config.agent.solo;
+        const agents = listAgents();
+
+        for (const a of agents) {
+            if (!skipAgentMem) {
+                sources.push({
+                    kind: "agent",
+                    id: `agent:${a.id}`,
+                    agentId: a.id,
+                    host: a.host,
+                    status: a.status,
+                    label: `하위 관리서버 ${a.id}`,
+                });
+            }
+            for (const s of a.servers || []) {
+                sources.push({
+                    kind: "llama",
+                    id: `llama:${a.id}:${s.port}`,
+                    agentId: a.id,
+                    port: s.port,
+                    name: s.name,
+                    alias: s.alias,
+                    tier: s.tier,
+                    label: `${s.alias || s.name} :${s.port}`,
+                });
+            }
+        }
+
+        // agent 가 새 API 를 지원하면 hasOut/hasErr 보강 (실패해도 목록은 유지)
+        await Promise.all(
+            agents.map(async (a) => {
+                const out = await proxyToAgent(a.id, "GET", "/agent/logs/sources");
+                if (out.status !== 200) return;
+                for (const s of out.json.sources || []) {
+                    if (s.kind !== "llama") continue;
+                    const hit = sources.find((x) => x.id === s.id);
+                    if (hit) {
+                        hit.hasOut = s.hasOut;
+                        hit.hasErr = s.hasErr;
+                    }
+                }
+            }),
+        );
+
+        res.json({
+            sources,
+            solo: !!config.agent.solo,
+            agentCount: agents.length,
+            today: logDayKey(),
+            logDates: listLogDates(),
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * llama 로그: agent 프록시 → 실패 시 로컬 호스트면 부모에서 파일 직접 읽기
+ */
+async function fetchLlamaLogItems(agentId, port, { level, limit, stream, date }) {
+    const q = new URLSearchParams({
+        level: String(level || "all"),
+        limit: String(limit || 400),
+        stream: String(stream || "both"),
+    });
+    if (date) q.set("date", date);
+    const out = await proxyToAgent(
+        agentId,
+        "GET",
+        `/agent/logs/llama/${encodeURIComponent(port)}?${q}`,
+    );
+    if (out.status === 200) return out.json.items || [];
+
+    const agent = getAgent(agentId);
+    if (agent && isLocalDef({ host: agent.host })) {
+        let items = await readLlamaLogs(port, {
+            limit,
+            stream: ["out", "err", "both"].includes(stream) ? stream : "both",
+        });
+        if (level && level !== "all") {
+            items = items.filter((e) => e.level === level);
+        }
+        items = filterItemsByDay(items, date);
+        const def = (agent.servers || []).find(
+            (s) => Number(s.port) === Number(port),
+        );
+        const label = def
+            ? `${def.alias || def.name} :${port}`
+            : `llama :${port}`;
+        return items.map((e) => ({
+            ...e,
+            source: {
+                kind: "llama",
+                id: `llama:${agentId}:${port}`,
+                label,
+                agentId,
+                port: Number(port),
+                name: def?.name,
+                stream: e.stream,
+                via: "parent-local",
+            },
+        }));
+    }
+    const err = out.json?.error || `agent 로그 조회 실패 HTTP ${out.status}`;
+    throw Object.assign(new Error(err), { status: out.status });
+}
+
+/**
+ * 로그 조회.
+ * source=express | agent:<id> | llama:<agentId>:<port> | all
+ * date=YYYY-MM-DD → 일별 파일(관리서버/agent). 없으면 오늘 파일.
+ */
+app.get("/api/logs", async (req, res) => {
+    try {
+        const level = String(req.query.level || "all");
+        const limit = Number.isFinite(Number(req.query.limit))
+            ? Number(req.query.limit)
+            : 400;
+        const sinceId = Number(req.query.sinceId);
+        const source = String(req.query.source || "express").trim();
+        const date = parseLogDate(req.query.date) || logDayKey();
+        const today = logDayKey();
+        const fileOpts = {
+            level,
+            limit,
+            sinceId: Number.isFinite(sinceId) ? sinceId : 0,
+            date,
+        };
+
+        if (source === "express" || source === "") {
+            return res.json({
+                source,
+                date,
+                today,
+                files: logFileStats(date),
+                items: tagExpressLogs(getLogs(fileOpts)),
+            });
+        }
+
+        if (source.startsWith("agent:")) {
+            const agentId = source.slice("agent:".length);
+            const agent = getAgent(agentId);
+            if (!agent) {
+                return res.status(404).json({
+                    error: `등록된 하위 관리서버가 없습니다: ${agentId}`,
+                });
+            }
+            const q = new URLSearchParams({
+                level,
+                limit: String(limit),
+                date,
+            });
+            const out = await proxyToAgent(
+                agentId,
+                "GET",
+                `/agent/logs?${q}`,
+            );
+            if (out.status !== 200) {
+                return res.status(out.status).json({
+                    error:
+                        out.json?.error ||
+                        `하위 관리서버(${agentId}) 로그 API 없음 — agent 를 최신 코드로 재시작하세요`,
+                    items: [],
+                    date,
+                    today,
+                });
+            }
+            return res.json({
+                source,
+                date,
+                today,
+                items: out.json.items || [],
+            });
+        }
+
+        if (source.startsWith("llama:")) {
+            const rest = source.slice("llama:".length);
+            const colon = rest.lastIndexOf(":");
+            if (colon < 0) {
+                return res.status(400).json({
+                    error: "source 형식: llama:<agentId>:<port>",
+                });
+            }
+            const agentId = rest.slice(0, colon);
+            const port = rest.slice(colon + 1);
+            const stream = String(req.query.stream || "both");
+            try {
+                const items = await fetchLlamaLogItems(agentId, port, {
+                    level,
+                    limit,
+                    stream,
+                    date,
+                });
+                return res.json({ source, date, today, items });
+            } catch (e) {
+                return res.status(e.status || 502).json({
+                    error: e.message,
+                    items: [],
+                    date,
+                    today,
+                });
+            }
+        }
+
+        if (source === "all") {
+            const bags = [];
+            const skipAgentMem = config.agent.solo;
+            const agents = listAgents();
+            // 관리서버 Express (일별 파일)
+            bags.push(tagExpressLogs(getLogs({
+                level,
+                limit: Math.min(limit, 400),
+                sinceId: 0,
+                date,
+            })));
+            // 하위 관리서버 프로세스 + 각 노드의 llama 파일 로그
+            await Promise.all(
+                agents.map(async (a) => {
+                    if (!skipAgentMem) {
+                        const q = new URLSearchParams({
+                            level,
+                            limit: String(Math.min(limit, 300)),
+                            date,
+                        });
+                        const mem = await proxyToAgent(
+                            a.id,
+                            "GET",
+                            `/agent/logs?${q}`,
+                        );
+                        if (mem.status === 200) {
+                            bags.push(mem.json.items || []);
+                        }
+                    }
+                    await Promise.all(
+                        (a.servers || []).map(async (s) => {
+                            try {
+                                const items = await fetchLlamaLogItems(
+                                    a.id,
+                                    s.port,
+                                    {
+                                        level,
+                                        limit: Math.min(limit, 200),
+                                        stream: "both",
+                                        date,
+                                    },
+                                );
+                                bags.push(items);
+                            } catch {
+                                // 개별 실패는 전체 병합에서 건너뜀
+                            }
+                        }),
+                    );
+                }),
+            );
+            const flat = bags.flat();
+            const merged = takeLast(sortLogItems(flat), limit);
+            return res.json({
+                source: "all",
+                date,
+                today,
+                files: logFileStats(date),
+                items: merged,
+                meta: {
+                    express: bags[0]?.length ?? 0,
+                    parts: bags.length,
+                    total: flat.length,
+                    returned: merged.length,
+                    agents: agents.length,
+                    models: agents.reduce(
+                        (n, a) => n + (a.servers || []).length,
+                        0,
+                    ),
+                },
+            });
+        }
+
+        res.status(400).json({
+            error: "source 는 express | agent:<id> | llama:<agentId>:<port> | all",
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// agent 로그 프록시 (직접 접근용)
+app.get("/api/agents/:id/logs", async (req, res) => {
+    const q = new URLSearchParams();
+    if (req.query.level) q.set("level", String(req.query.level));
+    if (req.query.limit) q.set("limit", String(req.query.limit));
+    if (req.query.date) q.set("date", String(req.query.date));
+    const qs = q.toString();
+    sendProxy(
+        res,
+        await proxyToAgent(
+            req.params.id,
+            "GET",
+            `/agent/logs${qs ? `?${qs}` : ""}`,
+        ),
+    );
+});
+
+app.get("/api/agents/:id/logs/llama/:port", async (req, res) => {
+    const q = new URLSearchParams();
+    if (req.query.level) q.set("level", String(req.query.level));
+    if (req.query.limit) q.set("limit", String(req.query.limit));
+    if (req.query.stream) q.set("stream", String(req.query.stream));
+    const qs = q.toString();
+    sendProxy(
+        res,
+        await proxyToAgent(
+            req.params.id,
+            "GET",
+            `/agent/logs/llama/${encodeURIComponent(req.params.port)}${qs ? `?${qs}` : ""}`,
+        ),
+    );
 });
 
 /**
@@ -1204,10 +2343,57 @@ app.delete("/api/history", async (_req, res) => {
     }
 });
 
+/**
+ * 서버측 기억 삭제.
+ * body/query: U_ID(장기), S_ID(단기). 둘 다 없으면 400.
+ */
+app.delete("/api/memory", async (req, res) => {
+    try {
+        const body = req.body ?? {};
+        const uid =
+            typeof body.U_ID === "string"
+                ? body.U_ID.trim()
+                : typeof req.query.U_ID === "string"
+                  ? req.query.U_ID.trim()
+                  : typeof req.query.u_id === "string"
+                    ? req.query.u_id.trim()
+                    : "";
+        const sid =
+            typeof body.S_ID === "string"
+                ? body.S_ID.trim()
+                : typeof req.query.S_ID === "string"
+                  ? req.query.S_ID.trim()
+                  : typeof req.query.s_id === "string"
+                    ? req.query.s_id.trim()
+                    : "";
+        if (!uid && !sid) {
+            return res.status(400).json({
+                error: "U_ID 또는 S_ID 가 필요합니다.",
+            });
+        }
+        const out = { ok: true };
+        if (sid) {
+            sessionMemory.clear(sid);
+            out.sessionCleared = true;
+            out.S_ID = sid;
+        }
+        if (uid) {
+            const r = await memoryStore.forget(uid);
+            out.userCleared = true;
+            out.userRemoved = r.removed;
+            out.U_ID = uid;
+        }
+        res.json(out);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // 외부 API: 백그라운드에서 답변을 생성해 결과 JSON 파일에 기록한다.
 async function processAsk(id, body, ref) {
     const started = Date.now();
     try {
+        await prepareChatMemory(body);
         const route = await chooseRoute(body);
         logger.info(
             `라우팅 [ask #${id}] → tier=${route.tier} device=${route.device} 난이도=${route.difficulty}${route.routerBackend ? ` router@${route.routerBackend}` : ""} (${route.reason})`,
@@ -1240,6 +2426,7 @@ async function processAsk(id, body, ref) {
             preferredDevice: route.device,
         });
 
+        const { uid, sid } = memoryIds(body);
         const data = {
             status: "done",
             id,
@@ -1251,10 +2438,13 @@ async function processAsk(id, body, ref) {
             tier: usedTier,
             device: usedDevice,
             backend: backendUrl,
+            U_ID: uid || undefined,
+            S_ID: sid || undefined,
             elapsedMs: Date.now() - started,
             finishedAt: new Date().toISOString(),
         };
         await writeResult(id, data);
+        await persistChatMemory(body, body.ROLE_USER, result.content);
         logger.info(
             `ask 완료 #${id} tier=${usedTier} device=${usedDevice ?? "-"} ${Date.now() - started}ms`,
         );
@@ -1303,6 +2493,18 @@ app.get("/api/ask", async (req, res) => {
         TEMPERATURE: req.query.temperature,
         MODEL_TIER:
             typeof req.query.tier === "string" ? req.query.tier : undefined,
+        U_ID:
+            typeof req.query.U_ID === "string"
+                ? req.query.U_ID
+                : typeof req.query.u_id === "string"
+                  ? req.query.u_id
+                  : undefined,
+        S_ID:
+            typeof req.query.S_ID === "string"
+                ? req.query.S_ID
+                : typeof req.query.s_id === "string"
+                  ? req.query.s_id
+                  : undefined,
     };
 
     await writeResult(id, {
@@ -1361,13 +2563,50 @@ app.post("/api/chat/stream", async (req, res) => {
                 ? config.enableThinking
                 : Boolean(body.THINKING);
 
-        // 긴 입력(컨텍스트 초과) → 청크 맵리듀스 파이프라인으로 처리
-        if (needsLongPipeline(body)) {
+        await prepareChatMemory(body);
+
+        // RAG: 문서 검색 후 파이프라인/단일에 컨텍스트 주입 (긴입력 맵리듀스와 분리)
+        const ragPrep = await prepareChatRag(body, {
+            onStatus: (s) => send("status", s),
+        });
+        if (ragPrep.emptyStrict) {
+            const payload = {
+                answer: ragPrep.answer,
+                model: config.modelName,
+                mode: "direct",
+                totalMs: Date.now() - started,
+                ...ragResponseFields(body),
+            };
+            send("meta", { rag: true, sources: [], strict: true });
+            send("done", payload);
+            appendHistory({
+                id:
+                    Date.now().toString(36) +
+                    Math.random().toString(36).slice(2, 8),
+                ts: new Date().toISOString(),
+                user: q,
+                answer: payload.answer,
+                model: payload.model,
+                mode: "direct",
+                ...ragResponseFields(body),
+            }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+            persistChatMemory(body, q, payload.answer);
+            return res.end();
+        }
+        if (ragPrep.active) {
+            send("meta", {
+                rag: true,
+                sources: body._rag.sources,
+                strict: body._rag.strict,
+                hits: body._rag.hits.length,
+            });
+        }
+
+        // 긴 입력(컨텍스트 초과) → 청크 맵리듀스 (RAG 요청은 검색 컨텍스트만 쓰므로 스킵)
+        if (!ragPrep.active && needsLongPipeline(body)) {
             logger.info(
                 `긴 입력 감지 [chat/stream] ${q.length}자 → 맵리듀스 파이프라인`,
             );
-            const holdFinal =
-                hasSecurityWorkflow() && !isTrivialQuestion({ ROLE_USER: q });
             const out = await runLongContent({
                 body,
                 temperature,
@@ -1384,7 +2623,7 @@ app.post("/api/chat/stream", async (req, res) => {
                     else if (ev.type === "step_done")
                         send("step", { ...ev, status: "done" });
                     else if (ev.type === "step_meta") send("meta", ev);
-                    else if (ev.type === "token" && !holdFinal)
+                    else if (ev.type === "token")
                         send("token", { text: ev.text });
                 },
             });
@@ -1394,7 +2633,6 @@ app.post("/api/chat/stream", async (req, res) => {
                 stepIndex: Array.isArray(out.steps) ? out.steps.length : 0,
             });
             const answer = sec.answer;
-            if (holdFinal) send("token", { text: answer });
             const workflowSteps = pipelineStepsOnly(out.steps);
             const workflowTrace = [
                 ...(out.trace || []),
@@ -1454,6 +2692,7 @@ app.post("/api/chat/stream", async (req, res) => {
                 workflowSteps,
                 workflowTrace,
             }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+            persistChatMemory(body, body.ROLE_USER, answer);
 
             logger.info(
                 `chat(stream/long) ${out.trace.filter((n) => n.kind === "model").length}단계 ${Date.now() - started}ms`,
@@ -1463,9 +2702,13 @@ app.post("/api/chat/stream", async (req, res) => {
 
         const plan = await createPlan(body);
         const useWorkflow = plan.mode === "workflow" && plan.steps?.length > 1;
+        // 보안 게이트가 켜져 있으면 검사 통과 전까지 답을 감춘다(작성 중/점검 중만 표시)
+        const securityHold =
+            hasSecurityWorkflow() && !isBlankAsk({ ROLE_USER: q });
 
         send("meta", {
             mode: useWorkflow ? "workflow" : "direct",
+            securityHold,
             routedTier: plan.tier,
             routedDevice: plan.device,
             difficulty: plan.difficulty,
@@ -1497,10 +2740,19 @@ app.post("/api/chat/stream", async (req, res) => {
                 enableThinking,
                 onEvent: (ev) => {
                     if (ev.type === "plan") send("workflow", ev);
+                    else if (ev.type === "rag")
+                        send("meta", {
+                            rag: true,
+                            sources: ev.sources,
+                            hits: ev.hits,
+                            strict: ev.strict,
+                        });
                     else if (ev.type === "step_start") send("step", { ...ev, status: "start" });
                     else if (ev.type === "step_done") send("step", { ...ev, status: "done" });
                     else if (ev.type === "step_meta") send("meta", ev);
                     else if (ev.type === "token") send("token", { text: ev.text });
+                    else if (ev.type === "security_start" || ev.type === "security_done")
+                        send("security", ev);
                 },
             });
 
@@ -1537,6 +2789,10 @@ app.post("/api/chat/stream", async (req, res) => {
                 routerModel: plan.routerModel || null,
                 workflowSteps: pipelineStepsOnly(out.steps),
                 workflowTrace: out.trace,
+                ...ragResponseFields(body, {
+                    sources: out.sources,
+                    strict: out.strict,
+                }),
             });
 
             appendHistory({
@@ -1566,7 +2822,12 @@ app.post("/api/chat/stream", async (req, res) => {
                 routerModel: plan.routerModel || null,
                 workflowSteps: pipelineStepsOnly(out.steps),
                 workflowTrace: out.trace,
+                ...ragResponseFields(body, {
+                    sources: out.sources,
+                    strict: out.strict,
+                }),
             }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+            persistChatMemory(body, body.ROLE_USER, out.answer);
 
             logger.info(
                 `chat(stream/workflow) ${plan.steps.map((s) => s.tier).join("→")} ${Date.now() - started}ms`,
@@ -1575,53 +2836,160 @@ app.post("/api/chat/stream", async (req, res) => {
         }
 
         // ---- 단일 모델 (direct) ----
-        const isLarge = plan.tier === "large";
-        const promptCharBudget = isLarge
-            ? config.maxPromptCharsLarge
-            : config.maxPromptCharsSmall;
+        let directTier = plan.tier;
+        let directDevice = plan.device;
+        let directAllowOther = config.escalateTier;
+        let messages;
+        if (ragPrep.active) {
+            const ragRoute = await chooseRagRoute({
+                q,
+                hits: body._rag.hits,
+                questionContent: body.content,
+                body,
+            });
+            // 이미지 등은 RAG 라우팅 우선, 그 외는 플랜 티어와 병합(더 큰 쪽)
+            const rank = { small: 0, medium: 1, large: 2 };
+            const pick =
+                (rank[ragRoute.tier] ?? 0) >= (rank[plan.tier] ?? 0)
+                    ? ragRoute.tier
+                    : plan.tier;
+            directTier = pick;
+            directDevice = ragRoute.device ?? plan.device;
+            directAllowOther = ragRoute.allowOtherTiers ?? config.escalateTier;
+            messages = await buildRagMessages({
+                q,
+                hits: body._rag.hits,
+                strict: body._rag.strict,
+                questionContent: body.content,
+                system:
+                    typeof body.ROLE_SYSTEM === "string"
+                        ? body.ROLE_SYSTEM
+                        : undefined,
+                history: body.HISTORY,
+                memoryContext: body._memory?.context,
+            });
+            logger.info(
+                `라우팅 [chat/stream/rag] → tier=${directTier} (${ragRoute.reason}; plan=${plan.tier})`,
+            );
+        } else {
+            const isLarge = plan.tier === "large";
+            const promptCharBudget = isLarge
+                ? config.maxPromptCharsLarge
+                : config.maxPromptCharsSmall;
+            messages = await buildMessages(body, promptCharBudget);
+            logger.info(
+                `라우팅 [chat/stream] → tier=${plan.tier}${plan.skill ? ` skill="${plan.skill}"` : ""} device=${plan.device} 난이도=${plan.difficulty}${plan.routerBackend ? ` router@${plan.routerBackend}` : ""} (${plan.reason})`,
+            );
+        }
+        // 인사 패턴으로 small 을 막지 않음 — 라우터 티어를 존중. 에코만 사후 보정.
+        const isLarge = directTier === "large";
         const maxTokens = isLarge
             ? config.defaultMaxTokens
             : config.maxTokensSmall;
-        const holdFinal =
-            hasSecurityWorkflow() && !isTrivialQuestion({ ROLE_USER: q });
-        logger.info(
-            `라우팅 [chat/stream] → tier=${plan.tier}${plan.skill ? ` skill="${plan.skill}"` : ""} device=${plan.device} 난이도=${plan.difficulty}${plan.routerBackend ? ` router@${plan.routerBackend}` : ""} (${plan.reason})`,
-        );
 
-        const messages = await buildMessages(body, promptCharBudget);
+        // 짧은 대화는 스트리밍 대신 에코 가드 채팅
+        const useEchoGuard = !ragPrep.active && String(q).length <= 240;
 
-        let firstLogged = false;
-        const out = await pool.chatStream({
-            messages,
-            temperature,
-            maxTokens,
-            enableThinking,
-            preferredTier: plan.tier,
-            preferredDevice: plan.device,
-            preferredSkill: plan.skill ?? null,
-            onMeta: (m) => {
-                send("meta", m);
-                logger.info(
-                    `백엔드 선택 [chat/stream] → ${m.tier}/${m.device ?? "-"} @ ${m.backend} (model=${m.model ?? "?"})`,
-                );
-            },
-            onToken: (t) => {
-                if (!firstLogged) {
-                    firstLogged = true;
-                    logger.debug(
-                        `첫 토큰 수신 [chat/stream] (${Date.now() - started}ms)`,
+        let out;
+        if (useEchoGuard) {
+            const guarded = await chatWithEchoGuard({
+                body,
+                messages,
+                temperature,
+                maxTokens,
+                enableThinking,
+                preferredTier: directTier,
+                preferredDevice: directDevice,
+                preferredSkill: plan.skill ?? null,
+                allowOtherTiers: directAllowOther,
+                onMeta: (m) => {
+                    send("meta", m);
+                    logger.info(
+                        `백엔드 선택 [chat/stream/guard] → ${m.tier}/${m.device ?? "-"} @ ${m.backend}`,
                     );
-                }
-                if (!holdFinal) send("token", { text: t });
-            },
-        });
+                },
+            });
+            if (guarded.content && !securityHold)
+                send("token", { text: guarded.content });
+            out = {
+                content: guarded.content,
+                reasoning: guarded.reasoning,
+                tier: guarded.tier,
+                device: guarded.device,
+                alias: guarded.alias,
+                backendUrl: guarded.backendUrl,
+                model: guarded.model,
+                usage: guarded.usage,
+                ttftMs: guarded.ttftMs,
+            };
+        } else {
+            let firstLogged = false;
+            out = await pool.chatStream({
+                messages,
+                temperature,
+                maxTokens,
+                enableThinking: ragPrep.active ? false : enableThinking,
+                preferredTier: directTier,
+                preferredDevice: directDevice,
+                preferredSkill: plan.skill ?? null,
+                allowOtherTiers: directAllowOther,
+                onQueue: (qInfo) => {
+                    send("status", {
+                        phase: "queue",
+                        message: `대기열 ${qInfo.position}번째 (실행 ${qInfo.running}/${qInfo.maxInFlight})`,
+                        ...qInfo,
+                    });
+                },
+                onMeta: (m) => {
+                    send("meta", m);
+                    logger.info(
+                        `백엔드 선택 [chat/stream] → ${m.tier}/${m.device ?? "-"} @ ${m.backend} (model=${m.model ?? "?"})`,
+                    );
+                },
+                onToken: (t) => {
+                    if (!firstLogged) {
+                        firstLogged = true;
+                        logger.debug(
+                            `첫 토큰 수신 [chat/stream] (${Date.now() - started}ms)`,
+                        );
+                    }
+                    // 보안 게이트 대기 중이면 토큰을 감춘다(통과 후 done 에서 공개)
+                    if (!securityHold) send("token", { text: t });
+                },
+            });
+            // 스트리밍 후에도 에코면 medium 재생성으로 교체
+            if (isNearEcho(q, out.content) && directTier !== "large") {
+                logger.warn("stream 에코 → medium 재생성으로 교체");
+                const guarded = await chatWithEchoGuard({
+                    body,
+                    messages,
+                    temperature,
+                    maxTokens,
+                    enableThinking: false,
+                    preferredTier: "medium",
+                    preferredDevice: directDevice,
+                    preferredSkill: null,
+                    allowOtherTiers: true,
+                });
+                out = {
+                    ...out,
+                    content: guarded.content,
+                    reasoning: guarded.reasoning,
+                    tier: guarded.tier,
+                    device: guarded.device,
+                    alias: guarded.alias,
+                    backendUrl: guarded.backendUrl,
+                    model: guarded.model,
+                    usage: guarded.usage,
+                };
+            }
+        }
 
         const sec = await withSecurityPreFinal(q, out.content, {
             onEvent: securityEventBridge(send),
             stepIndex: 1,
         });
         const answer = sec.answer;
-        if (holdFinal) send("token", { text: answer });
         // 보안은 파이프라인 steps 에 넣지 않음 — trace 에만 기록
         const workflowTrace = [
             {
@@ -1671,6 +3039,7 @@ app.post("/api/chat/stream", async (req, res) => {
             routerDevice: plan.routerDevice || null,
             routerModel: plan.routerModel || null,
             workflowTrace,
+            ...ragResponseFields(body),
         });
 
         appendHistory({
@@ -1701,13 +3070,306 @@ app.post("/api/chat/stream", async (req, res) => {
             routerDevice: plan.routerDevice || null,
             routerModel: plan.routerModel || null,
             workflowTrace,
+            ...ragResponseFields(body),
         }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+        persistChatMemory(body, body.ROLE_USER, answer);
 
         logger.info(
             `chat(stream) tier=${out.tier} device=${out.device ?? "-"} ttft=${out.ttftMs ?? "?"}ms tps=${tokensPerSec ?? "?"} ${out.totalMs}ms`,
         );
         res.end();
     } catch (err) {
+        if (
+            isContextOverflowError(err) &&
+            !(req.body?.content !== undefined &&
+                req.body?.content !== null &&
+                req.body?.content !== "")
+        ) {
+            const body = req.body ?? {};
+            // RAG: 맵리듀스(질문만 분할)는 문서를 잃어 오답을 냄 → 축소 재시도만
+            if (isRagRequest(body) || body._rag) {
+                try {
+                    const q =
+                        typeof body.ROLE_USER === "string"
+                            ? body.ROLE_USER
+                            : "";
+                    const rawTemp = Number(body.TEMPERATURE);
+                    const temperature = Number.isFinite(rawTemp)
+                        ? rawTemp
+                        : config.defaultTemperature;
+                    const enableThinking =
+                        body.THINKING === undefined
+                            ? config.enableThinking
+                            : Boolean(body.THINKING);
+                    const { shrinkRagOnBody } = await import("./ragContext.js");
+                    if (!body._rag) {
+                        const pack = await loadRagForRequest(body);
+                        body._rag = {
+                            hits: pack.hits,
+                            context: pack.context,
+                            sources: pack.sources,
+                            strict: pack.strict,
+                            topK: pack.topK,
+                        };
+                    }
+                    shrinkRagOnBody(body, 0.4);
+                    logger.warn(
+                        `chat(stream) RAG 컨텍스트 초과 → 문서 축소 후 파이프라인 재시도: ${err.message}`,
+                    );
+                    send("meta", {
+                        mode: "workflow",
+                        reason: "컨텍스트 초과 → RAG 문서 축소 재시도",
+                        fallback: "rag-shrink",
+                    });
+                    const plan = await createPlan(body);
+                    const useWorkflow =
+                        plan.mode === "workflow" && plan.steps?.length > 1;
+                    let out;
+                    if (useWorkflow) {
+                        out = await runWorkflow({
+                            plan,
+                            body,
+                            temperature,
+                            enableThinking,
+                            onEvent: (ev) => {
+                                if (ev.type === "plan") send("workflow", ev);
+                                else if (ev.type === "rag")
+                                    send("meta", {
+                                        rag: true,
+                                        sources: ev.sources,
+                                        hits: ev.hits,
+                                        strict: ev.strict,
+                                    });
+                                else if (ev.type === "step_start")
+                                    send("step", { ...ev, status: "start" });
+                                else if (ev.type === "step_done")
+                                    send("step", { ...ev, status: "done" });
+                                else if (ev.type === "token")
+                                    send("token", { text: ev.text });
+                            },
+                        });
+                    } else {
+                        const messages = await buildRagMessages({
+                            q,
+                            hits: body._rag.hits,
+                            strict: body._rag.strict,
+                            questionContent: body.content,
+                            system:
+                                typeof body.ROLE_SYSTEM === "string"
+                                    ? body.ROLE_SYSTEM
+                                    : undefined,
+                            history: body.HISTORY,
+                            memoryContext: body._memory?.context,
+                        });
+                        const streamOut = await pool.chatStream({
+                            messages,
+                            temperature,
+                            maxTokens: config.maxTokensSmall,
+                            enableThinking: false,
+                            preferredTier: plan.tier || "medium",
+                            onToken: (t) => send("token", { text: t }),
+                        });
+                        out = {
+                            answer: streamOut.content,
+                            reasoning: streamOut.reasoning,
+                            model: streamOut.model,
+                            tier: streamOut.tier,
+                            device: streamOut.device,
+                            alias: streamOut.alias,
+                            backend: streamOut.backendUrl,
+                            usage: streamOut.usage,
+                            ttftMs: streamOut.ttftMs,
+                            totalMs: streamOut.totalMs,
+                            tokens: streamOut.tokenCount,
+                            steps: [],
+                            trace: [],
+                            sources: body._rag.sources,
+                            strict: body._rag.strict,
+                        };
+                    }
+                    const sec = await withSecurityPreFinal(q, out.answer, {
+                        onEvent: securityEventBridge(send),
+                        stepIndex: Array.isArray(out.steps)
+                            ? out.steps.length
+                            : 0,
+                    });
+                    send("done", {
+                        answer: sec.answer,
+                        reasoning: out.reasoning || undefined,
+                        model: out.model ?? config.modelName,
+                        tier: out.tier,
+                        device: out.device,
+                        alias: out.alias || undefined,
+                        backend: out.backend,
+                        totalMs: Date.now() - started,
+                        mode: useWorkflow ? "workflow" : "direct",
+                        routeReason: "RAG 컨텍스트 축소 재시도",
+                        workflowSteps: pipelineStepsOnly(out.steps),
+                        workflowTrace: [
+                            ...(out.trace || []),
+                            ...sec.traceExtra,
+                        ],
+                        ...ragResponseFields(body, {
+                            sources: out.sources,
+                            strict: out.strict,
+                        }),
+                    });
+                    appendHistory({
+                        id:
+                            Date.now().toString(36) +
+                            Math.random().toString(36).slice(2, 8),
+                        ts: new Date().toISOString(),
+                        user: q,
+                        answer: sec.answer,
+                        model: out.model ?? config.modelName,
+                        tier: out.tier,
+                        mode: useWorkflow ? "workflow" : "direct",
+                        workflowSteps: pipelineStepsOnly(out.steps),
+                        workflowTrace: out.trace,
+                        ...ragResponseFields(body, {
+                            sources: out.sources,
+                            strict: out.strict,
+                        }),
+                    }).catch((e) =>
+                        logger.error(`history 저장 실패: ${e.message}`),
+                    );
+                    persistChatMemory(body, q, sec.answer);
+                    return res.end();
+                } catch (err2) {
+                    logger.error(
+                        `chat(stream) RAG 축소 재시도 실패: ${err2.message}`,
+                    );
+                    send("error", {
+                        error:
+                            "문서+파이프라인 입력이 모델 컨텍스트를 초과했습니다. 질문을 짧게 하거나 문서만 답변(단일 RAG)을 사용해 주세요.",
+                        detail: err2.message,
+                        status: 413,
+                    });
+                    return res.end();
+                }
+            }
+            try {
+                const body = req.body ?? {};
+                const q =
+                    typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
+                const rawTemp = Number(body.TEMPERATURE);
+                const temperature = Number.isFinite(rawTemp)
+                    ? rawTemp
+                    : config.defaultTemperature;
+                const enableThinking =
+                    body.THINKING === undefined
+                        ? config.enableThinking
+                        : Boolean(body.THINKING);
+                logger.warn(
+                    `chat(stream) 컨텍스트 초과 → 맵리듀스 재시도: ${err.message}`,
+                );
+                send("meta", {
+                    mode: "workflow",
+                    reason: "컨텍스트 초과 → 청크 맵리듀스 자동 전환",
+                    fallback: "long",
+                });
+                const out = await runLongContent({
+                    body,
+                    temperature,
+                    onEvent: (ev) => {
+                        if (ev.type === "plan") {
+                            send("workflow", ev);
+                        } else if (ev.type === "step_start")
+                            send("step", { ...ev, status: "start" });
+                        else if (ev.type === "step_done")
+                            send("step", { ...ev, status: "done" });
+                        else if (ev.type === "step_meta") send("meta", ev);
+                        else if (ev.type === "token")
+                            send("token", { text: ev.text });
+                    },
+                });
+                const sec = await withSecurityPreFinal(q, out.answer, {
+                    onEvent: securityEventBridge(send),
+                    stepIndex: Array.isArray(out.steps) ? out.steps.length : 0,
+                });
+                const answer = sec.answer;
+                const genMs =
+                    out.ttftMs != null
+                        ? Math.max((out.totalMs ?? 0) - out.ttftMs, 1)
+                        : out.totalMs;
+                const tokens = out.tokens;
+                const tokensPerSec =
+                    tokens && genMs
+                        ? Number((tokens / (genMs / 1000)).toFixed(1))
+                        : null;
+                send("done", {
+                    answer,
+                    reasoning: out.reasoning || undefined,
+                    model: out.model ?? config.modelName,
+                    tier: out.tier,
+                    device: out.device,
+                    alias: out.alias || undefined,
+                    difficulty: 100,
+                    backend: out.backend,
+                    ttftMs: out.ttftMs,
+                    totalMs: Date.now() - started,
+                    tokens,
+                    tokensPerSec,
+                    usage: out.usage ?? null,
+                    mode: "workflow",
+                    routeReason: out.plan?.reason || "컨텍스트 초과 맵리듀스",
+                    workflowSteps: pipelineStepsOnly(out.steps),
+                    workflowTrace: [
+                        ...(out.trace || []),
+                        ...sec.traceExtra,
+                    ],
+                });
+                appendHistory({
+                    id:
+                        Date.now().toString(36) +
+                        Math.random().toString(36).slice(2, 8),
+                    ts: new Date().toISOString(),
+                    system:
+                        typeof body.ROLE_SYSTEM === "string"
+                            ? body.ROLE_SYSTEM
+                            : "",
+                    user: body.ROLE_USER,
+                    hasImage: false,
+                    temperature,
+                    thinking: enableThinking,
+                    tier: out.tier,
+                    routedTier: out.tier,
+                    routeReason: out.plan?.reason || "컨텍스트 초과 맵리듀스",
+                    device: out.device,
+                    alias: out.alias || null,
+                    difficulty: 100,
+                    backend: out.backend,
+                    model: out.model ?? config.modelName,
+                    answer,
+                    reasoning: out.reasoning || "",
+                    usage: out.usage ?? null,
+                    mode: "workflow",
+                    workflowSteps: pipelineStepsOnly(out.steps),
+                    workflowTrace: [
+                        ...(out.trace || []),
+                        ...sec.traceExtra,
+                    ],
+                }).catch((e) =>
+                    logger.error(`history 저장 실패: ${e.message}`),
+                );
+                persistChatMemory(body, body.ROLE_USER, answer);
+                logger.info(
+                    `chat(stream/long-fallback) ${Date.now() - started}ms`,
+                );
+                return res.end();
+            } catch (err2) {
+                logger.error(
+                    `chat(stream) 맵리듀스 재시도 실패: ${err2.message}`,
+                );
+                send("error", {
+                    error:
+                        "입력/대화가 모델 컨텍스트 한도를 초과했고, 분할 처리에도 실패했습니다.",
+                    detail: err2.message,
+                    status: 413,
+                });
+                return res.end();
+            }
+        }
         logger.error(
             `chat(stream) 실패 (${Date.now() - started}ms): ${err.message}`,
         );
@@ -1717,6 +3379,198 @@ app.post("/api/chat/stream", async (req, res) => {
             security: err.security || undefined,
         });
         res.end();
+    }
+});
+
+/**
+ * 모델 스트레스 테스트: HTTP 1회 → 서버에서 모델 호출 COUNT 회.
+ * 기본 SSE 스트리밍: 건마다 event:result, 마지막 event:done
+ * body.STREAM=false 이면 기존 JSON 일괄 응답
+ */
+app.post("/api/chat/stress", async (req, res) => {
+    const started = Date.now();
+    const body = req.body ?? {};
+    const wantStream =
+        body.STREAM !== false &&
+        body.STREAM !== "false" &&
+        body.STREAM !== 0 &&
+        body.STREAM !== "0";
+
+    const send = (event, data) => {
+        if (!wantStream) return;
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+        const q = typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
+        if (!q.trim()) {
+            if (wantStream) {
+                res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+                res.setHeader("Cache-Control", "no-cache");
+                res.setHeader("Connection", "keep-alive");
+                res.flushHeaders?.();
+                send("error", { error: "ROLE_USER 는 필수입니다." });
+                return res.end();
+            }
+            return res.status(400).json({ error: "ROLE_USER 는 필수입니다." });
+        }
+        const rawCount = Number(body.COUNT ?? body.STRESS_COUNT ?? 1);
+        const count = Math.min(
+            32,
+            Math.max(1, Math.floor(Number.isFinite(rawCount) ? rawCount : 1)),
+        );
+        const mode =
+            String(body.MODE || body.STRESS_MODE || "parallel").toLowerCase() ===
+            "serial"
+                ? "serial"
+                : "parallel";
+
+        const rawTemp = Number(body.TEMPERATURE);
+        const temperature = Number.isFinite(rawTemp)
+            ? rawTemp
+            : config.defaultTemperature;
+        const enableThinking =
+            body.THINKING === undefined
+                ? config.enableThinking
+                : Boolean(body.THINKING);
+
+        if (wantStream) {
+            res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+            res.setHeader("Cache-Control", "no-cache");
+            res.setHeader("Connection", "keep-alive");
+            res.flushHeaders?.();
+        }
+
+        logger.info(
+            `요청 수신 [chat/stress] "${q.slice(0, 60)}" ×${count} (${mode}` +
+                `${wantStream ? ", stream" : ""})`,
+        );
+
+        const plan = await createPlan(body);
+        const tier = plan.tier;
+        const isLarge = tier === "large";
+        const promptCharBudget = isLarge
+            ? config.maxPromptCharsLarge
+            : config.maxPromptCharsSmall;
+        const messages = await buildMessages(body, promptCharBudget);
+        const maxTokensLarge = config.defaultMaxTokens;
+        const maxTokensSmall = config.maxTokensSmall;
+
+        send("meta", {
+            mode: "stress",
+            count,
+            preferredTier: tier,
+            difficulty: plan.difficulty ?? null,
+            routeReason: plan.reason,
+            loadDemoteMaxDifficulty: config.loadDemoteMaxDifficulty,
+        });
+
+        const out = await pool.stressChat({
+            count,
+            mode,
+            messages,
+            temperature,
+            maxTokens: isLarge ? maxTokensLarge : maxTokensSmall,
+            maxTokensSmall,
+            maxTokensByTier: {
+                large: maxTokensLarge,
+                medium: maxTokensSmall,
+                small: maxTokensSmall,
+            },
+            enableThinking,
+            preferredTier: tier,
+            preferredDevice: plan.device,
+            preferredSkill: plan.skill ?? null,
+            allowOtherTiers: config.escalateTier,
+            preview: q.slice(0, 120),
+            loadAwareBody: body,
+            loadAwareRoute: {
+                tier: plan.tier,
+                reason: plan.reason,
+                difficulty: plan.difficulty,
+                device: plan.device,
+                skill: plan.skill ?? null,
+            },
+            onResult: wantStream
+                ? (row) => {
+                      send("result", row);
+                  }
+                : null,
+        });
+
+        const ms = Date.now() - started;
+        logger.info(
+            `chat/stress 완료 ${count}회 ${ms}ms ` +
+                `preferred=${tier} byTier=${JSON.stringify(out.summary?.byTier || {})} ` +
+                `demote=${out.summary?.loadDemoted ?? 0}`,
+        );
+        const payload = {
+            mode: "stress",
+            stressMode: out.mode,
+            count: out.count,
+            routedTier: tier,
+            preferredTier: tier,
+            difficulty: plan.difficulty ?? null,
+            routeReason: plan.reason,
+            loadDemoteMaxDifficulty: config.loadDemoteMaxDifficulty,
+            summary: out.summary,
+            results: out.results,
+            ms,
+        };
+
+        const byTier = out.summary?.byTier || {};
+        const answerSummary =
+            `스트레스 ${out.count}회 완료` +
+            (byTier.large != null || byTier.medium != null
+                ? ` · large ${byTier.large || 0} / medium ${byTier.medium || 0}`
+                : "") +
+            (out.summary?.loadDemoted
+                ? ` · demote ${out.summary.loadDemoted}`
+                : "") +
+            (out.summary?.wallMs != null ? ` · ${out.summary.wallMs}ms` : "");
+
+        appendHistory({
+            id:
+                Date.now().toString(36) +
+                Math.random().toString(36).slice(2, 8),
+            ts: new Date().toISOString(),
+            user: q,
+            answer: answerSummary,
+            mode: "stress",
+            stressMode: out.mode,
+            count: out.count,
+            preferredTier: tier,
+            routedTier: tier,
+            difficulty: plan.difficulty ?? null,
+            routeReason: plan.reason,
+            summary: out.summary,
+            results: out.results,
+            ms,
+        }).catch((e) => logger.error(`stress history 저장 실패: ${e.message}`));
+
+        if (wantStream) {
+            send("done", payload);
+            return res.end();
+        }
+        return res.json(payload);
+    } catch (err) {
+        logger.error(
+            `chat/stress 실패 (${Date.now() - started}ms): ${err.message}`,
+        );
+        if (wantStream) {
+            try {
+                send("error", { error: err.message });
+                return res.end();
+            } catch {
+                /* ignore */
+            }
+        }
+        if (!res.headersSent) {
+            res.status(err.status || 502).json({
+                error: err.message,
+                mode: "stress",
+            });
+        }
     }
 });
 
@@ -1737,8 +3591,33 @@ app.post("/api/chat", async (req, res) => {
                 ? config.enableThinking
                 : Boolean(body.THINKING);
 
-        // 긴 입력(컨텍스트 초과) → 청크 맵리듀스 파이프라인
-        if (needsLongPipeline(body)) {
+        await prepareChatMemory(body);
+
+        const ragPrep = await prepareChatRag(body);
+        if (ragPrep.emptyStrict) {
+            const payload = {
+                answer: ragPrep.answer,
+                model: config.modelName,
+                mode: "direct",
+                ...ragResponseFields(body),
+            };
+            appendHistory({
+                id:
+                    Date.now().toString(36) +
+                    Math.random().toString(36).slice(2, 8),
+                ts: new Date().toISOString(),
+                user: q,
+                answer: payload.answer,
+                model: payload.model,
+                mode: "direct",
+                ...ragResponseFields(body),
+            }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+            persistChatMemory(body, q, payload.answer);
+            return res.json(payload);
+        }
+
+        // 긴 입력(컨텍스트 초과) → 청크 맵리듀스 (RAG 는 검색 컨텍스트만 사용)
+        if (!ragPrep.active && needsLongPipeline(body)) {
             logger.info(`긴 입력 감지 [chat] ${q.length}자 → 맵리듀스 파이프라인`);
             const out = await runLongContent({ body, temperature });
             const sec = await withSecurityPreFinal(q, out.answer, {
@@ -1778,6 +3657,7 @@ app.post("/api/chat", async (req, res) => {
             appendHistory(entry).catch((e) =>
                 logger.error(`history 저장 실패: ${e.message}`),
             );
+            persistChatMemory(body, body.ROLE_USER, sec.answer);
             logger.info(
                 `chat(long) ${out.steps.length}단계 ${Date.now() - started}ms`,
             );
@@ -1849,10 +3729,15 @@ app.post("/api/chat", async (req, res) => {
                 routerModel: plan.routerModel || null,
                 workflowSteps: pipelineStepsOnly(out.steps),
                 workflowTrace: out.trace,
+                ...ragResponseFields(body, {
+                    sources: out.sources,
+                    strict: out.strict,
+                }),
             };
             appendHistory(entry).catch((e) =>
                 logger.error(`history 저장 실패: ${e.message}`),
             );
+            persistChatMemory(body, body.ROLE_USER, out.answer);
             logger.info(
                 `chat(workflow) ${plan.steps.map((s) => s.tier).join("→")} ${Date.now() - started}ms`,
             );
@@ -1878,49 +3763,117 @@ app.post("/api/chat", async (req, res) => {
                 routerModel: plan.routerModel || null,
                 workflowSteps: pipelineStepsOnly(out.steps),
                 workflowTrace: out.trace,
+                ...ragResponseFields(body, {
+                    sources: out.sources,
+                    strict: out.strict,
+                }),
             });
         }
 
-        const { tier, reason, device, difficulty, deviceReason, routerBackend } =
-            {
-                tier: plan.tier,
-                reason: plan.reason,
-                device: plan.device,
-                difficulty: plan.difficulty,
-                deviceReason: plan.deviceReason,
-                routerBackend: plan.routerBackend,
-            };
-        logger.info(
-            `라우팅 [chat] → tier=${tier}${plan.skill ? ` skill="${plan.skill}"` : ""} device=${device} 난이도=${difficulty}${routerBackend ? ` router@${routerBackend}` : ""} (티어사유: ${reason} / 장치사유: ${deviceReason})`,
-        );
+        let tier = plan.tier;
+        let reason = plan.reason;
+        let device = plan.device;
+        const difficulty = plan.difficulty;
+        const deviceReason = plan.deviceReason;
+        const routerBackend = plan.routerBackend;
+        let allowOtherTiers = config.escalateTier;
+        let messages;
+        if (ragPrep.active) {
+            const ragRoute = await chooseRagRoute({
+                q,
+                hits: body._rag.hits,
+                questionContent: body.content,
+                body,
+            });
+            const rank = { small: 0, medium: 1, large: 2 };
+            tier =
+                (rank[ragRoute.tier] ?? 0) >= (rank[plan.tier] ?? 0)
+                    ? ragRoute.tier
+                    : plan.tier;
+            device = ragRoute.device ?? plan.device;
+            allowOtherTiers =
+                ragRoute.allowOtherTiers ?? config.escalateTier;
+            reason = `${ragRoute.reason}; plan=${plan.reason}`;
+            messages = await buildRagMessages({
+                q,
+                hits: body._rag.hits,
+                strict: body._rag.strict,
+                questionContent: body.content,
+                system:
+                    typeof body.ROLE_SYSTEM === "string"
+                        ? body.ROLE_SYSTEM
+                        : undefined,
+                history: body.HISTORY,
+                memoryContext: body._memory?.context,
+            });
+            logger.info(
+                `라우팅 [chat/rag] → tier=${tier} (${reason})`,
+            );
+        } else {
+            logger.info(
+                `라우팅 [chat] → tier=${tier}${plan.skill ? ` skill="${plan.skill}"` : ""} device=${device} 난이도=${difficulty}${routerBackend ? ` router@${routerBackend}` : ""} (티어사유: ${reason} / 장치사유: ${deviceReason})`,
+            );
+            const isLarge = tier === "large";
+            const promptCharBudget = isLarge
+                ? config.maxPromptCharsLarge
+                : config.maxPromptCharsSmall;
+            messages = await buildMessages(body, promptCharBudget);
+        }
 
-        // 티어별 컨텍스트 예산/출력 토큰 (large 만 큰 ctx 가정)
+        // 티어별 출력 토큰 (large 만 큰 ctx 가정)
         const isLarge = tier === "large";
-        const promptCharBudget = isLarge
-            ? config.maxPromptCharsLarge
-            : config.maxPromptCharsSmall;
         const maxTokens = isLarge
             ? config.defaultMaxTokens
             : config.maxTokensSmall;
 
-        const messages = await buildMessages(body, promptCharBudget);
-
-        const {
-            result,
-            backendUrl,
-            tier: usedTier,
-            device: usedDevice,
-            alias: usedAlias,
-            skill: usedSkill,
-        } = await pool.chat({
-            messages,
-            temperature,
-            maxTokens,
-            enableThinking,
-            preferredTier: tier,
-            preferredDevice: device,
-            preferredSkill: plan.skill ?? null,
-        });
+        let usedTier;
+        let usedDevice;
+        let usedAlias;
+        let usedSkill = plan.skill ?? null;
+        let backendUrl;
+        let result;
+        if (!ragPrep.active) {
+            const guarded = await chatWithEchoGuard({
+                body,
+                messages,
+                temperature,
+                maxTokens,
+                enableThinking,
+                preferredTier: tier,
+                preferredDevice: device,
+                preferredSkill: plan.skill ?? null,
+                allowOtherTiers,
+            });
+            result = {
+                content: guarded.content,
+                reasoning: guarded.reasoning,
+                usage: guarded.usage,
+                ttftMs: guarded.ttftMs,
+                raw: { model: guarded.model },
+            };
+            usedTier = guarded.tier;
+            usedDevice = guarded.device;
+            usedAlias = guarded.alias;
+            backendUrl = guarded.backendUrl;
+            usedSkill = plan.skill ?? null;
+        } else {
+            const chatOut = await pool.chat({
+                messages,
+                temperature,
+                maxTokens,
+                enableThinking: false,
+                preferredTier: tier,
+                preferredDevice: device,
+                preferredSkill: plan.skill ?? null,
+                allowOtherTiers,
+            });
+            result = chatOut.result;
+            backendUrl = chatOut.backendUrl;
+            usedTier = chatOut.tier;
+            usedDevice = chatOut.device;
+            usedAlias = chatOut.alias;
+            usedSkill = chatOut.skill;
+        }
 
         const sec = await withSecurityPreFinal(q, result.content, {
             stepIndex: 1,
@@ -1978,6 +3931,7 @@ app.post("/api/chat", async (req, res) => {
             routerDevice: plan.routerDevice || null,
             routerModel: plan.routerModel || null,
             workflowTrace,
+            ...ragResponseFields(body),
         };
         logger.info(
             `chat 성공 tier=${usedTier} device=${usedDevice ?? "-"} diff=${difficulty} backend=${backendUrl} ${Date.now() - started}ms`,
@@ -1993,6 +3947,7 @@ app.post("/api/chat", async (req, res) => {
         appendHistory(entry).catch((e) =>
             logger.error(`history 저장 실패: ${e.message}`),
         );
+        persistChatMemory(body, body.ROLE_USER, sec.answer);
 
         res.json({
             id: entry.id,
@@ -2019,8 +3974,217 @@ app.post("/api/chat", async (req, res) => {
             routerDevice: plan.routerDevice || null,
             routerModel: plan.routerModel || null,
             workflowTrace,
+            ...ragResponseFields(body),
         });
     } catch (err) {
+        if (
+            isContextOverflowError(err) &&
+            !(req.body?.content !== undefined &&
+                req.body?.content !== null &&
+                req.body?.content !== "")
+        ) {
+            const body0 = req.body ?? {};
+            if (isRagRequest(body0) || body0._rag) {
+                try {
+                    const body = body0;
+                    const q =
+                        typeof body.ROLE_USER === "string"
+                            ? body.ROLE_USER
+                            : "";
+                    const rawTemp = Number(body.TEMPERATURE);
+                    const temperature = Number.isFinite(rawTemp)
+                        ? rawTemp
+                        : config.defaultTemperature;
+                    const enableThinking =
+                        body.THINKING === undefined
+                            ? config.enableThinking
+                            : Boolean(body.THINKING);
+                    const { shrinkRagOnBody } = await import("./ragContext.js");
+                    if (!body._rag) {
+                        const pack = await loadRagForRequest(body);
+                        body._rag = {
+                            hits: pack.hits,
+                            context: pack.context,
+                            sources: pack.sources,
+                            strict: pack.strict,
+                            topK: pack.topK,
+                        };
+                    }
+                    shrinkRagOnBody(body, 0.4);
+                    logger.warn(
+                        `chat RAG 컨텍스트 초과 → 문서 축소 재시도: ${err.message}`,
+                    );
+                    const plan = await createPlan(body);
+                    const useWorkflow =
+                        plan.mode === "workflow" && plan.steps?.length > 1;
+                    let out;
+                    if (useWorkflow) {
+                        out = await runWorkflow({
+                            plan,
+                            body,
+                            temperature,
+                            enableThinking,
+                        });
+                    } else {
+                        const messages = await buildRagMessages({
+                            q,
+                            hits: body._rag.hits,
+                            strict: body._rag.strict,
+                            questionContent: body.content,
+                            system:
+                                typeof body.ROLE_SYSTEM === "string"
+                                    ? body.ROLE_SYSTEM
+                                    : undefined,
+                            history: body.HISTORY,
+                            memoryContext: body._memory?.context,
+                        });
+                        const {
+                            result,
+                            backendUrl,
+                            tier,
+                            device,
+                            alias,
+                        } = await pool.chat({
+                            messages,
+                            temperature,
+                            maxTokens: config.maxTokensSmall,
+                            enableThinking: false,
+                            preferredTier: plan.tier || "medium",
+                        });
+                        out = {
+                            answer: result.content,
+                            reasoning: result.reasoning,
+                            model: result.raw?.model,
+                            tier,
+                            device,
+                            alias,
+                            backend: backendUrl,
+                            usage: result.raw?.usage,
+                            steps: [],
+                            trace: [],
+                            sources: body._rag.sources,
+                            strict: body._rag.strict,
+                        };
+                    }
+                    const sec = await withSecurityPreFinal(q, out.answer, {
+                        stepIndex: Array.isArray(out.steps)
+                            ? out.steps.length
+                            : 0,
+                    });
+                    return res.json({
+                        answer: sec.answer,
+                        reasoning: out.reasoning || undefined,
+                        model: out.model ?? config.modelName,
+                        tier: out.tier,
+                        device: out.device,
+                        alias: out.alias || undefined,
+                        backend: out.backend,
+                        mode: useWorkflow ? "workflow" : "direct",
+                        routeReason: "RAG 컨텍스트 축소 재시도",
+                        workflowSteps: pipelineStepsOnly(out.steps),
+                        workflowTrace: out.trace,
+                        ...ragResponseFields(body, {
+                            sources: out.sources,
+                            strict: out.strict,
+                        }),
+                    });
+                } catch (err2) {
+                    return res.status(413).json({
+                        error:
+                            "문서+파이프라인 입력이 모델 컨텍스트를 초과했습니다. 질문을 짧게 하거나 단일 RAG를 사용해 주세요.",
+                        detail: err2.message,
+                    });
+                }
+            }
+            try {
+                const body = req.body ?? {};
+                const q =
+                    typeof body.ROLE_USER === "string" ? body.ROLE_USER : "";
+                const rawTemp = Number(body.TEMPERATURE);
+                const temperature = Number.isFinite(rawTemp)
+                    ? rawTemp
+                    : config.defaultTemperature;
+                const enableThinking =
+                    body.THINKING === undefined
+                        ? config.enableThinking
+                        : Boolean(body.THINKING);
+                logger.warn(
+                    `chat 컨텍스트 초과 → 맵리듀스 재시도: ${err.message}`,
+                );
+                const out = await runLongContent({ body, temperature });
+                const sec = await withSecurityPreFinal(q, out.answer, {
+                    stepIndex: Array.isArray(out.steps) ? out.steps.length : 0,
+                });
+                const workflowSteps = pipelineStepsOnly(out.steps);
+                const workflowTrace = [
+                    ...(out.trace || []),
+                    ...sec.traceExtra,
+                ];
+                const entry = {
+                    id:
+                        Date.now().toString(36) +
+                        Math.random().toString(36).slice(2, 8),
+                    ts: new Date().toISOString(),
+                    system:
+                        typeof body.ROLE_SYSTEM === "string"
+                            ? body.ROLE_SYSTEM
+                            : "",
+                    user: body.ROLE_USER,
+                    hasImage: false,
+                    temperature,
+                    thinking: enableThinking,
+                    tier: out.tier,
+                    routedTier: out.tier,
+                    routeReason:
+                        out.plan?.reason || "컨텍스트 초과 맵리듀스",
+                    device: out.device,
+                    alias: out.alias || null,
+                    difficulty: 100,
+                    backend: out.backend,
+                    model: out.model ?? config.modelName,
+                    answer: sec.answer,
+                    reasoning: out.reasoning || "",
+                    usage: out.usage ?? null,
+                    mode: "workflow",
+                    workflowSteps,
+                    workflowTrace,
+                };
+                appendHistory(entry).catch((e) =>
+                    logger.error(`history 저장 실패: ${e.message}`),
+                );
+                persistChatMemory(body, body.ROLE_USER, sec.answer);
+                logger.info(
+                    `chat(long-fallback) ${out.steps.length}단계 ${Date.now() - started}ms`,
+                );
+                return res.json({
+                    id: entry.id,
+                    ts: entry.ts,
+                    answer: sec.answer,
+                    reasoning: out.reasoning || undefined,
+                    model: entry.model,
+                    tier: out.tier,
+                    routedTier: out.tier,
+                    routeReason: entry.routeReason,
+                    device: out.device,
+                    alias: out.alias || undefined,
+                    difficulty: 100,
+                    backend: out.backend,
+                    usage: out.usage ?? null,
+                    mode: "workflow",
+                    workflowSteps,
+                    workflowTrace,
+                });
+            } catch (err2) {
+                logger.warn(
+                    `chat 맵리듀스 재시도 실패: ${err2.message}`,
+                );
+                return res.status(413).json({
+                    error:
+                        "입력/대화가 모델 컨텍스트 한도를 초과했고, 분할 처리에도 실패했습니다. 질문을 줄여주세요.",
+                    detail: err2.message,
+                });
+            }
+        }
         if (/exceed_context_size|context size/.test(err.message)) {
             logger.warn(`chat 컨텍스트 초과: ${err.message}`);
             return res.status(413).json({
@@ -2061,37 +4225,28 @@ function bufferToDataUrl(buffer, ext) {
     return `data:${mime};base64,${buffer.toString("base64")}`;
 }
 
-function ragSystemPrompt(strict, withVision, userSystem) {
-    const vision =
-        withVision
-            ? " 참고 문서에 첨부된 이미지가 있으면 이미지 속 글자와 시각적 내용 모두를 근거로 사용하라."
-            : "";
-    let base;
-    if (strict) {
-        base =
-            "너는 제공된 '참고 문서'만 근거로 한국어로 답하는 어시스턴트다." +
-            vision +
-            " 문서에 없는 내용은 절대 추측하지 말고 정확히 '문서 내용에 없습니다.'라고만 답하라. " +
-            "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라.";
-    } else {
-        base =
-            "너는 한국어로 답하는 어시스턴트다. '참고 문서'를 우선 근거로 사용하되," +
-            vision +
-            " 문서에 없으면 너의 일반 지식으로 보완해 답하라. " +
-            "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라.";
-    }
-    // 사용자가 ROLE_SYSTEM 으로 보낸 지시(페르소나·출력형식 등)를 함께 적용
-    const extra =
-        typeof userSystem === "string" && userSystem.trim()
-            ? ` 추가 지시사항: ${userSystem.trim()}`
-            : "";
-    return base + extra;
+function ragSystemPrompt(strict, withVision, userSystem, question = "") {
+    return ragSystemAddon(strict, withVision, question, userSystem);
 }
 
-async function buildRagUserContent(q, context, hits, questionContent) {
-    const text = context
+async function buildRagUserContent(q, context, hits, questionContent, history, memoryContext) {
+    let text = context
         ? `참고 문서:\n${context}\n\n질문: ${q}`
         : q;
+    const mem =
+        typeof memoryContext === "string" && memoryContext.trim()
+            ? memoryContext.trim()
+            : "";
+    if (mem) {
+        text = `${mem}\n\n${text}`;
+    }
+    if (Array.isArray(history) && history.length) {
+        const hist = formatHistorySnippet(history, {
+            maxTurns: 4,
+            perTurnMax: 280,
+        });
+        if (hist) text = `최근 대화:\n${hist}\n\n${text}`;
+    }
 
     const imageFiles = new Set();
     for (const h of hits || []) {
@@ -2127,16 +4282,17 @@ async function buildRagUserContent(q, context, hits, questionContent) {
     return parts;
 }
 
-async function buildRagMessages({ q, hits, strict, questionContent, system }) {
+async function buildRagMessages({
+    q,
+    hits,
+    strict,
+    questionContent,
+    system,
+    history,
+    memoryContext,
+}) {
     const context =
-        hits?.length > 0
-            ? hits
-                  .map(
-                      (h, i) =>
-                          `[출처 ${i + 1}] (${h.docName} #${h.idx})\n${h.text}`,
-                  )
-                  .join("\n\n")
-            : "";
+        hits?.length > 0 ? formatRagContext(hits) : "";
 
     const hasVision =
         (hits || []).some((h) => h.imageFile) ||
@@ -2144,16 +4300,37 @@ async function buildRagMessages({ q, hits, strict, questionContent, system }) {
             questionContent !== null &&
             questionContent !== "");
 
+    const memCtx =
+        typeof memoryContext === "string"
+            ? memoryContext
+            : "";
+
     const userContent = await buildRagUserContent(
         q,
         context,
         hits,
         questionContent,
+        history,
+        memCtx,
     );
 
+    const sysBase = ragSystemPrompt(strict, hasVision, system, q);
+    const sysExtra = memCtx
+        ? "\n\n또한 '개인 기억' 블록에 과거 사용자 사실이 있으면 관련될 때 활용하라. 목록에 없는 기억을 지어내지 마라."
+        : "";
+
     return [
-        { role: "system", content: ragSystemPrompt(strict, hasVision, system) },
-        { role: "user", content: userContent },
+        {
+            role: "system",
+            content: sysBase + sysExtra,
+        },
+        {
+            role: "user",
+            content:
+                typeof userContent === "string"
+                    ? userContent + replyLanguageReminder(q)
+                    : userContent,
+        },
     ];
 }
 
@@ -2215,8 +4392,24 @@ async function chooseRagRoute({ q, hits, questionContent, body }) {
     };
 }
 
-async function ragChat({ q, hits, strict, questionContent, system, temperature = 0.3, route }) {
-    const messages = await buildRagMessages({ q, hits, strict, questionContent, system });
+async function ragChat({
+    q,
+    hits,
+    strict,
+    questionContent,
+    system,
+    temperature = 0.3,
+    route,
+    history,
+}) {
+    const messages = await buildRagMessages({
+        q,
+        hits,
+        strict,
+        questionContent,
+        system,
+        history,
+    });
     const tier = route?.tier ?? "large";
     return pool.chat({
         messages,
@@ -2231,15 +4424,7 @@ async function ragChat({ q, hits, strict, questionContent, system, temperature =
 }
 
 function ragSources(hits) {
-    return hits.map((h, i) => ({
-        n: i + 1,
-        docName: h.docName,
-        idx: h.idx,
-        score: h.score,
-        kind: h.kind,
-        preview: h.text.slice(0, 200),
-        imageUrl: h.imageFile ? `/api/rag/images/${h.docId}` : null,
-    }));
+    return buildRagSources(hits);
 }
 
 // RAG 대화도 새로고침 후 복원되도록 히스토리에 저장한다 (best-effort).
@@ -2464,9 +4649,14 @@ app.post("/api/rag/ask", async (req, res) => {
                 : undefined;
         const persist = (payload) => persistRagHistory(q, payload);
 
-        const hits = await rag.retrieveAsync(q, topK);
+        const retrieveQ = ragRetrieveQuery({
+            ROLE_USER: q,
+            HISTORY: req.body?.HISTORY,
+        });
+        const hits = await rag.retrieveAsync(retrieveQ, topK);
         logger.info(
-            `RAG 질문 "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색`,
+            `RAG 질문 "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색` +
+                (retrieveQ !== q ? ` (검색질의 보강 ${retrieveQ.length}자)` : ""),
         );
 
         // 관련 문서가 없을 때
@@ -2496,6 +4686,7 @@ app.post("/api/rag/ask", async (req, res) => {
                 system,
                 temperature: 0.4,
                 route,
+                history: req.body?.HISTORY,
             });
             const payload = {
                 answer: result.content,
@@ -2527,13 +4718,16 @@ app.post("/api/rag/ask", async (req, res) => {
             system,
             temperature: strict ? 0.2 : 0.4,
             route,
+            history: req.body?.HISTORY,
         });
 
         logger.info(
             `RAG 답변 완료 tier=${tier} device=${device ?? "-"} ${Date.now() - started}ms`,
         );
+        // 최종 답 보안 게이트 (독립 RAG 엔드포인트도 우회 없이 검사)
+        const sec = await withSecurityPreFinal(q, result.content, {});
         const payload = {
-            answer: result.content,
+            answer: sec.answer,
             strict,
             sources: ragSources(hits),
             model: result.raw?.model ?? config.modelName,
@@ -2586,8 +4780,13 @@ app.post("/api/rag/ask/stream", async (req, res) => {
             typeof req.body?.ROLE_SYSTEM === "string"
                 ? req.body.ROLE_SYSTEM
                 : undefined;
+        // 보안 게이트가 켜져 있으면 검사 통과 전까지 토큰을 감춘다
+        const securityHold = hasSecurityWorkflow() && Boolean(q.trim());
 
-        const hits = await rag.retrieveAsync(q, topK);
+        const hits = await rag.retrieveAsync(
+            ragRetrieveQuery({ ROLE_USER: q, HISTORY: req.body?.HISTORY }),
+            topK,
+        );
         const sources = ragSources(hits);
         logger.info(
             `RAG 질문(stream) "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색`,
@@ -2626,6 +4825,7 @@ app.post("/api/rag/ask/stream", async (req, res) => {
             strict: hits.length ? strict : false,
             questionContent,
             system,
+            history: req.body?.HISTORY,
         });
         const out = await pool.chatStream({
             messages,
@@ -2640,11 +4840,19 @@ app.post("/api/rag/ask/stream", async (req, res) => {
             preferredDevice: route.device ?? null,
             allowOtherTiers: route.allowOtherTiers,
             onMeta: (m) => send("meta", m),
-            onToken: (t) => send("token", { text: t }),
+            onToken: (t) => {
+                if (!securityHold) send("token", { text: t });
+            },
+        });
+
+        // 최종 답 보안 게이트 (독립 RAG 엔드포인트도 우회 없이 검사)
+        const sec = await withSecurityPreFinal(q, out.content, {
+            onEvent: securityEventBridge(send),
+            stepIndex: 1,
         });
 
         const payload = {
-            answer: out.content,
+            answer: sec.answer,
             strict,
             sources,
             model: out.model ?? config.modelName,
@@ -2675,7 +4883,14 @@ app.use((_req, res) => res.status(404).json({ error: "Not Found" }));
 
 loadStats();
 pool.startHealthChecks();
+startAgentPolling();
+// 부하 스냅샷 세션이 dispatch 에러를 수집하도록 배선 (활성 세션 없으면 no-op)
+pool.setErrorSink(loadSession.recordError);
 rag.setEmbedder(async (texts) => {
+    const out = await pool.embed(texts);
+    return out?.vectors ?? null;
+});
+memoryStore.setEmbedder(async (texts) => {
     const out = await pool.embed(texts);
     return out?.vectors ?? null;
 });
@@ -2686,23 +4901,17 @@ app.listen(config.port, () => {
         ? routers.map((b) => `${b.alias || b.tier}@${b.url}`).join(", ")
         : "없음";
     logger.info(
-        `Express 서버 시작 (port ${config.port}, 백엔드 ${config.backends.length}개, ROUTING_MODE=${config.routingMode}, routers=${routerLabel})`,
+        `부모 관리서버 시작 (port ${config.port}, OS=${config.osMode}, ROUTING_MODE=${config.routingMode}) — 모델 백엔드는 하위 관리서버(agent) 등록으로 채워집니다`,
     );
     console.log(
-        `[neutda-ai] Express 서버 실행: http://localhost:${config.port}`,
+        `[neutda-ai] 부모 관리서버 실행: http://localhost:${config.port} (OS=${config.osMode})`,
     );
     console.log(`[neutda-ai] 테스트 페이지: http://localhost:${config.port}/`);
-    console.log(
-        `[neutda-ai] 모델 관리: http://localhost:${config.port}/models.html`,
-    );
     console.log(
         `[neutda-ai] 서버 모니터링: http://localhost:${config.port}/monitor.html`,
     );
     console.log(
-        `[neutda-ai] LLM 백엔드 ${config.backends.length}개: ${config.backends.map((b) => `${b.tier}@${b.url}`).join(", ")}`,
-    );
-    console.log(
-        `[neutda-ai] 라우터: ${routers.length ? routerLabel : "없음 (servers.json 에 router:true 또는 모델 관리에서 켜세요)"}`,
+        `[neutda-ai] 이 서버는 순수 컨트롤 플레인입니다. 모델은 각 머신에서 'npm run agent' 로 등록하세요.`,
     );
     console.log(
         `[neutda-ai] POST /api/chat 로 ROLE_SYSTEM/ROLE_USER/TEMPERATURE/content 전송`,

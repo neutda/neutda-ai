@@ -1,4 +1,5 @@
 import "dotenv/config";
+import os from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,8 @@ import {
   resolveServerSecurity,
   securityPoliciesById,
 } from "./securityPolicies.js";
+import { serverHost, serverUrl } from "./serverUrl.js";
+import { osMode, isWindows, isLinux } from "./platform.js";
 
 function num(value, fallback) {
   const n = Number(value);
@@ -102,7 +105,8 @@ function backendsFromServersJson() {
     for (const s of sorted) {
       const port = Number(s.port);
       if (!Number.isFinite(port) || port <= 0) continue;
-      const url = `http://127.0.0.1:${port}`;
+      const host = serverHost(s);
+      const url = serverUrl({ host, port });
       if (seen.has(url)) continue;
       seen.add(url);
       const tier = String(s.tier || "large").toLowerCase();
@@ -110,6 +114,8 @@ function backendsFromServersJson() {
       const sec = resolveServerSecurity(s, policyMap);
       out.push({
         url,
+        host,
+        port,
         tier: tier === "router" ? "small" : tier,
         device: Number(s.ngl) > 0 ? "gpu" : "cpu",
         alias: (s.alias && String(s.alias).trim()) || s.name || null,
@@ -140,6 +146,8 @@ function backendsFromServersJson() {
             s.security === 1,
         securityIds: sec.securityIds,
         securityPolicy: sec.securityPolicyText,
+        ctx: Number(s.ctx) > 0 ? Number(s.ctx) : 4096,
+        vision: Boolean(s.mmproj && String(s.mmproj).trim()),
       });
     }
     return out.length ? out : null;
@@ -208,8 +216,49 @@ const routingMode =
     : "llm";
 
 export const config = {
+  /** LINUX | WINDOW — .env OS=… (serve·agent 프로세스 제어 분기) */
+  osMode,
+  isWindows,
+  isLinux,
   port: num(process.env.PORT, 3000),
   backends: allBackendSpecs,
+  // llama-server 바인드 호스트. 단일 머신은 127.0.0.1(기본).
+  // 하위 관리서버(agent)로 분산 시 부모가 접근하도록 0.0.0.0 으로 띄운다.
+  llamaBindHost: process.env.LLAMA_BIND_HOST || "127.0.0.1",
+  // llama-server 기본 동시 처리 슬롯 수(continuous batching). 외부 API 로
+  // 동시에 여러 요청이 들어와도 한 인스턴스가 병렬 처리하도록 기본 4.
+  // 요청당 컨텍스트는 유지(총 컨텍스트 = ctx × slots) → KV VRAM 이 slots 배로 증가.
+  // 서버별 servers.json 의 "parallel" 로 개별 지정 가능.
+  llamaParallel: Math.max(1, num(process.env.LLAMA_PARALLEL, 4)),
+  // 하위 관리서버(agent) 폴링 — 부모가 각 agent 의 metrics/health 를 확인하는 주기
+  agentPollIntervalMs: num(process.env.AGENT_POLL_INTERVAL_MS, 5000),
+  // 이 횟수만큼 연속 폴링 실패하면 해당 agent 를 down 으로 표시
+  agentDownAfterMisses: num(process.env.AGENT_DOWN_AFTER_MISSES, 3),
+  // agent 폴링 1회 요청 타임아웃
+  agentRequestTimeoutMs: num(process.env.AGENT_REQUEST_TIMEOUT_MS, 4000),
+  // [하위 관리서버(agent) 실행 설정] `npm run agent` 이 읽는다.
+  // host/port/부모주소는 소스에 박지 않고 .env 로 지정한다.
+  agent: {
+    // 등록할 부모 관리서버 URL
+    parentUrl: normalizeUrl(process.env.PARENT_URL || "http://127.0.0.1:3000"),
+    // 이 agent 식별자 (미지정 시 머신 hostname)
+    id: (process.env.AGENT_ID || os.hostname()).trim(),
+    // 이 agent 가 listen 할 포트
+    port: num(process.env.AGENT_PORT, 4100),
+    // 부모가 이 머신(agent·llama)에 접속할 주소. 비우면:
+    //   PARENT_URL 이 localhost → 127.0.0.1 (한 머신 serve+agent)
+    //   원격 부모 → LAN IP 자동 감지
+    host: (process.env.AGENT_HOST || "").trim(),
+    // 부모 재등록(heartbeat) 주기
+    heartbeatMs: num(process.env.AGENT_HEARTBEAT_MS, 5000),
+    // 부팅 시 로컬 llama 서버 자동 기동 여부
+    autostart:
+      String(process.env.AGENT_AUTOSTART ?? "false").toLowerCase() === "true",
+    // 단일 서버 모드(npm run solo): 부모+에이전트를 한 프로세스로. 자체 재시작은 재등록으로 대체.
+    solo:
+      process.env.SOLO === "1" ||
+      String(process.env.SOLO ?? "").toLowerCase() === "true",
+  },
   // 시작 시 라우터 역할을 켤 백엔드 URL (모니터에서도 변경 가능). tier 와 무관.
   routerBackendUrl: process.env.ROUTER_BACKEND_URL
     ? normalizeUrl(process.env.ROUTER_BACKEND_URL)
@@ -218,6 +267,11 @@ export const config = {
   routerTemperature: num(process.env.ROUTER_TEMPERATURE, 0.1),
   routerMaxTokens: num(process.env.ROUTER_MAX_TOKENS, 128),
   modelName: process.env.MODEL_NAME || "qwen",
+  // 어시스턴트 정체성 (이름 질문·단답 시 환각 방지)
+  assistantName: process.env.ASSISTANT_NAME || "neutda-ai (뉴트다)",
+  assistantIdentity:
+    process.env.ASSISTANT_IDENTITY ||
+    "You are neutda-ai (뉴트다), a local multi-model AI assistant. Your name is neutda-ai / 뉴트다. Never invent another name from the user's words. Do not echo or rephrase the question as the answer.",
   // 외부 API 키(우선 고정값). .env 의 API_KEY 로 덮어쓸 수 있음
   apiKey: process.env.API_KEY || "tw-demo-key-2026",
   defaultTemperature: num(process.env.DEFAULT_TEMPERATURE, 0.7),
@@ -227,7 +281,7 @@ export const config = {
     String(process.env.ENFORCE_LANGUAGE ?? "true").toLowerCase() === "true",
   langDirective:
     process.env.REPLY_LANGUAGE_DIRECTIVE ||
-    "특별한 언어 지시가 없으면 사용자의 질문과 같은 언어로 답한다. 한국어 질문에는 반드시 한국어로만 답하고, 요청하지 않은 중국어(중문)로 답하지 않는다.",
+    "Reply in the same language as the user's question. Do not switch languages. Korean question → Korean only (not Chinese). English question → English only. Chinese question → Chinese only.",
   defaultMaxTokens: num(process.env.DEFAULT_MAX_TOKENS, 2048),
   // 컨텍스트 초과 방지: 티어별 max_tokens 와 프롬프트(시스템+히스토리+질문) 글자수 상한
   // small/medium 은 ctx 4096 가정 → 보수적으로 제한, large 는 ctx 8192 가정
@@ -258,17 +312,45 @@ export const config = {
   largeMinChars: num(process.env.LARGE_MIN_CHARS, 600),
   // 난이도 점수(0~100)가 이 값 이상이면 같은 티어 내에서 GPU 백엔드 선호
   gpuMinDifficulty: num(process.env.GPU_MIN_DIFFICULTY, 50),
-  // 긴 입력(컨텍스트 초과) 처리: 이 글자수 초과면 청크 맵리듀스 파이프라인으로 처리
-  longTriggerChars: num(process.env.LONG_TRIGGER_CHARS, 9000),
-  // 청크 하나의 목표 글자수(맵 입력이 medium ctx 4096 을 넘지 않도록 한국어 토큰밀도 감안 보수적)
-  longChunkChars: num(process.env.LONG_CHUNK_CHARS, 2000),
+  // 긴 입력(컨텍스트 초과) 처리: medium ctx 4096 기준으로 보수적 분할
+  // (예전 9000자는 한글 토큰 밀도상 medium 에 들어가 400 에러가 났음)
+  longTriggerChars: num(process.env.LONG_TRIGGER_CHARS, 3200),
+  // 추정 토큰이 이 값을 넘어도 맵리듀스 (시스템·지시 여유 포함)
+  longTriggerTokens: num(process.env.LONG_TRIGGER_TOKENS, 3000),
+  // 청크 하나의 목표 글자수(맵 입력이 medium ctx 4096 을 넘지 않도록)
+  longChunkChars: num(process.env.LONG_CHUNK_CHARS, 1800),
   // 청크 간 겹침(문맥 보존)
-  longChunkOverlap: num(process.env.LONG_CHUNK_OVERLAP, 200),
+  longChunkOverlap: num(process.env.LONG_CHUNK_OVERLAP, 180),
   // 리듀스(병합) 1회 입력 상한 — 넘으면 계층적으로 나눠 병합 (large ctx 8192 안에서)
-  longReduceInputChars: num(process.env.LONG_REDUCE_INPUT_CHARS, 5000),
+  longReduceInputChars: num(process.env.LONG_REDUCE_INPUT_CHARS, 4500),
   // 맵 단계 티어(청크별 추출) / 리듀스 단계 티어(종합)
   longMapTier: (process.env.LONG_MAP_TIER || "medium").toLowerCase(),
   longReduceTier: (process.env.LONG_REDUCE_TIER || "large").toLowerCase(),
   // 맵 단계 병렬 처리 개수 (여러 백엔드에 분산 — 너무 크면 백엔드 과부하)
   longMapConcurrency: num(process.env.LONG_MAP_CONCURRENCY, 4),
+  // 채팅 요청 큐: solve 슬롯이 가득이면 대기(바로 오류 내지 않음).
+  // CHAT_MAX_INFLIGHT=0(기본·미지정) → 자동: 건강한 solve 수 × LLAMA_PARALLEL
+  // (llama --parallel 과 맞춰 슬롯이 비면 바로 보냄. 인위적으로 2로 조이지 않음)
+  // 양의 정수면 그 값으로 상한(여전히 solve×parallel 을 넘지 않음).
+  chatMaxInFlight: (() => {
+    const raw = process.env.CHAT_MAX_INFLIGHT;
+    if (raw === undefined || String(raw).trim() === "") return 0;
+    return Math.max(0, num(raw, 0));
+  })(),
+  chatQueueMax: Math.max(0, num(process.env.CHAT_QUEUE_MAX, 10)),
+  // 큐에서 슬롯을 기다리는 최대 시간 (기본 = REQUEST_TIMEOUT)
+  chatQueueWaitMs: num(
+    process.env.CHAT_QUEUE_WAIT_MS,
+    num(process.env.REQUEST_TIMEOUT_MS, 120000),
+  ),
+  // 슬롯 인지 라우팅: large 포화 시 중간 난이도를 medium 으로 강등
+  loadAware: (() => {
+    const raw = String(process.env.LOAD_AWARE || "on").trim().toLowerCase();
+    return raw !== "off" && raw !== "0" && raw !== "false";
+  })(),
+  // 이 난이도 미만만 large→medium 강등 허용 (이상이면 large 대기)
+  loadDemoteMaxDifficulty: Math.min(
+    100,
+    Math.max(0, num(process.env.LOAD_DEMOTE_MAX_DIFFICULTY, 75)),
+  ),
 };

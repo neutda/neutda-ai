@@ -70,8 +70,8 @@ export function chooseTierHeuristic(body) {
   }
 
   return {
-    tier: VALID_TIERS.has(config.defaultTier) ? config.defaultTier : "small",
-    reason: "heuristic: simple",
+    tier: "medium",
+    reason: "heuristic: simple → medium (no router)",
   };
 }
 
@@ -98,8 +98,10 @@ export function scoreDifficulty(body, tier) {
   const thinking = body?.THINKING === true;
   const hasCode = /```|\bfunction\b|=>|;\s*$|\bclass\b|def |#include/i.test(text);
 
-  if (tier === "large" || hasImage || thinking || hasCode) {
-    const why = tier === "large" ? "large-tier" : hasImage ? "image" : thinking ? "thinking" : "code-like";
+  // 이미지·thinking·코드만 100 고정.
+  // tier===large 를 100으로 두면 load-aware 강등(diff<75)이 영원히 막힌다.
+  if (hasImage || thinking || hasCode) {
+    const why = hasImage ? "image" : thinking ? "thinking" : "code-like";
     return { difficulty: 100, device: "gpu", reason: `heavy:${why}` };
   }
 
@@ -108,11 +110,19 @@ export function scoreDifficulty(body, tier) {
   if (tier === "medium") {
     lo = config.smallMaxChars;
     hi = config.largeMinChars;
+  } else if (tier === "large") {
+    // large 선호여도 실제 난이도는 길이 기반으로 — 중간대(50~74)면 슬롯 포화 시 medium 강등 가능
+    lo = config.smallMaxChars;
+    hi = Math.max(config.largeMinChars * 2, config.largeMinChars + 1);
   }
   const span = Math.max(hi - lo, 1);
   const posScore = Math.min(Math.max((len - lo) / span, 0), 1) * 70;
   const historyScore = Math.min(historyTurns / 4, 1) * 30;
-  const difficulty = Math.round(Math.min(posScore + historyScore, 100));
+  let difficulty = Math.round(Math.min(posScore + historyScore, 100));
+  // large 로 분류됐으면 하한만 살짝 (small 난이도로 착각 방지), 강등 임계(75) 미만은 유지
+  if (tier === "large") {
+    difficulty = Math.max(difficulty, 55);
+  }
 
   const device = difficulty >= config.gpuMinDifficulty ? "gpu" : "cpu";
   return { difficulty, device, reason: `score=${difficulty}(pos:${Math.round(posScore)},hist:${Math.round(historyScore)})` };
@@ -151,10 +161,14 @@ export async function chooseRoute(body) {
 
   const useLlmRouter = pool.hasActiveRouter();
 
+  let route;
   if (useLlmRouter) {
     const llm = await classifyWithLlm(body);
-    if (llm) return llm;
+    route = llm || routeFromHeuristic(body);
+  } else {
+    route = routeFromHeuristic(body);
   }
 
-  return routeFromHeuristic(body);
+  const { applyLoadAwareRoute } = await import("./loadAwareRoute.js");
+  return applyLoadAwareRoute(route, body);
 }

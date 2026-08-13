@@ -30,15 +30,19 @@ if ($killed -eq 0) { Write-Host "[restart] 실행 중인 Express 없음 → 새�
 Start-Sleep -Milliseconds 600
 
 # 새 Express 기동 (백엔드 목록은 servers.json 에서 읽음)
+# stdout/err 은 append — 재시작해도 llama/logs/express.log 이어짐
 $env:PORT = "$Port"
 $expLog = Join-Path $logDir "express.log"
-Start-Process -FilePath "node" -ArgumentList @("src/server.js") -WorkingDirectory $root `
-  -RedirectStandardOutput $expLog -RedirectStandardError "$expLog.err" -WindowStyle Hidden | Out-Null
+$expErr = "$expLog.err"
+$node = (Get-Command node -ErrorAction Stop).Source
+$cmd = "`"$node`" src/server.js >> `"$expLog`" 2>> `"$expErr`""
+Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $cmd) -WorkingDirectory $root `
+  -WindowStyle Hidden | Out-Null
 
 Start-Sleep -Seconds 2
 Write-Host ""
 Write-Host "[restart] Express 재시작 완료 (모델 서버 유지)" -ForegroundColor Green
 Write-Host "     테스트 콘솔 : http://localhost:$Port/"
-Write-Host "     모델 관리   : http://localhost:$Port/models.html"
+Write-Host "     서버/모델관리 : http://localhost:$Port/server-admin.html"
 Write-Host "     서버 모니터 : http://localhost:$Port/monitor.html"
 Write-Host "     로그        : $expLog (.err)"

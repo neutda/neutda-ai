@@ -10,9 +10,9 @@
         {
             "id": "r_ms5emhdfsj7jcf",
             "name": "간단한 인사",
-            "description": "10글자 이하 간단한 인사",
+            "description": "메시지 전체가 '안녕/안녕하세요/hi' 같은 순수 인사말 한 마디일 때만. 질문·요청·서술·감정표현(덥다 등)·맞장구(그래·응·ok)나 다른 내용이 조금이라도 섞이면 이 역할 아님.",
             "createdAt": "2026-07-29T01:26:49.971Z",
-            "updatedAt": null
+            "updatedAt": "2026-08-10T07:00:31.293Z"
         },
         {
             "id": "r_summary_default",

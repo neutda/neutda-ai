@@ -9,14 +9,33 @@ import { logger } from "./logger.js";
 import { pool } from "./pool.js";
 import {
   parseRouterJson,
-  skillMenu,
   resolveSkillChoice,
   classifyWithLlm,
 } from "./llmRouter.js";
+import {
+  buildPlannerSkillBlock,
+  formatClusterSlotsHint,
+} from "./routerShared.js";
 import { scoreDifficulty, chooseTierHeuristic } from "./router.js";
+import {
+  replyLanguageReminder,
+  replyLanguageSystemLine,
+} from "./replyLanguage.js";
+import {
+  isRagRequest,
+  loadRagForRequest,
+  ragPlannerHint,
+  ragSystemAddon,
+  truncateRagContext,
+  shrinkRagOnBody,
+} from "./ragContext.js";
+import { isContextOverflowError } from "./longContent.js";
+import { isSecurityEnabledSync } from "./securityPolicies.js";
+import { formatHistoryBlock, formatHistorySnippet } from "./historyContext.js";
 
 const VALID_TIERS = new Set(["small", "medium", "large"]);
-const MAX_STEPS = 4;
+/** 세분 협업 파이프라인: 역할별로 입력을 골라 받는 단계 수 상한 */
+const MAX_STEPS = 8;
 
 /** 붙여넣은 코드/문서를 “실행할 작업”으로 오해하지 않도록 공통 경고 */
 const PLANNER_CONTENT_GUARD = `
@@ -26,13 +45,32 @@ CRITICAL — pasted content vs user ask:
 - NEVER design steps that execute / simulate / compute what the pasted code does
   (e.g. "extract ROLE_USER", "determine tier from length", "run tierFloor").
 - If user asks for 코드 리뷰 / code review / 검토 / 개선점:
-  use extract(요약 포인트) → solve|answer(리뷰 본문) → optional polish.
+  prefer specialist chain, e.g. extract → analyze → draft → critique → merge|polish
+  with "reads" so later steps only see the colleagues they need.
 - Every step instruction MUST be short Korean that serves user_ask only.`;
+
+/** 협업형 파이프라인 공통 규칙 (AUTO / MULTI 공유) */
+const PLANNER_COLLAB_RULES = `
+Collaboration (preferred over fixed extract→solve→polish):
+- Treat each step as a SPECIALIST talking to colleagues. role "role" freely
+  (extract|analyze|draft|critique|research|merge|polish|answer|other, or Korean labels).
+- Use "reads": which prior outputs THIS step receives.
+  • "user" = original question
+  • 0,1,2… = prior step index (0-based)
+  Example: critique reads only draft (e.g. [2]); merge reads [extract, analyze, draft].
+- Omit "reads" → step sees all prior outputs (legacy).
+- Prefer 3~6 steps when the ask has multiple facets (summary+risk+action, review+fix…).
+- Avoid always using the same three roles extract→solve→polish.
+  Good patterns:
+  • meeting notes → extract(사실) → analyze(리스크) → draft(답) → critique → merge
+  • code review → extract(구조) → analyze(버그) → draft(리뷰) → polish
+  • report → research(要点) → draft(보고서양식) → polish  (use specialty skill when listed)
+- small: almost never. medium: extract/analyze/polish/critique. large: draft/deep analyze.`;
 
 /** 파이프라인 OFF/auto 기본: 단일 모델 우선 */
 const PLANNER_SYSTEM_AUTO = `You are the PIPELINE PLANNER for a multi-tier LLM cluster (small / medium / large).
-A separate ROUTER may have already classified tier/specialty — use that as a hint, then design steps.
-Decide which model(s) should answer the user's ASK. Step count is flexible (1~4). Do NOT always start with small.
+A separate ROUTER may have already classified tier/specialty — use that as a hint.
+DEFAULT is mode "direct" (ONE model). Pipeline is the exception, not the norm.
 ${PLANNER_CONTENT_GUARD}
 
 Tiers:
@@ -40,38 +78,32 @@ Tiers:
 - medium: summaries, Q&A, moderate analysis, Korean polish.
 - large: hard reasoning, coding, long documents, deep analysis, vision.
 
-Rules:
-- Prefer mode "direct" (one model) when enough: greetings→small/medium; short Q&A→medium.
-- small is ONLY for user_question_chars <= 200 trivial input. Never small above that.
-- user_question_chars > 600 (long article, chat log, document, code) → NEVER direct small.
-  Use large, or workflow (e.g. medium extract → large|medium answer).
-- Use mode "workflow" (2~4 steps) when collaboration helps: long-text summarize/analysis,
-  code review, multi-part questions. First step can be medium or large.
-- Never use small for long-document extract or polish.
-- Image → large (or direct large).`;
+Rules (AUTO — be conservative):
+- mode "direct" for short chat and one-shot asks without pasted code / long docs.
+- mode "workflow" ONLY when specialist collaboration clearly helps: long docs, pasted code, multi-part deliverables, deep reasoning.
+- Do NOT invent extract→critique→merge chains for simple questions.
+- small is ONLY when a tiny model is enough. Prefer medium when unsure.
+- user_question_chars > 600 → NEVER direct small. Prefer direct large, or workflow if multi-facet.
+- Image → large (or direct large).
+${PLANNER_COLLAB_RULES}`;
 
-/** 파이프라인 ON: 인사 등 극히 단순할 때만 direct, 그 외는 workflow 필수 */
+/** 파이프라인 ON: 극히 단순할 때만 direct, 그 외는 workflow 필수 */
 const PLANNER_SYSTEM_MULTI = `You are the PIPELINE PLANNER for a multi-tier LLM cluster (small / medium / large).
-PIPELINE MODE IS ON. For almost all real questions you MUST return mode "workflow" with 2~4 steps.
+PIPELINE MODE IS ON. For almost all real questions you MUST return mode "workflow" with 2~${MAX_STEPS} steps.
 A separate ROUTER may have classified tier/specialty — treat it as a hint, not a fixed template.
-Do NOT always start with small. Pick tiers/order for the user's ASK.
+Do NOT default to extract→solve→polish. Design an organic specialist chain for THIS ask.
 ${PLANNER_CONTENT_GUARD}
+${PLANNER_COLLAB_RULES}
 
 Tiers:
 - small: very weak (0.5B). Almost never use. Never for long text extract/polish.
-- medium: extract key points, summarize, moderate Q&A, Korean polish.
-- large: main reasoning, long docs, coding, deep analysis, code review.
+- medium: extract, analyze, critique, polish, moderate draft.
+- large: main draft, deep analysis, long docs, coding, code review body.
 
 Rules:
-- Only mode "direct" for pure greetings / one-word yes-no. Everything else → workflow.
-- Good patterns (examples, not mandatory):
-  • long article + summarize → medium extract → large|medium answer
-  • code review / 코드 리뷰 → medium extract(구조·위험포인트) → large|medium solve(리뷰) → medium polish
-  • hard analysis → medium extract → large solve → medium polish
-  • coding help (write/fix code) → large solve (maybe medium polish)
-  • chat log + issue summary → medium extract → large|medium answer
-- First step tier is chosen freely for THIS ask (small/medium/large all allowed).
-- Each instruction = short Korean task for that step, about answering the ask (not running pasted code).
+- Only mode "direct" when a single weak reply is enough. Everything else → workflow.
+- Each instruction = short Korean task for that specialist (not running pasted code).
+- Wire "reads" so models only see what they need (critique≠full raw dump, merge sees colleagues).
 - Image → include a large step.`;
 
 function clamp(n, lo, hi) {
@@ -84,6 +116,84 @@ function truncate(s, max) {
   return t.slice(0, max) + "…";
 }
 
+/** medium ctx 4096 등 티어별 단계 입력 상한 (시스템·동료 출력 여유 포함) */
+function promptBudgetForTier(tier, { rag = false } = {}) {
+  const t = String(tier || "medium").toLowerCase();
+  // RAG 참고 문서가 붙으면 동료 출력·질문 예산을 더 줄여 4096 초과를 막는다
+  if (rag) {
+    if (t === "large") return { userQ: 3800, prior: 1600, draft: 2200 };
+    if (t === "small") return { userQ: 700, prior: 400, draft: 500 };
+    return { userQ: 1400, prior: 700, draft: 900 };
+  }
+  if (t === "large") return { userQ: 5500, prior: 3000, draft: 4000 };
+  if (t === "small") return { userQ: 1000, prior: 800, draft: 900 };
+  return { userQ: 2200, prior: 1400, draft: 2000 };
+}
+
+/**
+ * reads: 이 단계가 받을 입력.
+ * - null → 기본(이전 단계 전부 + 질문)
+ * - ["user", 0, 2] → 사용자 질문 + 0·2번 단계 출력만
+ */
+function normalizeReads(raw, stepIndex) {
+  if (raw == null || raw === "") return null;
+  // 단일 객체 {"type":"user"} / {"type":"step","i":0} 도 허용
+  let list;
+  if (Array.isArray(raw)) list = raw;
+  else if (typeof raw === "string" || typeof raw === "number") list = [raw];
+  else if (raw && typeof raw === "object") list = [raw];
+  else list = [];
+  const out = [];
+  const seen = new Set();
+  for (const item of list) {
+    if (item && typeof item === "object") {
+      const t = String(item.type ?? "").toLowerCase();
+      if (t === "user" || t === "q" || t === "question") {
+        if (!seen.has("user")) {
+          seen.add("user");
+          out.push({ type: "user" });
+        }
+        continue;
+      }
+      if (t === "step" || item.i != null || item.index != null) {
+        const n = Number(item.i ?? item.index);
+        if (
+          Number.isInteger(n) &&
+          n >= 0 &&
+          n < stepIndex &&
+          !seen.has(`s${n}`)
+        ) {
+          seen.add(`s${n}`);
+          out.push({ type: "step", i: n });
+        }
+        continue;
+      }
+    }
+    const key = String(item ?? "")
+      .trim()
+      .toLowerCase();
+    if (!key) continue;
+    if (key === "user" || key === "q" || key === "question" || key === "-1") {
+      if (!seen.has("user")) {
+        seen.add("user");
+        out.push({ type: "user" });
+      }
+      continue;
+    }
+    const n = Number(item);
+    if (
+      Number.isInteger(n) &&
+      n >= 0 &&
+      n < stepIndex &&
+      !seen.has(`s${n}`)
+    ) {
+      seen.add(`s${n}`);
+      out.push({ type: "step", i: n });
+    }
+  }
+  return out.length ? out : null;
+}
+
 function normalizeSteps(rawSteps, skillOptions = []) {
   if (!Array.isArray(rawSteps)) return [];
   const out = [];
@@ -93,13 +203,21 @@ function normalizeSteps(rawSteps, skillOptions = []) {
     if (!VALID_TIERS.has(tier)) continue;
     const instruction = String(s.instruction ?? s.task ?? "").trim();
     if (!instruction) continue;
+    const stepIndex = out.length;
     const step = {
       tier,
-      role: String(s.role ?? "step").slice(0, 40),
+      role: String(s.role ?? s.name ?? "step").slice(0, 40),
       instruction: truncate(instruction, 400),
     };
     const skill = resolveSkillChoice(s.skill, skillOptions);
     if (skill) step.skill = skill;
+    const reads = normalizeReads(
+      s.reads ?? s.from ?? s.inputs ?? s.inputFrom,
+      stepIndex,
+    );
+    if (reads) step.reads = reads;
+    const produces = String(s.produces ?? s.output ?? "").trim();
+    if (produces) step.produces = truncate(produces, 80);
     out.push(step);
     if (out.length >= MAX_STEPS) break;
   }
@@ -107,31 +225,13 @@ function normalizeSteps(rawSteps, skillOptions = []) {
 }
 
 /**
- * 특기 안내 + JSON 스키마.
- * 스키마를 마지막에 두고, 특기 서버가 있을 때만 스키마에 skill 필드를 넣는다.
- * (작은 라우터 모델은 마지막에 본 예시를 그대로 따라가므로 순서가 중요하다)
+ * 특기 안내 + JSON 스키마 (공용 routerShared).
  */
 function skillBlock(skillOptions) {
-  const menu = skillMenu(skillOptions);
-  if (!menu) {
-    return `
-
-JSON only:
-{"mode":"direct","tier":"small|medium|large","difficulty":0-100,"reason":"한국어 한줄"}
-or
-{"mode":"workflow","difficulty":0-100,"reason":"한국어 한줄","steps":[{"tier":"small|medium|large","role":"extract|solve|polish|answer|other","instruction":"사용자 요청을 위한 짧은 한국어 지시"}]}`;
-  }
-  return `
-
-Specialty backends are available. Pick the number whose specialty fits the work,
-or 0 when none fits. Never invent a specialty — number only.
-skills:
-${menu}
-
-JSON only ("skill" is required, use 0 when no specialty fits):
-{"mode":"direct","tier":"small|medium|large","skill":0,"difficulty":0-100,"reason":"한국어 한줄"}
-or
-{"mode":"workflow","difficulty":0-100,"reason":"한국어 한줄","steps":[{"tier":"small|medium|large","role":"extract|solve|polish|answer|other","skill":0,"instruction":"사용자 요청을 위한 짧은 한국어 지시"}]}`;
+  const stepSchema = skillOptions?.length
+    ? `{"tier":"small|medium|large","role":"extract|analyze|draft|critique|merge|polish|answer|other","skill":0,"reads":["user",0],"produces":"이 단계 산출물 한줄","instruction":"짧은 한국어 지시"}`
+    : `{"tier":"small|medium|large","role":"extract|analyze|draft|critique|merge|polish|answer|other","reads":["user",0],"produces":"이 단계 산출물 한줄","instruction":"짧은 한국어 지시"}`;
+  return buildPlannerSkillBlock(skillOptions, stepSchema);
 }
 
 /** 질문 앞부분(요청)과 뒤에 붙은 코드/본문 분리 */
@@ -165,9 +265,29 @@ function splitUserAskAndContent(userText) {
 }
 
 function looksLikeReviewAsk(ask) {
-  return /코드\s*리뷰|code\s*review|리뷰\s*(해|부탁|좀|요청)|검토\s*(해|부탁)|개선점|문제점|어때\s*\?|피드백/i.test(
-    String(ask || ""),
-  );
+  // 구조적 신호만 — 붙여넣은 코드/문서 리뷰 요청 여부 (단어 목록 최소화)
+  return /\breview\b|리뷰|검토|개선점|피드백/i.test(String(ask || ""));
+}
+
+/**
+ * auto 모드에서 파이프라인(설계기)이 필요한지.
+ * 길이·첨부·사고모드 등 구조 신호만 사용 (인사/단어 정규식 없음).
+ */
+export function needsMultiStepAsk(body) {
+  if (body?.THINKING === true) return true;
+  const hardImage =
+    body?.content !== undefined &&
+    body?.content !== null &&
+    body?.content !== "";
+  if (hardImage) return true;
+
+  const q = String(body?.ROLE_USER ?? "");
+  if (!q.trim()) return false;
+  const { ask, content, hasCode } = splitUserAskAndContent(q);
+  if (hasCode || content.length > 800) return true;
+  if (looksLikeReviewAsk(ask || q) && (hasCode || q.length > 400)) return true;
+  if (q.length >= (config.largeMinChars || 600)) return true;
+  return false;
 }
 
 /**
@@ -200,7 +320,7 @@ function stepsConfusedWithContent(steps, userText, reasonText = "") {
   return false;
 }
 
-/** 코드/문서 첨부 + 리뷰·분석 요청용 안전 파이프라인 */
+/** 코드/문서 첨부 + 리뷰·분석 요청용 안전 파이프라인 (세분 협업) */
 function safeContentPipeline(body, why) {
   const { ask, hasCode } = splitUserAskAndContent(body?.ROLE_USER);
   const review = looksLikeReviewAsk(ask) || hasCode;
@@ -213,32 +333,62 @@ function safeContentPipeline(body, why) {
         {
           tier: "medium",
           role: "extract",
+          produces: "구조·위험 포인트",
           instruction:
-            "원본 요청과 첨부 코드/문서에서 구조·핵심 로직·의심 지점만 한국어로 요약하라. 코드를 실행하거나 그 결과 JSON을 만들지 마라.",
+            "원본 요청과 첨부 코드/문서에서 구조·핵심 로직·의심 지점만 요약하라(질문과 같은 언어). 코드를 실행하거나 그 결과 JSON을 만들지 마라.",
         },
         {
           tier: heavy,
-          role: "solve",
-          instruction: review
-            ? "원본 사용자 요청(코드 리뷰/검토)에 답하라. 버그·가독성·설계·개선점을 구체적으로 쓰고, 첨부 코드를 실행·흉내 내지 마라."
-            : "원본 사용자 질문에 답하라. 첨부 자료는 참고만 하고 그 로직을 실행하지 마라.",
+          role: "analyze",
+          reads: ["user", 0],
+          produces: "결함·개선 분석",
+          instruction:
+            "추출 요약을 바탕으로 버그·설계·가독성 이슈를 구체적으로 분석하라(질문과 같은 언어). 첨부 코드를 실행·흉내 내지 마라.",
+        },
+        {
+          tier: heavy,
+          role: "draft",
+          reads: ["user", 0, 1],
+          produces: "리뷰 초안",
+          instruction:
+            "분석 결과를 반영해 사용자 요청(코드 리뷰/검토)에 대한 완성된 리뷰 초안을 작성하라(질문과 같은 언어).",
         },
         {
           tier: "medium",
-          role: "polish",
-          instruction: "초안을 한국어로 간결히 다듬어 최종 리뷰/답변만 출력하라.",
+          role: "critique",
+          reads: [2],
+          produces: "빠진 점·과장 지적",
+          instruction:
+            "리뷰 초안에서 빠진 위험·과장·모호한 표현만 짧게 지적하라(질문과 같은 언어). 새 본문을 쓰지 마라.",
+        },
+        {
+          tier: "medium",
+          role: "merge",
+          reads: [2, 3],
+          produces: "최종 리뷰",
+          instruction:
+            "초안과 비판을 합쳐 최종 리뷰만 질문과 같은 언어로 간결히 출력하라.",
         },
       ]
     : [
         {
+          tier: "medium",
+          role: "extract",
+          produces: "핵심 요약",
+          instruction: "원본 요청·첨부에서 답에 필요한 핵심만 추출하라(질문과 같은 언어).",
+        },
+        {
           tier: heavy,
-          role: "solve",
-          instruction: "원본 사용자 질문에 대한 본 답변을 작성하라.",
+          role: "draft",
+          reads: ["user", 0],
+          produces: "답변 초안",
+          instruction: "추출 요약을 바탕으로 원본 사용자 질문에 대한 본 답변을 작성하라(질문과 같은 언어).",
         },
         {
           tier: "medium",
           role: "polish",
-          instruction: "초안을 한국어로 간결히 다듬어 최종 답만 출력하라.",
+          reads: [1],
+          instruction: "초안을 질문과 같은 언어로 간결히 다듬어 최종 답만 출력하라.",
         },
       ];
   return pipelinePlan(steps, why, body);
@@ -280,7 +430,69 @@ function planMetaOf(plan) {
   };
 }
 
-/** 라우터 판단이 입력 길이에 비해 너무 작은 티어면 끌어올린다. */
+/** direct/workflow 플랜 필드를 명시 병합 (spread 충돌 방지) */
+function mergePlan(base, overrides = {}) {
+  const meta = planMetaOf({ ...base, ...overrides });
+  return {
+    mode: overrides.mode ?? base.mode ?? "direct",
+    tier: overrides.tier ?? base.tier ?? "medium",
+    steps: overrides.steps ?? base.steps ?? [],
+    reason: overrides.reason ?? base.reason ?? "",
+    skill:
+      overrides.skill !== undefined ? overrides.skill : (base.skill ?? null),
+    difficulty:
+      overrides.difficulty !== undefined
+        ? overrides.difficulty
+        : (base.difficulty ?? null),
+    device:
+      overrides.device !== undefined ? overrides.device : (base.device ?? null),
+    deviceReason:
+      overrides.deviceReason !== undefined
+        ? overrides.deviceReason
+        : (base.deviceReason ?? null),
+    ...meta,
+  };
+}
+
+/** 라우터 결과 → direct 플랜 */
+function mergeDirectFromRoute(route, body, reason) {
+  const base = directPlan(
+    route?.tier || "medium",
+    reason || route?.reason || "router → direct",
+    body,
+  );
+  return mergePlan(base, {
+    skill: route?.skill ?? null,
+    difficulty: route?.difficulty ?? base.difficulty,
+    device: route?.device ?? base.device,
+    deviceReason: route?.deviceReason ?? base.deviceReason,
+    reason: reason || route?.reason || base.reason,
+    ...planMetaOf(route || {}),
+  });
+}
+
+/** 파이프라인 강제 ON: 이미 workflow면 유지, direct면 승격 */
+function ensureWorkflowIfForced(plan, body, wantOn) {
+  if (!wantOn) return plan;
+  if (plan?.mode === "workflow" && Array.isArray(plan.steps) && plan.steps.length >= 2) {
+    return plan;
+  }
+  const promoted = promoteToPipeline(plan, body);
+  if (promoted.mode === "workflow") {
+    logger.info(
+      `파이프라인 ON: → workflow 승격 ${promoted.steps.map((s) => s.tier).join("→")}`,
+    );
+  }
+  return mergePlan(promoted, {
+    skill: plan?.skill ?? promoted.skill ?? null,
+    difficulty: plan?.difficulty ?? promoted.difficulty,
+    device: plan?.device ?? promoted.device,
+    deviceReason: plan?.deviceReason ?? promoted.deviceReason,
+    ...planMetaOf(plan || {}),
+  });
+}
+
+/** 라우터 판단이 입력 길이에 비해 너무 작은 티어면 끌어올린다. meta/skill 보존 */
 function enforceTierFloor(plan, body) {
   const floor = tierFloor(body);
   if (floor.tier === "small") return plan;
@@ -291,48 +503,62 @@ function enforceTierFloor(plan, body) {
     logger.info(
       `티어 하한 적용: direct ${plan.tier} → ${floor.tier} (${floor.reason})`,
     );
-    // 티어가 올라가도 특기 선호는 유지한다 (새 티어에 해당 특기가 없으면 풀에서 무시됨)
-    return {
-      ...directPlan(
-        floor.tier,
-        `${plan.reason} → ${floor.tier} 승격 (${floor.reason})`,
-        body,
-      ),
+    const bumped = directPlan(
+      floor.tier,
+      `${plan.reason} → ${floor.tier} 승격 (${floor.reason})`,
+      body,
+    );
+    return mergePlan(bumped, {
       skill: plan.skill ?? null,
+      difficulty: plan.difficulty ?? bumped.difficulty,
+      device: plan.device ?? bumped.device,
+      deviceReason: plan.deviceReason ?? bumped.deviceReason,
+      reason: bumped.reason,
       ...planMetaOf(plan),
-    };
+    });
   }
 
-  // 파이프라인: 원본 입력을 그대로 받는 첫 단계가 small 이면 승격
-  const steps = plan.steps.map((s, i) =>
+  const steps = (plan.steps || []).map((s, i) =>
     i === 0 && TIER_RANK[s.tier] < need ? { ...s, tier: floor.tier } : s,
   );
-  if (steps.every((s, i) => s.tier === plan.steps[i].tier)) return plan;
-  logger.info(
-    `티어 하한 적용: 1단계 → ${floor.tier} (${floor.reason})`,
+  if (
+    plan.steps &&
+    steps.every((s, i) => s.tier === plan.steps[i].tier)
+  ) {
+    return plan;
+  }
+  logger.info(`티어 하한 적용: 1단계 → ${floor.tier} (${floor.reason})`);
+  const bumped = pipelinePlan(
+    steps,
+    `${plan.reason} → 1단계 ${floor.tier} 승격 (${floor.reason})`,
+    body,
   );
-  return {
-    ...pipelinePlan(
-      steps,
-      `${plan.reason} → 1단계 ${floor.tier} 승격 (${floor.reason})`,
-      body,
-    ),
+  return mergePlan(bumped, {
+    skill: plan.skill ?? null,
+    difficulty: plan.difficulty ?? bumped.difficulty,
+    device: plan.device ?? bumped.device,
+    deviceReason: plan.deviceReason ?? bumped.deviceReason,
+    reason: bumped.reason,
     ...planMetaOf(plan),
-  };
+  });
 }
 
+export function isBlankAsk(body) {
+  return !String(body?.ROLE_USER ?? "").trim();
+}
+
+/** @deprecated 호환용 — 단어 패턴 없이 빈 질문만 */
 export function isTrivialQuestion(body) {
-  const q = String(body?.ROLE_USER ?? "").trim();
-  if (!q) return true;
-  // 짧은 인사·감탄·단답만 (긴 문장은 제외)
-  if (
-    /^(안녕|안녕하세요|안녕하세여|하이|헬로|hello|hi|hey|ㅎㅇ|ㅋㅋ+|ㅎㅎ+|ㅇㅇ|응|아니|네|예|고마워|감사|ㄱㅅ)[\s!?.~]*$/i.test(
-      q,
-    )
-  ) {
-    return true;
-  }
-  if (q.length <= 8 && !/[.。;；{([`]/.test(q)) return true;
+  return isBlankAsk(body);
+}
+
+/** @deprecated 호환용 — 라우터가 판단. 패턴 매칭 없음 */
+export function isGreetingQuestion(_body) {
+  return false;
+}
+
+/** @deprecated 호환용 — 라우터+시스템 정체성으로 처리. 패턴 매칭 없음 */
+export function isMetaIdentityQuestion(_body) {
   return false;
 }
 
@@ -387,7 +613,7 @@ export function heuristicPipelinePlan(body) {
         {
           tier: "medium",
           role: "polish",
-          instruction: "초안을 한국어로 간결히 다듬어 최종 답만 출력하라.",
+          instruction: "초안을 질문과 같은 언어로 간결히 다듬어 최종 답만 출력하라.",
         },
       ],
       "heuristic-pipeline: thinking",
@@ -400,8 +626,8 @@ export function heuristicPipelinePlan(body) {
     return directPlan(explicit, "heuristic: explicit MODEL_TIER", body);
   }
 
-  if (isTrivialQuestion(body)) {
-    return directPlan("small", "heuristic-pipeline: trivial → direct", body);
+  if (isBlankAsk(body)) {
+    return directPlan("small", "heuristic-pipeline: empty → direct", body);
   }
 
   const userText = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
@@ -428,7 +654,7 @@ export function heuristicPipelinePlan(body) {
           tier: "medium",
           role: "polish",
           instruction:
-            "초안을 한국어로 자연스럽고 간결하게 다듬어 최종 답만 출력하라.",
+            "초안을 질문과 같은 언어로 자연스럽고 간결하게 다듬어 최종 답만 출력하라.",
         },
       ],
       `heuristic-pipeline: ${t.reason}`,
@@ -446,7 +672,7 @@ export function heuristicPipelinePlan(body) {
       {
         tier: "medium",
         role: "polish",
-        instruction: "초안을 한국어로 간결히 다듬어 최종 답만 출력하라.",
+        instruction: "초안을 질문과 같은 언어로 간결히 다듬어 최종 답만 출력하라.",
       },
     ],
     `heuristic-pipeline: ${t.reason}`,
@@ -456,24 +682,30 @@ export function heuristicPipelinePlan(body) {
 
 /** direct 플랜을 파이프라인으로 승격 (ON 모드). 라우터≠첫 단계. medium 강제 시작 안 함. */
 function promoteToPipeline(direct, body) {
-  if (direct.tier === "small" || isTrivialQuestion(body)) return direct;
+  if (direct.tier === "small" || isBlankAsk(body)) return direct;
   const heavy = direct.tier === "large" ? "large" : "medium";
+  // 3B 급 소형 클러스터에서 critique→merge 는 품질 향상 없이 메타-잡음만 만든다.
+  // 주력 모델(draft)이 실제 답을 쓰고 polish 로 가볍게 다듬는 2단계로만 승격.
+  // (polish 는 reads 없이 두어 buildStepMessages 의 경량 polish 경로를 타게 함)
   return {
     ...pipelinePlan(
       [
         {
           tier: heavy,
-          role: "solve",
-          instruction: "사용자 질문에 대한 본 답변을 작성하라.",
+          role: "draft",
+          produces: "답변",
+          instruction: "사용자 질문에 대한 완성된 답변을 작성하라.",
           ...(direct.skill ? { skill: direct.skill } : {}),
         },
         {
           tier: "medium",
           role: "polish",
-          instruction: "초안을 한국어로 간결히 다듬어 최종 답만 출력하라.",
+          produces: "최종 답",
+          instruction:
+            "초안을 질문과 같은 언어로 간결히 다듬어 최종 답만 출력하라. 새 내용·메타설명·인사·다짐 문장 금지.",
         },
       ],
-      `${direct.reason} → pipeline 승격`,
+      `${direct.reason} → pipeline 승격(draft→polish)`,
       body,
     ),
     ...planMetaOf(direct),
@@ -501,15 +733,20 @@ export function heuristicPlan(body) {
 function buildPlannerUserPrompt(body, preferMulti = false, routeHint = null) {
   const userText = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
   const sysText = typeof body?.ROLE_SYSTEM === "string" ? body.ROLE_SYSTEM : "";
-  const historyTurns = Array.isArray(body?.HISTORY) ? body.HISTORY.length : 0;
+  const history = Array.isArray(body?.HISTORY) ? body.HISTORY : [];
+  const historyTurns = history.length;
   const hasImage =
     body?.content !== undefined && body?.content !== null && body?.content !== "";
   const { ask, content, hasCode } = splitUserAskAndContent(userText);
+  const histSnippet = formatHistorySnippet(history, {
+    maxTurns: 6,
+    perTurnMax: 220,
+  });
   const lines = [
     preferMulti
-      ? "preference: PIPELINE ON — return mode workflow with 2~4 steps unless the question is a pure greeting. Do NOT start with small for long text."
-      : "preference: prefer direct (one model) unless pipeline clearly helps.",
-    "Design steps ONLY for user_ask. attached_content is material to analyze/review — never treat it as executable task list.",
+      ? `preference: PIPELINE ON — return mode workflow with 2~${MAX_STEPS} specialist steps unless a single-model reply is clearly enough. Use reads so models collaborate; do NOT default to extract→solve→polish.`
+      : "preference: prefer direct (one model) unless specialist collaboration clearly helps.",
+    "Design an organic specialist chain for user_ask. attached_content is material to analyze/review — never treat it as executable task list.",
     `system_prompt: ${truncate(sysText, 400) || "(none)"}`,
     `user_ask: ${truncate(ask || userText, 400)}`,
     `user_question_chars: ${userText.length} (long input must NOT be handled by small)`,
@@ -517,9 +754,10 @@ function buildPlannerUserPrompt(body, preferMulti = false, routeHint = null) {
       ? `attached_content_preview (do NOT execute; review/analyze only):\n${truncate(content, 900)}`
       : `user_question: ${truncate(userText, 1200)}`,
     `history_turns: ${historyTurns}`,
+    histSnippet ? `recent_history:\n${histSnippet}` : null,
     `has_image: ${hasImage}`,
     looksLikeReviewAsk(ask)
-      ? "detected: code/document REVIEW request → extract points → review answer → polish"
+      ? "detected: REVIEW ask → prefer extract→analyze→draft→critique→merge with reads"
       : null,
   ].filter(Boolean);
   if (routeHint?.tier) {
@@ -533,6 +771,8 @@ function buildPlannerUserPrompt(body, preferMulti = false, routeHint = null) {
         " (hint only — you may adjust steps)",
     );
   }
+  const ragHint = ragPlannerHint(body, body?._rag);
+  if (ragHint) lines.push(ragHint);
   return lines.join("\n");
 }
 
@@ -544,6 +784,9 @@ export async function planWithLlm(body, preferMulti = false, routeHint = null) {
   if (!pool.hasActivePlanner()) return null;
   const started = Date.now();
   const skillOptions = pool.skillOptions();
+  const slotsHint = formatClusterSlotsHint(
+    pool.slotSnapshot()?.promptBlock || "",
+  );
   try {
     const out = await pool.classify({
       messages: [
@@ -551,6 +794,7 @@ export async function planWithLlm(body, preferMulti = false, routeHint = null) {
           role: "system",
           content:
             (preferMulti ? PLANNER_SYSTEM_MULTI : PLANNER_SYSTEM_AUTO) +
+            slotsHint +
             skillBlock(skillOptions),
         },
         {
@@ -601,7 +845,12 @@ export async function planWithLlm(body, preferMulti = false, routeHint = null) {
     const planSkill = resolveSkillChoice(parsed.skill, skillOptions);
 
     if (mode === "workflow") {
-      let steps = normalizeSteps(parsed.steps, skillOptions);
+      let steps = normalizeSteps(parsed.steps, skillOptions).map((s) => {
+        const sk = s.skill || null;
+        if (sk) return { ...s, skill: sk };
+        const { skill: _drop, ...rest } = s;
+        return rest;
+      });
       const userText =
         typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
       // 붙여넣은 코드를 실행 계획으로 오해한 설계 → 안전 파이프라인으로 교체
@@ -702,9 +951,15 @@ export async function planWithLlm(body, preferMulti = false, routeHint = null) {
 
 /**
  * - off: 라우터 분류 → 단일 모델
- * - on/auto: 라우터 분류(핸드오프) → 파이프라인 설계(steps) → 실행
- *   설계 역할이 없으면 라우터 분류로 direct(ON 이면 휴리스틱 승격)
+ * - on: 파이프라인 강제 (설계기 + ensureWorkflowIfForced)
+ * - auto(체크 해제): 단순 질문=단일, 긴글·코드리뷰 등만 설계기/파이프라인
  */
+async function finishPlan(plan, body) {
+  const floored = enforceTierFloor(plan, body);
+  const { applyLoadAwarePlan } = await import("./loadAwareRoute.js");
+  return applyLoadAwarePlan(floored, body);
+}
+
 export async function createPlan(body) {
   const modeEnv = (config.workflowMode || "auto").toLowerCase();
   const flag = body?.WORKFLOW;
@@ -715,104 +970,86 @@ export async function createPlan(body) {
   const explicit = String(body?.MODEL_TIER ?? "").toLowerCase();
   const hasImage =
     body?.content !== undefined && body?.content !== null && body?.content !== "";
-  if (hasImage) return directPlan("large", "image → large", body);
+  if (hasImage) {
+    return finishPlan(directPlan("large", "image → large", body), body);
+  }
   if (VALID_TIERS.has(explicit)) {
-    return directPlan(explicit, "explicit MODEL_TIER", body);
+    return finishPlan(
+      directPlan(explicit, "explicit MODEL_TIER", body),
+      body,
+    );
   }
   if (body?.THINKING === true && wantWorkflow !== "on") {
-    return directPlan("large", "thinking → large", body);
-  }
-
-  // 인사·단답: 파이프라인 설계기 호출 금지 → 라우터 분류 후 단일 모델
-  if (isTrivialQuestion(body)) {
-    let route = null;
-    if (pool.hasActiveRouter()) {
-      route = await classifyWithLlm(body);
-    }
-    if (route) {
-      const tier =
-        route.tier === "large" ? "medium" : route.tier || "small";
-      return {
-        ...directPlan(
-          VALID_TIERS.has(tier) ? tier : "small",
-          `trivial → ${route.reason || "router"}`,
-          body,
-        ),
-        skill: route.skill ?? null,
-        difficulty: route.difficulty,
-        device: route.device,
-        deviceReason: route.deviceReason,
-        ...planMetaOf(route),
-      };
-    }
-    return directPlan("small", "trivial greeting → direct", body);
+    return finishPlan(directPlan("large", "thinking → large", body), body);
   }
 
   if (wantWorkflow === "off") {
     const { chooseRoute } = await import("./router.js");
     const route = await chooseRoute({ ...body, WORKFLOW: false });
-    return enforceTierFloor(
-      {
-        ...directPlan(route.tier, route.reason, body),
-        skill: route.skill ?? null,
-        difficulty: route.difficulty,
-        device: route.device,
-        deviceReason: route.deviceReason,
-        reason: route.reason,
-        ...planMetaOf(route),
-      },
+    return finishPlan(
+      mergeDirectFromRoute(route, body, route.reason),
       body,
     );
   }
 
-  // 1) 라우터: 티어·특기 분류만 (파이프라인 설계는 하지 않음)
+  // 1) 라우터: 티어·특기 분류
   let route = null;
   if (pool.hasActiveRouter()) {
     route = await classifyWithLlm(body);
   }
 
-  // 2) 파이프라인 설계기: steps[] 구성
+  // auto: 설계기 없이 라우터 단일 (강제 ON 이거나 협업 신호일 때만 설계기)
+  const multiOk = wantWorkflow === "on" || needsMultiStepAsk(body);
+  if (!multiOk) {
+    if (route) {
+      logger.info(
+        `auto·단일 → router direct: ${truncate(route.reason || "", 80)}`,
+      );
+      return finishPlan(
+        mergeDirectFromRoute(
+          route,
+          body,
+          `router → direct (${route.reason || "router"})`,
+        ),
+        body,
+      );
+    }
+    logger.warn("라우터 없음/실패 → heuristic 폴백 (single)");
+    const fb = heuristicPlan(body);
+    return finishPlan(
+      mergePlan(fb, { reason: `router-fallback: ${fb.reason}` }),
+      body,
+    );
+  }
+
+  // 2) 파이프라인 설계기
   if (pool.hasActivePlanner()) {
     const llm = await planWithLlm(body, wantWorkflow === "on", route);
     if (llm) {
-      if (wantWorkflow === "on" && llm.mode === "direct") {
-        const promoted = promoteToPipeline(llm, body);
-        if (promoted.mode === "workflow") {
-          logger.info(
-            `파이프라인 ON: direct→workflow 승격 ${promoted.steps.map((s) => s.tier).join("→")}`,
-          );
-        }
-        return enforceTierFloor(promoted, body);
-      }
-      return enforceTierFloor(llm, body);
+      // ON이면 direct→workflow 승격만; auto는 설계기 결과 신뢰(강등 휴리스틱 제거)
+      const plan = ensureWorkflowIfForced(llm, body, wantWorkflow === "on");
+      return finishPlan(plan, body);
     }
   }
 
-  // 3) 설계기 없음 → 라우터 분류로 direct (ON 이면 휴리스틱 파이프라인 승격)
+  // 3) 설계기 없음 → 라우터 direct (ON 이면 승격)
   if (route) {
-    let plan = {
-      ...directPlan(route.tier, route.reason, body),
-      skill: route.skill ?? null,
-      difficulty: route.difficulty,
-      device: route.device,
-      deviceReason: route.deviceReason,
-      reason: route.reason,
-      ...planMetaOf(route),
-    };
-    if (wantWorkflow === "on") {
-      const promoted = promoteToPipeline(plan, body);
-      if (promoted.mode === "workflow") {
-        logger.info(
-          `파이프라인 ON(설계기 없음): 라우터 분류→휴리스틱 승격 ${promoted.steps.map((s) => s.tier).join("→")}`,
-        );
-      }
-      return enforceTierFloor(promoted, body);
-    }
-    return enforceTierFloor(plan, body);
+    const plan = mergeDirectFromRoute(route, body, route.reason);
+    return finishPlan(
+      ensureWorkflowIfForced(plan, body, wantWorkflow === "on"),
+      body,
+    );
   }
 
-  if (wantWorkflow === "on") return enforceTierFloor(heuristicPipelinePlan(body), body);
-  return enforceTierFloor(heuristicPlan(body), body);
+  if (wantWorkflow === "on") {
+    return finishPlan(heuristicPipelinePlan(body), body);
+  }
+  logger.warn("라우터/설계기 없음 → heuristic 폴백");
+  const fb = heuristicPlan(body);
+  return finishPlan(
+    mergePlan(fb, { reason: `router-fallback: ${fb.reason}` }),
+    body,
+  );
 }
 
 function buildStepMessages({
@@ -829,62 +1066,179 @@ function buildStepMessages({
       ? body.ROLE_SYSTEM.trim()
       : "";
 
-  // polish: 0.5B small 은 프롬프트를 베끼므로 호출 생략(직전 초안 사용).
-  // medium/large polish 만 실행. 원본 질문(userQ)은 넣지 않음.
-  const isPolish = String(step.role || "").toLowerCase() === "polish";
+  const roleKey = String(step.role || "").toLowerCase();
+  const isPolish = roleKey === "polish";
+  const isCritique = roleKey === "critique" || roleKey === "critic";
 
-  if (isPolish && prior.length > 0) {
-    const draft = truncate(prior[prior.length - 1].output, 3500);
+  const ragState = body?._rag;
+  const hasRag = Boolean(
+    ragState && (ragState.context || ragState.hits?.length),
+  );
+  const memoryCtx =
+    typeof body?._memory?.context === "string" ? body._memory.context.trim() : "";
+  const hasMemory = Boolean(memoryCtx);
+  const budget = promptBudgetForTier(step.tier, { rag: hasRag });
+  const hasVision =
+    Boolean(ragState?.hits?.some((h) => h.imageFile)) ||
+    (body?.content !== undefined &&
+      body?.content !== null &&
+      body?.content !== "");
+
+  // polish: 0.5B small 은 프롬프트를 베끼므로 호출 생략(직전 초안 사용).
+  if (isPolish && prior.length > 0 && !step.reads) {
+    const draft = truncate(prior[prior.length - 1].output, budget.draft);
+    const langLine = replyLanguageSystemLine(userQ);
     const system = [
       "문장 다듬기만 한다. 새 사실·새 문단을 만들지 마라.",
-      "초안의 의미는 유지하고 한국어만 자연스럽게 다듬어라.",
+      "초안의 의미는 유지하되, 출력 언어는 반드시 사용자 질문과 같게 하라.",
+      hasRag
+        ? ragSystemAddon(ragState.strict !== false, hasVision, userQ)
+        : "",
+      hasMemory
+        ? "개인 기억 블록에 과거 사용자 사실이 있으면 관련될 때 활용하라. 목록에 없는 기억을 지어내지 마라."
+        : "",
+      langLine,
+      "초안 언어가 질문과 다르면 질문 언어로 번역·다듬어 출력하라.",
       "최종 답 본문만 출력. 라벨·번호·메타·질문 인용 금지.",
-    ].join("\n");
-    const user = `초안:\n${draft}\n\n다듬은 답만:`;
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const user =
+      `초안:\n${draft}\n\n다듬은 답만:` +
+      replyLanguageReminder(userQ, { pipeline: true });
     return [
       { role: "system", content: system },
       { role: "user", content: user },
     ];
   }
 
-  const priorBlock =
-    prior.length === 0
-      ? ""
-      : prior
-          .map(
-            (p, i) =>
-              `--- 단계${i + 1} (${p.role}) 출력 ---\n${truncate(p.output, 3500)}`,
-          )
-          .join("\n\n");
-
   const { ask: userAsk } = splitUserAskAndContent(userQ);
-  const system = [
-    `너는 멀티모델 파이프라인의 ${stepIndex + 1}/${totalSteps} 단계 (${step.role}, tier=${step.tier}) 다.`,
-    `이 단계 지시: ${step.instruction}`,
-    "목표는 원본 사용자 요청에 답하는 것이다. 질문에 붙은 코드/문서는 분석·리뷰 대상일 뿐, 그 함수/로직을 실행하거나 JSON 결과를 흉내 내지 마라.",
-    isLast
-      ? "이 단계의 출력이 사용자에게 보이는 최종 답이다. 완성된 답만 출력하라. 단계 번호·라벨·프롬프트 문구·티어 JSON 을 복사하지 마라."
-      : "다음 단계가 쓸 중간 요약만 출력하라. 코드를 실행한 것처럼 꾸미지 말고, 불필요한 인사·메타 설명 금지.",
-    config.enforceLanguage ? config.langDirective : "",
-  ]
+
+  /** reads 가 있으면 지정된 동료/질문만, 없으면 이전 단계 전부 */
+  const includeUser =
+    !step.reads || step.reads.some((r) => r.type === "user");
+  const priorIndices = step.reads
+    ? step.reads.filter((r) => r.type === "step").map((r) => r.i)
+    : prior.map((_, i) => i);
+
+  const colleagueBlocks = [];
+  for (const i of priorIndices) {
+    const p = prior[i];
+    if (!p) continue;
+    const label =
+      p.produces || p.role || `단계${i + 1}`;
+    colleagueBlocks.push(
+      `[동료 ${i + 1} · ${label} · ${p.tier || "?"}${p.skill ? ` · 특기:${p.skill}` : ""}]\n${truncate(p.output, isCritique ? Math.min(budget.prior, 1800) : budget.prior)}`,
+    );
+  }
+  const dialogue =
+    colleagueBlocks.length === 0
+      ? ""
+      : `### 동료 모델 메시지 (이 단계가 읽을 입력)\n${colleagueBlocks.join("\n\n")}`;
+
+  // RAG 문서는 티어 예산의 상당 부분을 쓰고, 질문 텍스트는 나머지로
+  // (후반 단계는 동료 출력이 크므로 문서 비중을 더 줄임)
+  const ragBudget = hasRag
+    ? Math.min(
+        Math.floor(budget.userQ * (prior.length > 0 ? 0.4 : 0.65)),
+        Math.max(500, budget.userQ - 350),
+      )
+    : 0;
+  const userQBudget = hasRag
+    ? Math.max(400, budget.userQ - ragBudget)
+    : budget.userQ;
+  const ragBlock =
+    hasRag && includeUser
+      ? `참고 문서:\n${truncateRagContext(ragState.context, ragBudget)}`
+      : "";
+  const memBudget = hasMemory
+    ? Math.min(1200, Math.max(300, Math.floor(budget.userQ * 0.25)))
+    : 0;
+  const memoryBlock =
+    hasMemory && includeUser
+      ? truncateRagContext(memoryCtx, memBudget)
+      : "";
+
+  // 이전 대화 (파이프라인에도 주입 — 없으면 "기억 못 함" 답변)
+  const histBudget = includeUser
+    ? Math.min(1800, Math.max(400, Math.floor(budget.userQ * 0.4)))
+    : 0;
+  const { block: historyBlock } = includeUser
+    ? formatHistoryBlock(body?.HISTORY, histBudget, {
+        perTurnMax: 600,
+        maxTurns: 12,
+      })
+    : { block: "" };
+
+  const langLine = replyLanguageSystemLine(userQ);
+  // 단일 답변(파이프라인 아님): 협업 프레이밍을 빼고 언어 지시를 앞에 둔다.
+  // 소형 모델이 무거운 파이프라인 프롬프트에 눌려 헛토큰(타 언어)을 내는 것을 막음.
+  const isLoneDirect =
+    totalSteps === 1 && prior.length === 0 && !isCritique && !isPolish;
+  const system = (
+    isLoneDirect
+      ? [
+          langLine,
+          "너는 사용자 질문에 직접 답하는 어시스턴트다.",
+          sysUser ? `사용자 지시: ${step.instruction}` : `지시: ${step.instruction}`,
+          historyBlock
+            ? "이전 대화가 있으면 맥락을 이어서 답하라. 기억 못한다고 말하지 마라."
+            : "",
+          hasRag ? ragSystemAddon(ragState.strict !== false, hasVision, userQ) : "",
+          hasMemory
+            ? "개인 기억 블록에 과거 사용자 사실이 있으면 관련될 때 활용하라. 목록에 없는 기억을 지어내지 마라."
+            : "",
+          "답변 전체를 사용자 질문과 같은 언어로만 작성하라. 완성된 답 본문만 출력하고, 라벨·메타 설명·다짐 문장은 쓰지 마라.",
+          config.enforceLanguage && !langLine ? config.langDirective : "",
+        ]
+      : [
+          `너는 멀티모델 협업 파이프라인의 ${stepIndex + 1}/${totalSteps} 번째 전문가다.`,
+          `역할(role): ${step.role} · tier=${step.tier}` +
+            (step.skill ? ` · 특기=${step.skill}` : ""),
+          step.produces ? `이번 산출물: ${step.produces}` : "",
+          `이 단계 지시: ${step.instruction}`,
+          prior.length > 0
+            ? "동료가 보낸 메시지와 사용자 요청을 보고, 네 역할에 해당하는 몫만 수행하라."
+            : "",
+          "목표는 원본 사용자 요청에 답하는 것이다. 질문에 붙은 코드/문서는 분석·리뷰 대상일 뿐, 그 함수/로직을 실행하거나 JSON 결과를 흉내 내지 마라.",
+          historyBlock
+            ? "이전 대화가 있으면 이어서 답하라. 맥락을 모른다고 말하지 마라."
+            : "",
+          hasRag ? ragSystemAddon(ragState.strict !== false, hasVision, userQ) : "",
+          hasMemory
+            ? "개인 기억 블록에 과거 사용자 사실이 있으면 관련될 때 활용하라. 목록에 없는 기억을 지어내지 마라."
+            : "",
+          langLine,
+          "중간·최종 산출 모두 사용자 질문과 같은 언어. 동료가 다른 언어로 줘도 질문 언어로 바꿔 이어라.",
+          isCritique
+            ? "비판만 짧게. 최종 본문을 다시 쓰지 마라."
+            : isLast
+              ? "이 단계의 출력이 사용자에게 보이는 최종 답이다. 완성된 답만 출력하라. 단계 번호·라벨·프롬프트 문구·티어 JSON 을 복사하지 마라."
+              : "다음 동료가 이어서 쓸 중간 산출물만 출력하라. 불필요한 인사·메타 설명 금지.",
+          config.enforceLanguage && !langLine ? config.langDirective : "",
+        ]
+  )
     .filter(Boolean)
     .join("\n");
 
-  const koreanHint =
-    isLast && config.enforceLanguage && /[가-힣]/.test(userQ)
-      ? "(답변은 반드시 한국어로만 작성하고, 중국어를 섞지 마세요.)"
-      : "";
+  // 매 단계 생성 직전에 언어 리마인더 (중간 단계 중국어 → 후속 전파 차단)
+  const langHint = replyLanguageReminder(userQ, { pipeline: true });
   const user = [
     sysUser ? `사용자 시스템 지시:\n${sysUser}` : "",
-    userAsk && userAsk !== userQ
+    historyBlock,
+    memoryBlock,
+    ragBlock,
+    includeUser && userAsk && userAsk !== userQ
       ? `사용자 요청(요약):\n${userAsk}`
       : "",
-    `원본 사용자 질문(첨부 코드/문서 포함):\n${truncate(userQ, isLast ? 8000 : 6000)}`,
-    priorBlock ? `이전 단계 출력:\n${priorBlock}` : "",
-    body?.content
+    includeUser
+      ? `원본 사용자 질문(첨부 코드/문서 포함):\n${truncate(userQ, userQBudget)}`
+      : "(원본 질문은 이 단계 reads 에 없음 — 동료 메시지만 참고. 그래도 출력 언어는 원본 질문과 같게.)",
+    dialogue,
+    body?.content && includeUser
       ? "(참고: 원본 요청에 이미지가 포함되어 있을 수 있다. 필요 시 반영.)"
       : "",
-    koreanHint,
+    langHint,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -897,9 +1251,10 @@ function buildStepMessages({
 
 /**
  * 보안검증 게이트 사용 여부 (파이프라인과 무관).
- * 보안검증 기능 + 배정 정책이 있는 모델이 있을 때만.
+ * 전역 스위치 ON + 보안검증 기능·배정 정책이 있는 모델이 있을 때만.
  */
 export function hasSecurityWorkflow() {
+  if (!isSecurityEnabledSync()) return false;
   return pool.backends.some(
     (b) => b.securityEnabled && String(b.securityPolicy || "").trim(),
   );
@@ -929,13 +1284,13 @@ export async function runSecurityPreFinal({
       stepRec: null,
     };
   }
-  // 파이프라인과 무관 — 인사/단답은 검사하지 않음
-  if (isTrivialQuestion({ ROLE_USER: userQ })) {
+  // 빈 질문만 생략 (단어 패턴으로 스킵하지 않음)
+  if (isBlankAsk({ ROLE_USER: userQ })) {
     return {
       allow: true,
       skipped: true,
       answer: draft,
-      check: { allow: true, skipped: true, reason: "인사·단답 → 보안검증 생략" },
+      check: { allow: true, skipped: true, reason: "empty → 보안검증 생략" },
       stepRec: null,
     };
   }
@@ -1014,24 +1369,54 @@ export async function runWorkflow({
     : [{ tier: plan.tier || "small", role: "answer", instruction: "답변" }];
 
   const userQ = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
-  // 보안검증은 파이프라인 단계가 아님 — 토큰만 게이트 후 전송
-  const holdFinal =
-    hasSecurityWorkflow() && !isTrivialQuestion({ ROLE_USER: userQ });
-  const flowLabel = steps.map((s) => s.tier).join(" → ");
-  const stepsPlan = steps.map((s, i) => ({
-    i: i + 1,
-    tier: s.tier,
-    role: s.role,
-    skill: s.skill ?? null,
-    instruction: s.instruction,
-  }));
-
+  // 보안 게이트가 켜져 있으면 검사 통과 전까지 최종 답을 스트리밍하지 않는다
+  // (내용이 보였다가 '금지'로 바뀌는 것 방지 — 마지막 단계는 논스트림 생성).
+  const securityHold = hasSecurityWorkflow();
+  const willRag = isRagRequest(body) || Boolean(body?._rag);
+  const stepOffset = willRag ? 1 : 0;
+  const flowLabel = [
+    ...(willRag ? ["retrieve(rag)"] : []),
+    ...steps.map((s) => `${s.role || s.tier}(${s.tier})`),
+  ].join(" → ");
+  const formatReads = (reads) => {
+    if (!Array.isArray(reads) || !reads.length) return null;
+    return reads.map((r) =>
+      r.type === "user" ? "user" : String((r.i ?? 0) + 1),
+    );
+  };
   const formatBackend = (alias, tier, model, backend) =>
     [alias || null, tier || null, model ? String(model).split(/[\\/]/).pop() : null, backend]
       .filter(Boolean)
       .join(" · ");
 
+  const stepsPlan = [
+    ...(willRag
+      ? [
+          {
+            i: 1,
+            tier: "rag",
+            role: "retrieve",
+            skill: null,
+            produces: "참고 문서",
+            reads: null,
+            instruction: "문서 검색",
+          },
+        ]
+      : []),
+    ...steps.map((s, i) => ({
+      i: i + 1 + stepOffset,
+      tier: s.tier,
+      role: s.role,
+      skill: s.skill ?? null,
+      produces: s.produces ?? null,
+      reads: formatReads(s.reads),
+      instruction: s.instruction,
+    })),
+  ];
+
   const trace = [];
+  let ragPack = null;
+
   // 0a. 라우터 분류 (핸드오프) — 있으면 먼저
   if (plan.routerBackend || plan.routerAlias) {
     trace.push({
@@ -1113,21 +1498,88 @@ export async function runWorkflow({
       tier: s.tier,
       role: s.role,
       skill: s.skill ?? null,
+      produces: s.produces ?? null,
+      reads: s.reads ?? null,
       instruction: s.instruction,
     })),
   });
+
+  // 파이프라인 1단계: 문서 검색 (RAG)
+  if (willRag) {
+    onEvent?.({
+      type: "step_start",
+      i: 0,
+      tier: "rag",
+      role: "retrieve",
+      instruction: "문서 검색",
+    });
+    const ragStarted = Date.now();
+    ragPack = await loadRagForRequest(body);
+    body._rag = {
+      hits: ragPack.hits,
+      context: ragPack.context,
+      sources: ragPack.sources,
+      strict: ragPack.strict,
+      topK: ragPack.topK,
+    };
+    const ragMs = Date.now() - ragStarted;
+    const ragOut = ragPack.hits.length
+      ? `관련 청크 ${ragPack.hits.length}개`
+      : "검색 결과 없음";
+    trace.push({
+      kind: "rag",
+      title: "문서 검색",
+      i: 1,
+      role: "retrieve",
+      tier: "rag",
+      hits: ragPack.hits.length,
+      strict: ragPack.strict,
+      sources: ragPack.sources,
+      ms: ragMs,
+      output: ragOut,
+    });
+    onEvent?.({
+      type: "rag",
+      hits: ragPack.hits.length,
+      sources: ragPack.sources,
+      strict: ragPack.strict,
+      ms: ragMs,
+    });
+    onEvent?.({
+      type: "step_done",
+      i: 0,
+      tier: "rag",
+      role: "retrieve",
+      instruction: "문서 검색",
+      preview: ragOut,
+      output: ragOut,
+      ms: ragMs,
+      isLast: false,
+    });
+    logger.info(
+      `워크플로우 단계 1/${steps.length + 1} 문서검색(rag) → ${ragPack.hits.length}건 ${ragMs}ms`,
+    );
+  }
 
   const prior = [];
   let last = null;
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
+    const uiI = i + stepOffset;
     const isLast = i === steps.length - 1;
-    // 보안검증이 있으면 토큰은 검증 통과 후에만 흘린다
-    const emitTokensNow = isLast && Boolean(onEvent) && !holdFinal;
+    // 마지막 단계 토큰 스트리밍 — 단, 보안 게이트가 켜져 있으면 억제(통과 후 공개)
+    const emitTokensNow = isLast && Boolean(onEvent) && !securityHold;
     const isLarge = step.tier === "large";
     const maxTokens = isLarge ? config.defaultMaxTokens : config.maxTokensSmall;
 
+    const readIdx = step.reads
+      ? step.reads.filter((r) => r.type === "step").map((r) => r.i)
+      : i > 0
+        ? [i - 1]
+        : [];
+    const readUser =
+      !step.reads || step.reads.some((r) => r.type === "user") || i === 0;
     const receivedFrom =
       i === 0
         ? {
@@ -1136,19 +1588,33 @@ export async function runWorkflow({
             text: truncate(userQ, 2000),
           }
         : {
-            kind: "model",
-            label: `${prior[i - 1].alias || prior[i - 1].tier} (${prior[i - 1].role})`,
-            tier: prior[i - 1].tier,
-            alias: prior[i - 1].alias,
-            role: prior[i - 1].role,
-            text: prior[i - 1].output,
+            kind: "collab",
+            label: [
+              readUser ? "사용자" : null,
+              ...readIdx.map(
+                (j) =>
+                  `${prior[j]?.produces || prior[j]?.role || `단계${j + 1}`}`,
+              ),
+            ]
+              .filter(Boolean)
+              .join(" + "),
+            tier: prior[readIdx[readIdx.length - 1]]?.tier,
+            alias: prior[readIdx[readIdx.length - 1]]?.alias,
+            role: prior[readIdx[readIdx.length - 1]]?.role,
+            text: readIdx
+              .map((j) => prior[j]?.output)
+              .filter(Boolean)
+              .join("\n---\n"),
           };
 
     onEvent?.({
       type: "step_start",
-      i,
+      i: uiI,
       tier: step.tier,
       role: step.role,
+      skill: step.skill ?? null,
+      produces: step.produces ?? null,
+      reads: formatReads(step.reads),
       instruction: step.instruction,
       receivedFrom: {
         label: receivedFrom.label,
@@ -1176,7 +1642,7 @@ export async function runWorkflow({
       };
       const stepRec = {
         kind: "model",
-        i: i + 1,
+        i: uiI + 1,
         role: step.role,
         instruction: step.instruction + " (small polish 생략 → 직전 초안 사용)",
         tier: last.tier,
@@ -1193,6 +1659,8 @@ export async function runWorkflow({
       prior.push({
         tier: last.tier,
         role: step.role,
+        skill: step.skill ?? null,
+        produces: step.produces ?? null,
         instruction: step.instruction,
         output: last.content,
         alias: last.alias,
@@ -1206,7 +1674,7 @@ export async function runWorkflow({
       trace.push(stepRec);
       onEvent?.({
         type: "step_done",
-        i,
+        i: uiI,
         tier: last.tier,
         role: step.role,
         device: last.device,
@@ -1225,10 +1693,10 @@ export async function runWorkflow({
         skipped: "small-polish",
       });
       if (emitTokensNow) {
-        onEvent({ type: "token", text: last.content, i });
+        onEvent({ type: "token", text: last.content, i: uiI });
       }
       logger.info(
-        `워크플로우 단계 ${i + 1}/${steps.length} polish@small 생략 → 직전 초안 사용`,
+        `워크플로우 단계 ${uiI + 1}/${steps.length + stepOffset} polish@small 생략 → 직전 초안 사용`,
       );
       continue;
     }
@@ -1260,45 +1728,47 @@ export async function runWorkflow({
     }
 
     const started = Date.now();
-    if (emitTokensNow) {
-      const out = await pool.chatStream({
-        messages,
-        temperature,
-        maxTokens,
-        enableThinking: isLarge ? enableThinking : false,
-        preferredTier: step.tier,
-        preferredDevice: null,
-        preferredSkill: step.skill ?? null,
-        allowOtherTiers: config.escalateTier,
-        onMeta: (m) => onEvent({ type: "step_meta", i, ...m }),
-        onToken: (t) => onEvent({ type: "token", text: t, i }),
-      });
-      last = {
-        content: out.content,
-        reasoning: out.reasoning,
-        tier: out.tier,
-        device: out.device,
-        alias: out.alias,
-        skill: out.skill,
-        backendUrl: out.backendUrl,
-        model: out.model,
-        usage: out.usage,
-        ttftMs: out.ttftMs,
-        totalMs: out.totalMs,
-        tokenCount: out.tokenCount,
-      };
-    } else {
-      const { result, backendUrl, tier, device, alias, skill } = await pool.chat({
-        messages,
-        temperature: Math.min(temperature ?? 0.7, 0.5),
-        maxTokens: isLast ? maxTokens : Math.min(maxTokens, 1024),
-        enableThinking: isLast && isLarge ? enableThinking : false,
-        preferredTier: step.tier,
-        preferredDevice: null,
-        preferredSkill: step.skill ?? null,
-        allowOtherTiers: config.escalateTier,
-      });
-      last = {
+    const runStepOnce = async (msgs) => {
+      if (emitTokensNow) {
+        const out = await pool.chatStream({
+          messages: msgs,
+          temperature,
+          maxTokens,
+          enableThinking: isLarge ? enableThinking : false,
+          preferredTier: step.tier,
+          preferredDevice: null,
+          preferredSkill: step.skill ?? null,
+          allowOtherTiers: config.escalateTier,
+          onMeta: (m) => onEvent({ type: "step_meta", i: uiI, ...m }),
+          onToken: (t) => onEvent({ type: "token", text: t, i: uiI }),
+        });
+        return {
+          content: out.content,
+          reasoning: out.reasoning,
+          tier: out.tier,
+          device: out.device,
+          alias: out.alias,
+          skill: out.skill,
+          backendUrl: out.backendUrl,
+          model: out.model,
+          usage: out.usage,
+          ttftMs: out.ttftMs,
+          totalMs: out.totalMs,
+          tokenCount: out.tokenCount,
+        };
+      }
+      const { result, backendUrl, tier, device, alias, skill } =
+        await pool.chat({
+          messages: msgs,
+          temperature: Math.min(temperature ?? 0.7, 0.5),
+          maxTokens: isLast ? maxTokens : Math.min(maxTokens, 1024),
+          enableThinking: isLast && isLarge ? enableThinking : false,
+          preferredTier: step.tier,
+          preferredDevice: null,
+          preferredSkill: step.skill ?? null,
+          allowOtherTiers: config.escalateTier,
+        });
+      return {
         content: result.content,
         reasoning: result.reasoning,
         tier,
@@ -1310,11 +1780,45 @@ export async function runWorkflow({
         usage: result.raw?.usage,
         totalMs: Date.now() - started,
       };
+    };
+
+    let stepMessages = messages;
+    try {
+      last = await runStepOnce(stepMessages);
+    } catch (err) {
+      // RAG+파이프라인: 맵리듀스(질문만 분할)로 가지 말고 문서·동료 입력을 줄여 재시도
+      if (
+        isContextOverflowError(err) &&
+        body._rag &&
+        (body._rag.shrinkPass || 0) < 3
+      ) {
+        shrinkRagOnBody(body, 0.45);
+        logger.warn(
+          `워크플로우 단계 ${uiI + 1} 컨텍스트 초과 → RAG/입력 축소 재시도 (pass=${body._rag.shrinkPass}): ${err.message}`,
+        );
+        onEvent?.({
+          type: "step_meta",
+          i: uiI,
+          overflowRetry: true,
+          shrinkPass: body._rag.shrinkPass,
+        });
+        stepMessages = buildStepMessages({
+          body,
+          step,
+          stepIndex: i,
+          totalSteps: steps.length,
+          prior,
+          isLast,
+        });
+        last = await runStepOnce(stepMessages);
+      } else {
+        throw err;
+      }
     }
 
     const stepRec = {
       kind: "model",
-      i: i + 1,
+      i: uiI + 1,
       role: step.role,
       instruction: step.instruction,
       tier: last.tier,
@@ -1323,6 +1827,8 @@ export async function runWorkflow({
       // wantedSkill = 라우터가 고른 특기, skill = 실제 처리한 백엔드의 특기
       wantedSkill: step.skill ?? null,
       skill: last.skill ?? null,
+      produces: step.produces ?? null,
+      reads: formatReads(step.reads),
       backend: last.backendUrl,
       model: last.model,
       ms: last.totalMs,
@@ -1331,8 +1837,10 @@ export async function runWorkflow({
       isLast,
     };
 
-    // polish/최종이 프롬프트·원문을 베낀 경우 → 직전 초안 폴백
+    // 최종 단계가 (a) 프롬프트/원문을 베끼거나 (b) 실제 답 대신
+    // "~하겠습니다" 식 메타-확인문만 낸 경우 → 실질 산출물로 폴백
     const outText = String(last.content || "");
+    const flatOut = outText.replace(/\s+/g, " ").trim();
     const echoedPrompt =
       isLast &&
       prior.length > 0 &&
@@ -1342,18 +1850,39 @@ export async function runWorkflow({
         (userQ.length > 80 &&
           outText.length > userQ.length * 0.5 &&
           outText.includes(userQ.slice(0, 40))));
-    if (echoedPrompt) {
-      logger.warn(
-        `워크플로우 최종 단계 프롬프트/원문 에코 감지 → 직전 단계 출력으로 폴백`,
+    // 짧은 답이 지시를 수행 대신 "복명복창"한 경우 (내용 없음)
+    const metaAck =
+      isLast &&
+      prior.length > 0 &&
+      flatOut.length <= 160 &&
+      /출력하겠|작성하겠|반영하겠|답변을\s*직접|말씀해\s*주세요|어떻게\s*도와|이해했습니다[.!]/.test(
+        flatOut,
       );
-      last.content = prior[prior.length - 1].output;
+    if (echoedPrompt || metaAck) {
+      // draft/solve/answer 역할의 실제 산출물 우선, 없으면 가장 긴 이전 출력
+      const best =
+        [...prior]
+          .reverse()
+          .find((p) =>
+            /draft|solve|answer/.test(String(p.role || "").toLowerCase()),
+          ) ||
+        prior.reduce((a, b) =>
+          String(b.output || "").length > String(a.output || "").length
+            ? b
+            : a,
+        );
+      logger.warn(
+        `워크플로우 최종 단계 ${metaAck ? "메타-확인문" : "프롬프트/원문 에코"} 감지 → 실질 산출물 폴백 (role=${best?.role})`,
+      );
+      last.content = best?.output ?? prior[prior.length - 1].output;
       stepRec.output = last.content;
-      stepRec.fallbackFrom = "prior";
+      stepRec.fallbackFrom = best?.role || "prior";
     }
 
     prior.push({
       tier: last.tier,
       role: step.role,
+      produces: step.produces ?? null,
       instruction: step.instruction,
       output: last.content,
       alias: last.alias,
@@ -1370,7 +1899,7 @@ export async function runWorkflow({
 
     onEvent?.({
       type: "step_done",
-      i,
+      i: uiI,
       tier: last.tier,
       role: step.role,
       device: last.device,
@@ -1393,25 +1922,22 @@ export async function runWorkflow({
       ? ` skill="${step.skill}"${last.skill === step.skill ? "" : " (특기 백엔드 없음 → 티어 풀)"}`
       : "";
     logger.info(
-      `워크플로우 단계 ${i + 1}/${steps.length} ${step.role}@${last.tier}/${last.device ?? "-"}${skillLog} ${last.totalMs ?? "?"}ms`,
+      `워크플로우 단계 ${uiI + 1}/${steps.length + stepOffset} ${step.role}@${last.tier}/${last.device ?? "-"}${skillLog} ${last.totalMs ?? "?"}ms`,
     );
   }
 
   let answer = last?.content ?? "";
   // 파이프라인 steps 와 별개 — 보안 게이트만 태움 (trace 에 security 노드로만 기록)
-  if (hasSecurityWorkflow()) {
+  if (securityHold) {
     const sec = await runSecurityPreFinal({
       userQ,
       draft: answer,
       onEvent,
-      stepIndex: steps.length,
+      stepIndex: steps.length + stepOffset,
     });
     answer = sec.answer;
     if (last) last.content = answer;
     if (sec.stepRec) trace.push(sec.stepRec);
-    if (holdFinal) {
-      onEvent?.({ type: "token", text: answer, i: steps.length - 1 });
-    }
   }
 
   return {
@@ -1429,5 +1955,8 @@ export async function runWorkflow({
     steps: prior,
     trace,
     plan,
+    rag: Boolean(ragPack),
+    sources: ragPack?.sources ?? [],
+    strict: ragPack?.strict,
   };
 }

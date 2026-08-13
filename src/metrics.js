@@ -1,12 +1,16 @@
 import os from "node:os";
-import { exec } from "node:child_process";
+import { exec, execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { execOpts } from "./platform.js";
 
 /**
  * 시스템 자원 사용량(GPU/CPU/RAM)을 수집한다.
- * - GPU: nvidia-smi 질의 (없으면 빈 배열)
+ * - GPU: nvidia-smi 질의 (없으면 빈 배열) + 프로세스별 VRAM
  * - CPU: os.cpus() 시간 델타로 사용률 계산
  * - RAM: os.totalmem/freemem
  */
+
+const execFileAsync = promisify(execFile);
 
 function cpuTimes() {
   let idle = 0;
@@ -55,9 +59,10 @@ function getGpu() {
       "memory.total",
       "temperature.gpu",
       "power.draw",
+      "uuid",
     ].join(",");
     const cmd = `nvidia-smi --query-gpu=${q} --format=csv,noheader,nounits`;
-    exec(cmd, { timeout: 4000, windowsHide: true }, (err, stdout) => {
+    exec(cmd, execOpts({ timeout: 4000 }), (err, stdout) => {
       if (err || !stdout) return resolve([]);
       const gpus = stdout
         .trim()
@@ -76,6 +81,8 @@ function getGpu() {
             memUsagePct: totalMb > 0 ? Math.round((usedMb / totalMb) * 100) : null,
             tempC: p[5] !== undefined ? Number(p[5]) : null,
             powerW: p[6] !== undefined && p[6] !== "[N/A]" ? Number(p[6]) : null,
+            uuid: p[7] || null,
+            processes: [],
           };
         });
       resolve(gpus);
@@ -83,8 +90,47 @@ function getGpu() {
   });
 }
 
+/** GPU별 컴퓨트 프로세스 VRAM (MB) */
+async function getGpuProcessesByUuid() {
+  try {
+    const { stdout } = await execFileAsync(
+      "nvidia-smi",
+      [
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+        "--format=csv,noheader,nounits",
+      ],
+      execOpts({ timeout: 4000 }),
+    );
+    const byUuid = new Map();
+    for (const line of stdout.trim().split(/\r?\n/).filter(Boolean)) {
+      const parts = line.split(",").map((s) => s.trim());
+      if (parts.length < 4) continue;
+      const uuid = parts[0];
+      const pid = Number(parts[1]);
+      const memUsedMb = Number(parts[parts.length - 1]);
+      const processName = parts.slice(2, -1).join(",").replace(/^.*[\\/]/, "");
+      if (!Number.isFinite(pid)) continue;
+      if (!byUuid.has(uuid)) byUuid.set(uuid, []);
+      byUuid.get(uuid).push({
+        pid,
+        processName: processName || "unknown",
+        memUsedMb: Number.isFinite(memUsedMb) ? memUsedMb : 0,
+      });
+    }
+    return byUuid;
+  } catch {
+    return new Map();
+  }
+}
+
 export async function getMetrics() {
   const gpus = await getGpu();
+  if (gpus.length) {
+    const byUuid = await getGpuProcessesByUuid();
+    for (const g of gpus) {
+      g.processes = g.uuid ? byUuid.get(g.uuid) || [] : [];
+    }
+  }
   return {
     ts: new Date().toISOString(),
     cpu: getCpu(),

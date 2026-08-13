@@ -22,18 +22,19 @@
                 box-sizing: border-box;
                 display: flex;
                 flex-direction: column;
-                padding: 14px 20px 14px;
+                padding: 0;
             }
-            .roles-page > header {
-                margin-bottom: 8px;
-                flex-shrink: 0;
+            .roles-page > .app-main {
+                flex: 1;
+                min-height: 0;
+                overflow: hidden;
+                padding: 14px 20px 16px;
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
             }
-            .roles-page > header h1 {
+            .roles-page > .app-main > .lead {
                 margin: 0;
-                font-size: 20px;
-            }
-            .roles-page > .lead {
-                margin: 0 0 12px;
                 flex-shrink: 0;
                 font-size: 13px;
             }
@@ -313,18 +314,22 @@
                 flex: 1;
             }
         </style>
+            <link rel="stylesheet" href="/nav.css" />
     </head>
     <body>
         <div class="wrap roles-page">
             <header>
                 <h1>역할 관리</h1>
-                <div><span id="updated" class="updated"></span></div>
+                <div class="tools">
+                    <span id="updated" class="updated"></span>
+                </div>
             </header>
+            <div class="app-main">
             <p class="muted lead">
                 역할은 모델이 잘 맡는 작업 유형입니다 (예: 요약·번역·보고서).
                 공통 역할을 만들어 모델에 입히면 라우터·파이프라인이 그 특기로
                 요청을 나눕니다. 라우터·파이프라인 설계·임베딩·보안검증 같은
-                인프라 기능은 모델 관리의 고정 기능에서 켭니다.
+                인프라 기능은 서버/모델관리의 고정 기능에서 켭니다.
             </p>
 
             <div class="layout">
@@ -363,6 +368,7 @@
                         </button>
                     </div>
                 </div>
+            </div>
             </div>
         </div>
 

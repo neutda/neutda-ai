@@ -4,6 +4,7 @@
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>neutda-ai · 테스트 콘솔</title>
+        <link rel="stylesheet" href="/nav.css" />
         <style>
             :root {
                 --bg: #0f1117;
@@ -30,30 +31,37 @@
                     sans-serif;
                 background: var(--bg);
                 color: var(--text);
-                line-height: 1.5;
                 overflow: hidden;
-                /* nav.js 가 주입하는 상단 내비 높이를 뺀 나머지를 .wrap 이 채움 */
+                /* LNB(.app-lnb)는 fixed — header + .wrap 세로 flex */
                 display: flex;
                 flex-direction: column;
             }
-            .wrap {
-                flex: 1;
-                min-height: 0;
-                display: flex;
-                flex-direction: column;
-                padding: 16px 22px 18px;
-            }
-            header {
+            body > header {
                 flex: 0 0 auto;
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
                 gap: 12px;
-                margin-bottom: 14px;
-            }
-            h1 {
-                font-size: 18px;
+                flex-wrap: wrap;
                 margin: 0;
+                padding: 14px 20px;
+                border-bottom: 1px solid var(--border);
+                background: var(--bg);
+            }
+            body > header h1 {
+                font-size: 17px;
+                margin: 0;
+            }
+            .wrap {
+                flex: 1;
+                min-height: 0;
+                min-width: 0;
+                width: 100%;
+                display: flex;
+                flex-direction: column;
+                padding: 16px 20px 18px;
+                line-height: 1.5;
+                box-sizing: border-box;
             }
             .status {
                 font-size: 13px;
@@ -61,6 +69,12 @@
                 display: flex;
                 align-items: center;
                 gap: 8px;
+            }
+            .tools {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-wrap: wrap;
             }
             .dot {
                 width: 9px;
@@ -268,8 +282,10 @@
             }
             .chat-head {
                 display: flex;
+                flex-wrap: wrap;
                 align-items: center;
                 justify-content: space-between;
+                gap: 8px;
                 margin-bottom: 10px;
             }
             .chat-head .t {
@@ -288,6 +304,38 @@
             .btn-sm:hover {
                 background: #2c3142;
                 color: var(--text);
+            }
+            .chat-head-actions {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+                align-items: center;
+                justify-content: flex-end;
+            }
+            .mem-ids {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                align-items: center;
+                flex: 1 1 100%;
+                margin-top: 0;
+                width: 100%;
+            }
+            .mem-ids label {
+                margin: 0;
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-size: 11px;
+                color: var(--muted);
+                font-weight: 500;
+            }
+            .mem-ids input {
+                width: 120px;
+                margin: 0;
+                padding: 5px 8px;
+                font-size: 11px;
+                font-family: ui-monospace, Consolas, monospace;
             }
             .btn-danger {
                 background: rgba(248, 81, 73, 0.14);
@@ -328,6 +376,80 @@
                 width: auto;
                 padding: 12px 22px;
                 white-space: nowrap;
+            }
+            .stress-opts {
+                display: none;
+                align-items: center;
+                gap: 6px;
+                font-size: 12px;
+            }
+            .stress-opts.on {
+                display: flex;
+            }
+            .stress-opts input[type="number"] {
+                width: 56px;
+                padding: 4px 6px;
+                font-size: 12px;
+            }
+            .stress-card {
+                border: 1px solid var(--border);
+                border-left: 3px solid #e6a23c;
+                border-radius: 8px;
+                padding: 10px 12px;
+                background: #141821;
+                font-size: 13px;
+                line-height: 1.55;
+            }
+            .stress-card .st-title {
+                font-weight: 700;
+                color: #e6a23c;
+                margin-bottom: 6px;
+            }
+            .stress-card .st-row {
+                color: var(--muted);
+            }
+            .stress-card .st-ok {
+                color: #3dd68c;
+            }
+            .stress-card .st-fail {
+                color: #f07178;
+            }
+            .stress-card .st-list {
+                margin-top: 8px;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                max-height: 280px;
+                overflow-y: auto;
+            }
+            .stress-card .st-item {
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 11px;
+                color: var(--muted);
+            }
+            .stress-card .st-board {
+                margin-top: 8px;
+                padding: 8px 10px;
+                border-radius: 6px;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 12px;
+                white-space: pre-wrap;
+                color: #c8d0dc;
+                line-height: 1.45;
+            }
+            .stress-card .st-board .hl-l {
+                color: #7aa2f7;
+            }
+            .stress-card .st-board .hl-m {
+                color: #e6a23c;
+            }
+            .stress-card .st-board .hl-ok {
+                color: #3dd68c;
+            }
+            .stress-card .st-board .hl-dim {
+                color: var(--muted);
             }
             .chat-log {
                 flex: 1;
@@ -402,6 +524,10 @@
             .tier-small {
                 background: rgba(210, 153, 34, 0.18);
                 color: #d29922;
+            }
+            .tier-rag {
+                background: rgba(45, 212, 191, 0.16);
+                color: #2dd4bf;
             }
             .dev-badge {
                 font-size: 10px;
@@ -822,19 +948,15 @@
         </style>
     </head>
     <body>
+        <header>
+            <h1>테스트 콘솔</h1>
+            <div class="tools status">
+                <button id="testError" class="btn-sm btn-danger">
+                    오류 테스트
+                </button>
+            </div>
+        </header>
         <div class="wrap">
-            <header>
-                <h1>neutda-ai · 테스트 콘솔</h1>
-                <div
-                    class="status"
-                    style="display: flex; align-items: center; gap: 12px"
-                >
-                    <button id="testError" class="btn-sm btn-danger">
-                        오류 테스트
-                    </button>
-                </div>
-            </header>
-
             <div class="grid">
                 <section class="panel">
                     <label for="system"
@@ -956,9 +1078,7 @@
                 <section class="panel chat-panel">
                     <div class="chat-head">
                         <span class="t">대화</span>
-                        <div
-                            style="display: flex; gap: 8px; align-items: center"
-                        >
+                        <div class="chat-head-actions">
                             <label
                                 style="
                                     margin: 0;
@@ -968,6 +1088,7 @@
                                     cursor: pointer;
                                     font-size: 12px;
                                 "
+                                title="켜면 이전 대화를 컨텍스트로 보냅니다. S_ID가 있으면 서버 세션기억이 우선합니다."
                             >
                                 <input
                                     id="memory"
@@ -1004,7 +1125,7 @@
                                     cursor: pointer;
                                     font-size: 12px;
                                 "
-                                title="켜면 파이프라인 강제. 끄면 일반(라우터가 단일/파이프라인 중 알아서 선택)"
+                                title="켜면 파이프라인 강제. 끄면 단순 질문은 단일 모델, 긴글·코드리뷰 등만 파이프라인"
                             >
                                 <input
                                     id="workflow"
@@ -1013,7 +1134,102 @@
                                 />
                                 <span>파이프라인 강제사용</span>
                             </label>
-                            <button id="clear" class="btn-sm">초기화</button>
+                            <label
+                                style="
+                                    margin: 0;
+                                    display: flex;
+                                    align-items: center;
+                                    gap: 6px;
+                                    cursor: pointer;
+                                    font-size: 12px;
+                                "
+                                title="HTTP 1회만 보내고, 서버가 모델 호출을 N회 실행합니다. 동시 실행 수는 슬롯 합(large+medium parallel)까지이며, 한 건 끝나면 다음 건이 다시 라우팅됩니다."
+                            >
+                                <input
+                                    id="stress"
+                                    type="checkbox"
+                                    style="width: auto"
+                                />
+                                <span>모델 스트레스 테스트</span>
+                            </label>
+                            <span id="stressOpts" class="stress-opts">
+                                <label
+                                    title="서버에서 모델 호출 횟수"
+                                    style="
+                                        margin: 0;
+                                        display: flex;
+                                        align-items: center;
+                                        gap: 4px;
+                                    "
+                                >
+                                    모델
+                                    <input
+                                        id="stressN"
+                                        type="number"
+                                        min="1"
+                                        max="32"
+                                        value="4"
+                                    />
+                                    회
+                                </label>
+                            </span>
+                            <button
+                                id="clearConvo"
+                                class="btn-sm"
+                                title="화면·대화 로그만 지웁니다. 서버 기억(U_ID/S_ID)은 유지"
+                            >
+                                대화내용 초기화
+                            </button>
+                            <button
+                                id="clearMemory"
+                                class="btn-sm"
+                                title="서버 단기(S_ID)·장기(U_ID) 기억만 지웁니다. 화면 대화는 유지"
+                            >
+                                기억 초기화
+                            </button>
+                            <button
+                                id="clearAll"
+                                class="btn-sm btn-danger"
+                                title="대화내용 + 서버 기억 모두 초기화"
+                            >
+                                전체 초기화
+                            </button>
+                        </div>
+                        <div class="mem-ids">
+                            <label title="장기 개인기억"
+                                >U_ID
+                                <input
+                                    id="uid"
+                                    type="text"
+                                    placeholder="user-…"
+                                    autocomplete="off"
+                                />
+                            </label>
+                            <button
+                                type="button"
+                                class="btn-sm"
+                                id="newUid"
+                                title="새 U_ID"
+                            >
+                                새 사용자
+                            </button>
+                            <label title="단기 세션기억"
+                                >S_ID
+                                <input
+                                    id="sid"
+                                    type="text"
+                                    placeholder="sess-…"
+                                    autocomplete="off"
+                                />
+                            </label>
+                            <button
+                                type="button"
+                                class="btn-sm"
+                                id="newSid"
+                                title="새 S_ID (세션 교체)"
+                            >
+                                새 세션
+                            </button>
                         </div>
                     </div>
 
@@ -1217,6 +1433,18 @@
 
             // 라우터·파이프라인설계·모델 노드 카드 (단일·파이프라인 공통)
             function renderTraceNodeHtml(node, flow, routerTierFallback) {
+                if (node.kind === "rag") {
+                    const n = node.hits ?? node.sources?.length ?? 0;
+                    return `<div class="wf-step-card wf-router">
+              <div class="wf-step-head"><strong>0. RAG 문서 검색</strong>
+                <span class="tier-badge tier-medium">rag</span>
+                <span class="dev-badge dev-cpu">${n}건</span>
+                ${node.strict ? '<span class="tier-badge tier-small">문서만</span>' : ""}
+              </div>
+              <div class="wf-step-inst">${esc(node.output || node.title || "문서 검색")}</div>
+              <div class="wf-label">검색</div>
+            </div>`;
+                }
                 if (node.kind === "router" || node.kind === "planner") {
                     const isPlanner = node.kind === "planner";
                     const rTier =
@@ -1337,6 +1565,11 @@
                 const modeBadge = isPipeline
                     ? '<span class="tier-badge tier-large">pipeline</span>'
                     : "";
+                const ragBadge = data.rag
+                    ? data.strict
+                        ? '<span class="tier-badge tier-small">문서만</span>'
+                        : '<span class="tier-badge tier-medium">문서기반</span>'
+                    : "";
                 const routerAlias =
                     data.routerAlias ||
                     trace?.find((n) => n.kind === "router")?.routerAlias ||
@@ -1375,7 +1608,18 @@
                 if (data.reasoning) {
                     html += `<details><summary>추론 과정 보기</summary><div class="reason">${renderMd(data.reasoning)}</div></details>`;
                 }
-                html += `<div class="msg-meta">${modeBadge}${tier}${dev}${why}<span>${metaParts.join(" · ")}</span></div>`;
+                if (data.sources && data.sources.length) {
+                    html +=
+                        `<details class="src-toggle"><summary>참고 문서 ${data.sources.length}개 보기</summary><div class="src-list">` +
+                        data.sources
+                            .map(
+                                (s) =>
+                                    `<div class="src-item"><div class="sh">[출처 ${s.n}] ${esc(s.docName)} #${s.idx} <span style="color:var(--muted);font-weight:400">(score ${s.score})</span></div><div class="sb">${esc(s.preview)}${s.preview && s.preview.length >= 200 ? "…" : ""}</div></div>`,
+                            )
+                            .join("") +
+                        "</div></details>";
+                }
+                html += `<div class="msg-meta">${modeBadge}${ragBadge}${tier}${dev}${why}<span>${metaParts.join(" · ")}</span></div>`;
 
                 // 라우터 도착 → 각 모델 → 결과 경로를 항상 아코디언으로
                 // (단일 모델이든 파이프라인이든 거쳐간 경로를 보여준다)
@@ -1385,7 +1629,13 @@
                         : data.tier || "?";
                     const plannerNode = trace?.find((n) => n.kind === "planner");
                     const routerNode = trace?.find((n) => n.kind === "router");
+                    const ragNode = trace?.find((n) => n.kind === "rag");
                     const pathBits = [];
+                    if (ragNode || data.rag) {
+                        pathBits.push(
+                            `RAG ${(ragNode?.hits ?? data.sources?.length) != null ? `${ragNode?.hits ?? data.sources?.length}건` : ""}`.trim(),
+                        );
+                    }
                     if (routerNode || routerTier) {
                         pathBits.push(
                             routerTier
@@ -1515,8 +1765,44 @@
                     clearEmpty();
                     for (const it of items) {
                         addUser(it.user, it.hasImage ? null : null);
+                        if (it.mode === "stress") {
+                            renderStoredStress(it);
+                            // 스트레스는 모델 부하 테스트 — 대화 컨텍스트에는 요약만
+                            convo.push({ role: "user", content: it.user });
+                            convo.push({
+                                role: "assistant",
+                                content: it.answer || "[스트레스 테스트]",
+                            });
+                            continue;
+                        }
                         const el = addAssistant();
-                        if (it.rag) {
+                        if (it.rag && it.mode === "workflow") {
+                            fillAssistant(
+                                el,
+                                {
+                                    answer: it.answer,
+                                    reasoning: it.reasoning,
+                                    model: it.model,
+                                    tier: it.tier,
+                                    device: it.device,
+                                    alias: it.alias,
+                                    difficulty: it.difficulty,
+                                    routeReason: it.routeReason,
+                                    mode: it.mode,
+                                    routerBackend: it.routerBackend,
+                                    routerTier: it.routerTier,
+                                    routerAlias: it.routerAlias,
+                                    routerDevice: it.routerDevice,
+                                    routerModel: it.routerModel,
+                                    workflowSteps: it.workflowSteps,
+                                    workflowTrace: it.workflowTrace,
+                                    rag: true,
+                                    strict: it.strict,
+                                    sources: it.sources || [],
+                                },
+                                null,
+                            );
+                        } else if (it.rag) {
                             fillRag(
                                 el,
                                 {
@@ -1565,14 +1851,270 @@
             }
             loadHistory();
 
-            $("clear").addEventListener("click", async () => {
-                if (!confirm("저장된 대화 내역을 모두 삭제할까요?")) return;
-                try {
-                    await fetch("/api/history", { method: "DELETE" });
-                } catch {}
+            /** 저장된 스트레스 테스트 결과를 채팅 카드로 복원 */
+            function renderStoredStress(it) {
+                const n = Number(it.count) || (it.results || []).length || 0;
+                const summary = it.summary || {};
+                const results = Array.isArray(it.results) ? [...it.results] : [];
+                results.sort((a, b) => (a.i || 0) - (b.i || 0));
+
+                const card = document.createElement("div");
+                card.className = "msg assistant";
+                card.innerHTML =
+                    `<div class="stress-card">` +
+                    `<div class="st-title">모델 스트레스 테스트 · ${n}회</div>` +
+                    `<div class="st-row st-prog"></div>` +
+                    `<div class="st-board"></div>` +
+                    `<div class="st-list"></div>` +
+                    `</div>`;
+                $("log").appendChild(card);
+
+                const prog = card.querySelector(".st-prog");
+                const board = card.querySelector(".st-board");
+                const list = card.querySelector(".st-list");
+
+                const ok = results.filter((r) => r.ok).length;
+                const fail = results.filter((r) => !r.ok).length;
+                const countL = results.filter(
+                    (r) => r.ok && r.tier === "large",
+                ).length;
+                const countM = results.filter(
+                    (r) => r.ok && r.tier === "medium",
+                ).length;
+                const countS = results.filter(
+                    (r) => r.ok && r.tier === "small",
+                ).length;
+                const demoted =
+                    Number(summary.loadDemoted) ||
+                    results.filter((r) => r.loadDemoted).length;
+
+                const ranges = [];
+                for (const row of results) {
+                    if (!row.ok) {
+                        ranges.push({
+                            from: row.i,
+                            to: row.i,
+                            tier: "FAIL",
+                            demote: false,
+                        });
+                        continue;
+                    }
+                    const tier = row.tier || "?";
+                    const demote = Boolean(row.loadDemoted);
+                    const last = ranges[ranges.length - 1];
+                    if (
+                        last &&
+                        last.tier === tier &&
+                        last.demote === demote &&
+                        last.to === row.i - 1
+                    ) {
+                        last.to = row.i;
+                    } else {
+                        ranges.push({
+                            from: row.i,
+                            to: row.i,
+                            tier,
+                            demote,
+                        });
+                    }
+                }
+                const rangeLines = ranges
+                    .map((g) => {
+                        const span =
+                            g.from === g.to
+                                ? `#${g.from}`
+                                : `#${g.from}–${g.to}`;
+                        const cnt = g.to - g.from + 1;
+                        const tag =
+                            g.tier === "large"
+                                ? `<span class="hl-l">large</span>`
+                                : g.tier === "medium"
+                                  ? `<span class="hl-m">medium</span>`
+                                  : g.tier === "FAIL"
+                                    ? `<span class="st-fail">FAIL</span>`
+                                    : esc(g.tier);
+                        const dem = g.demote ? "  · load-demote" : "";
+                        return `  ${span.padEnd(8)} ${tag}${dem}  (${cnt}건)`;
+                    })
+                    .join("\n");
+
+                const timeline = results
+                    .map((row) => {
+                        if (!row.ok) return `<span class="st-fail">·</span>`;
+                        if (row.tier === "large")
+                            return `<span class="hl-l">L</span>`;
+                        if (row.tier === "medium")
+                            return `<span class="hl-m">M</span>`;
+                        if (row.tier === "small") return "S";
+                        return "?";
+                    })
+                    .join(" ");
+
+                const prefer = it.preferredTier || it.routedTier || "–";
+                prog.innerHTML =
+                    `<span class="st-ok">완료 ${ok} / ${n}</span>` +
+                    (fail
+                        ? ` · <span class="st-fail">실패 ${fail}</span>`
+                        : "") +
+                    (summary.wallMs != null ? ` · ${summary.wallMs}ms` : "") +
+                    (it.ts
+                        ? ` · <span class="muted">${esc(new Date(it.ts).toLocaleString("ko-KR"))}</span>`
+                        : "");
+
+                board.innerHTML =
+                    `<span class="hl-dim">요약 (저장됨)</span>\n` +
+                    `  총 ${n}회  ·  preferred ${esc(String(prefer))}` +
+                    (it.difficulty != null
+                        ? `  ·  diff ${esc(String(it.difficulty))}`
+                        : "") +
+                    `\n` +
+                    `  <span class="hl-l">large ${countL}</span>  ·  <span class="hl-m">medium ${countM}</span>` +
+                    (countS ? `  ·  small ${countS}` : "") +
+                    `  ·  demote ${demoted}\n` +
+                    (summary.concurrency != null
+                        ? `  동시 최대 ${summary.concurrency} / 슬롯합 ${summary.slotCap ?? "?"}\n`
+                        : "") +
+                    (summary.wallMs != null
+                        ? `  벽시계 ${summary.wallMs}ms  ·  개별 ${summary.minMs ?? "?"}/${summary.avgMs ?? "?"}/${summary.maxMs ?? "?"}ms\n`
+                        : "") +
+                    `\n<span class="hl-dim">구간</span>\n` +
+                    (rangeLines || `  <span class="hl-dim">(없음)</span>`) +
+                    `\n\n<span class="hl-dim">순서</span>  <span class="hl-dim">(L=large  M=medium)</span>\n` +
+                    `  ${timeline}`;
+
+                for (const row of results) {
+                    const line = document.createElement("div");
+                    line.className = "st-item";
+                    if (!row.ok) {
+                        line.innerHTML = `<span class="st-fail">#${row.i} FAIL</span>  ${row.ms}ms  ·  ${esc(String(row.error || "?"))}`;
+                    } else {
+                        const tierHtml =
+                            row.tier === "large"
+                                ? `<span style="color:#7aa2f7">large</span>`
+                                : row.tier === "medium"
+                                  ? `<span style="color:#e6a23c">medium</span>`
+                                  : esc(String(row.tier || "?"));
+                        line.innerHTML =
+                            `<span class="st-ok">#${String(row.i).padStart(2, "0")} OK</span>  ` +
+                            `${String(row.ms).padStart(5, " ")}ms  ${tierHtml}` +
+                            (row.loadDemoted ? `  demote` : `       `) +
+                            (row.answerLen != null
+                                ? `  답 ${row.answerLen}자`
+                                : "");
+                    }
+                    list.appendChild(line);
+                }
+            }
+
+            const LS_UID = "neutda.console.uid";
+            const LS_SID = "neutda.console.sid";
+
+            function newMemId(prefix) {
+                return (
+                    prefix +
+                    Date.now().toString(36) +
+                    Math.random().toString(36).slice(2, 6)
+                );
+            }
+
+            function saveMemIds() {
+                localStorage.setItem(LS_UID, $("uid").value.trim());
+                localStorage.setItem(LS_SID, $("sid").value.trim());
+            }
+
+            function loadMemIds() {
+                let uid = localStorage.getItem(LS_UID) || "";
+                let sid = localStorage.getItem(LS_SID) || "";
+                if (!uid) uid = newMemId("user-");
+                if (!sid) sid = newMemId("sess-");
+                $("uid").value = uid;
+                $("sid").value = sid;
+                saveMemIds();
+            }
+
+            function attachMemIds(target) {
+                if (!$("memory").checked) return;
+                const uid = $("uid").value.trim();
+                const sid = $("sid").value.trim();
+                if (uid) target.U_ID = uid;
+                if (sid) target.S_ID = sid;
+            }
+
+            function resetConvoUi() {
                 convo = [];
                 log.innerHTML =
                     '<div class="chat-empty">대화 내역이 여기에 표시됩니다.</div>';
+            }
+
+            async function clearServerMemory() {
+                const uid = $("uid").value.trim();
+                const sid = $("sid").value.trim();
+                if (!uid && !sid) return { ok: true, skipped: true };
+                const r = await fetch("/api/memory", {
+                    method: "DELETE",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        U_ID: uid || undefined,
+                        S_ID: sid || undefined,
+                    }),
+                });
+                const j = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(j.error || r.status);
+                return j;
+            }
+
+            $("newUid").addEventListener("click", () => {
+                $("uid").value = newMemId("user-");
+                saveMemIds();
+            });
+            $("newSid").addEventListener("click", () => {
+                $("sid").value = newMemId("sess-");
+                saveMemIds();
+            });
+            $("uid").addEventListener("change", saveMemIds);
+            $("sid").addEventListener("change", saveMemIds);
+            loadMemIds();
+
+            $("clearConvo").addEventListener("click", async () => {
+                if (!confirm("대화 내용만 초기화할까요?\n(서버 기억 U_ID/S_ID는 유지됩니다)"))
+                    return;
+                try {
+                    await fetch("/api/history", { method: "DELETE" });
+                } catch {}
+                resetConvoUi();
+            });
+
+            $("clearMemory").addEventListener("click", async () => {
+                if (
+                    !confirm(
+                        "서버 기억만 초기화할까요?\n(화면 대화는 유지, 현재 U_ID/S_ID 기억 삭제)",
+                    )
+                )
+                    return;
+                try {
+                    await clearServerMemory();
+                    alert("서버 기억을 초기화했습니다.");
+                } catch (e) {
+                    alert("기억 초기화 실패: " + e.message);
+                }
+            });
+
+            $("clearAll").addEventListener("click", async () => {
+                if (
+                    !confirm(
+                        "대화 내용과 서버 기억을 모두 초기화할까요?",
+                    )
+                )
+                    return;
+                try {
+                    await fetch("/api/history", { method: "DELETE" });
+                } catch {}
+                try {
+                    await clearServerMemory();
+                } catch (e) {
+                    alert("기억 초기화 실패: " + e.message);
+                }
+                resetConvoUi();
             });
 
             $("testError").addEventListener("click", async () => {
@@ -1599,14 +2141,7 @@
                 }
             });
 
-            $("send").addEventListener("click", async () => {
-                const btn = $("send");
-                const user = $("user").value.trim();
-                if (!user) {
-                    alert("ROLE_USER 는 필수입니다.");
-                    return;
-                }
-
+            function buildChatBody(user) {
                 const body = {
                     ROLE_USER: user,
                     TEMPERATURE: Number(tempNum.value),
@@ -1616,12 +2151,325 @@
                 const content = $("content").value.trim();
                 if (sys) body.ROLE_SYSTEM = sys;
                 if (content) body.content = content;
-                // 이전 대화 기억: 직전까지의 대화를 컨텍스트로 전송
                 if ($("memory").checked && convo.length > 0) {
                     body.HISTORY = convo.slice(-12);
                 }
-                // 체크=파이프라인 강제(on). 미체크=일반(auto, body에 안 넣음)
+                attachMemIds(body);
                 if ($("workflow").checked) body.WORKFLOW = true;
+                const useRagPipeline =
+                    $("rag").checked && $("workflow").checked;
+                if (useRagPipeline) {
+                    body.RAG = true;
+                    body.strict = $("ragOnly").checked;
+                    body.topK = 4;
+                }
+                return { body, content, useRagPipeline };
+            }
+
+            $("stress").addEventListener("change", () => {
+                $("stressOpts").classList.toggle("on", $("stress").checked);
+            });
+
+            async function runStressTest(user, n) {
+                const wall0 = performance.now();
+                addUser(user, $("content").value.trim());
+                const card = document.createElement("div");
+                card.className = "msg assistant";
+                card.innerHTML =
+                    `<div class="stress-card">` +
+                    `<div class="st-title">모델 스트레스 테스트 · ${n}회</div>` +
+                    `<div class="st-row st-prog">준비 중…</div>` +
+                    `<div class="st-board"></div>` +
+                    `<div class="st-list"></div>` +
+                    `</div>`;
+                $("log").appendChild(card);
+                const empty = $("log").querySelector(".chat-empty");
+                if (empty) empty.remove();
+                scrollDown();
+
+                const prog = card.querySelector(".st-prog");
+                const board = card.querySelector(".st-board");
+                const list = card.querySelector(".st-list");
+
+                const { body } = buildChatBody(user);
+                delete body.HISTORY;
+                delete body.WORKFLOW;
+                delete body.RAG;
+                body.COUNT = n;
+                body.MODE = "parallel";
+                body.STREAM = true;
+
+                const resultsByI = new Map();
+                let meta = { preferredTier: "–", difficulty: null, count: n };
+                let donePayload = null;
+
+                function renderRow(row) {
+                    const line = document.createElement("div");
+                    line.className = "st-item";
+                    line.dataset.i = String(row.i);
+                    if (!row.ok) {
+                        line.innerHTML = `<span class="st-fail">#${row.i} FAIL</span>  ${row.ms}ms  ·  ${esc(String(row.error || "?"))}`;
+                    } else {
+                        const tierHtml =
+                            row.tier === "large"
+                                ? `<span style="color:#7aa2f7">large</span>`
+                                : row.tier === "medium"
+                                  ? `<span style="color:#e6a23c">medium</span>`
+                                  : esc(String(row.tier || "?"));
+                        line.innerHTML =
+                            `<span class="st-ok">#${String(row.i).padStart(2, "0")} OK</span>  ` +
+                            `${String(row.ms).padStart(5, " ")}ms  ${tierHtml}` +
+                            (row.loadDemoted ? `  demote` : `       `) +
+                            (row.answerLen != null
+                                ? `  답 ${row.answerLen}자`
+                                : "");
+                    }
+                    // 번호 순 삽입
+                    const kids = [...list.children];
+                    const next = kids.find(
+                        (el) => Number(el.dataset.i) > row.i,
+                    );
+                    if (next) list.insertBefore(line, next);
+                    else list.appendChild(line);
+                }
+
+                function refreshBoard(partial = true) {
+                    const sorted = [...resultsByI.values()].sort(
+                        (a, b) => (a.i || 0) - (b.i || 0),
+                    );
+                    const ok = sorted.filter((r) => r.ok).length;
+                    const fail = sorted.filter((r) => !r.ok).length;
+                    const countL = sorted.filter(
+                        (r) => r.ok && r.tier === "large",
+                    ).length;
+                    const countM = sorted.filter(
+                        (r) => r.ok && r.tier === "medium",
+                    ).length;
+                    const countS = sorted.filter(
+                        (r) => r.ok && r.tier === "small",
+                    ).length;
+                    const demoted = sorted.filter((r) => r.loadDemoted).length;
+                    const clientMs = Math.round(performance.now() - wall0);
+
+                    const ranges = [];
+                    for (const row of sorted) {
+                        if (!row.ok) {
+                            ranges.push({
+                                from: row.i,
+                                to: row.i,
+                                tier: "FAIL",
+                                demote: false,
+                            });
+                            continue;
+                        }
+                        const tier = row.tier || "?";
+                        const demote = Boolean(row.loadDemoted);
+                        const last = ranges[ranges.length - 1];
+                        if (
+                            last &&
+                            last.tier === tier &&
+                            last.demote === demote &&
+                            last.to === row.i - 1
+                        ) {
+                            last.to = row.i;
+                        } else {
+                            ranges.push({
+                                from: row.i,
+                                to: row.i,
+                                tier,
+                                demote,
+                            });
+                        }
+                    }
+                    const rangeLines = ranges
+                        .map((g) => {
+                            const span =
+                                g.from === g.to
+                                    ? `#${g.from}`
+                                    : `#${g.from}–${g.to}`;
+                            const cnt = g.to - g.from + 1;
+                            const tag =
+                                g.tier === "large"
+                                    ? `<span class="hl-l">large</span>`
+                                    : g.tier === "medium"
+                                      ? `<span class="hl-m">medium</span>`
+                                      : g.tier === "FAIL"
+                                        ? `<span class="st-fail">FAIL</span>`
+                                        : esc(g.tier);
+                            const dem = g.demote ? "  · load-demote" : "";
+                            return `  ${span.padEnd(8)} ${tag}${dem}  (${cnt}건)`;
+                        })
+                        .join("\n");
+
+                    const timeline = Array.from({ length: n }, (_, idx) => {
+                        const row = resultsByI.get(idx + 1);
+                        if (!row) return `<span class="hl-dim">·</span>`;
+                        if (!row.ok) return `<span class="st-fail">·</span>`;
+                        if (row.tier === "large")
+                            return `<span class="hl-l">L</span>`;
+                        if (row.tier === "medium")
+                            return `<span class="hl-m">M</span>`;
+                        if (row.tier === "small") return "S";
+                        return "?";
+                    }).join(" ");
+
+                    const summary = donePayload?.summary || {};
+                    const done = Boolean(donePayload);
+                    prog.innerHTML = done
+                        ? `<span class="st-ok">완료 ${ok} / ${n}</span>` +
+                          (fail
+                              ? ` · <span class="st-fail">실패 ${fail}</span>`
+                              : "") +
+                          ` · ${summary.wallMs ?? clientMs}ms`
+                        : `<span class="st-ok">진행 ${ok + fail} / ${n}</span>` +
+                          (fail
+                              ? ` · <span class="st-fail">실패 ${fail}</span>`
+                              : "") +
+                          ` · ${clientMs}ms`;
+
+                    board.innerHTML =
+                        `<span class="hl-dim">${done ? "요약" : "진행 중"}</span>\n` +
+                        `  총 ${n}회  ·  preferred ${esc(String(meta.preferredTier || "–"))}` +
+                        (meta.difficulty != null
+                            ? `  ·  diff ${esc(String(meta.difficulty))}`
+                            : "") +
+                        `\n` +
+                        `  <span class="hl-l">large ${countL}</span>  ·  <span class="hl-m">medium ${countM}</span>` +
+                        (countS ? `  ·  small ${countS}` : "") +
+                        `  ·  demote ${demoted}\n` +
+                        (summary.concurrency != null
+                            ? `  동시 최대 ${summary.concurrency} / 슬롯합 ${summary.slotCap ?? "?"}\n`
+                            : "") +
+                        (done
+                            ? `  벽시계 ${summary.wallMs ?? "?"}ms  ·  개별 ${summary.minMs ?? "?"}/${summary.avgMs ?? "?"}/${summary.maxMs ?? "?"}ms  ·  클라 ${clientMs}ms\n`
+                            : `  경과 ${clientMs}ms\n`) +
+                        `\n<span class="hl-dim">구간</span>\n` +
+                        (rangeLines || `  <span class="hl-dim">(아직 없음)</span>`) +
+                        `\n\n<span class="hl-dim">순서</span>  <span class="hl-dim">(L=large  M=medium  ·=대기)</span>\n` +
+                        `  ${timeline}`;
+                }
+
+                try {
+                    const r = await fetch("/api/chat/stress", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body),
+                    });
+                    if (!r.ok) {
+                        const j = await r.json().catch(() => ({}));
+                        prog.innerHTML = `<span class="st-fail">실패</span> · ${esc(String(j.error || r.status))}`;
+                        return;
+                    }
+
+                    const ctype = r.headers.get("content-type") || "";
+                    if (!ctype.includes("text/event-stream") || !r.body) {
+                        // 구버전 JSON 폴백
+                        const j = await r.json().catch(() => ({}));
+                        for (const row of j.results || []) {
+                            resultsByI.set(row.i, row);
+                            renderRow(row);
+                        }
+                        meta = {
+                            preferredTier: j.preferredTier || j.routedTier,
+                            difficulty: j.difficulty,
+                            count: j.count || n,
+                        };
+                        donePayload = j;
+                        refreshBoard(false);
+                        return;
+                    }
+
+                    prog.textContent = "모델 호출 중… (완료되는 대로 표시)";
+                    const reader = r.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buf = "";
+                    let curEvent = "message";
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buf += decoder.decode(value, { stream: true });
+                        const parts = buf.split("\n");
+                        buf = parts.pop() || "";
+                        for (const raw of parts) {
+                            const line = raw.replace(/\r$/, "");
+                            if (line.startsWith("event:")) {
+                                curEvent = line.slice(6).trim();
+                            } else if (line.startsWith("data:")) {
+                                const dataStr = line.slice(5).trim();
+                                let data = null;
+                                try {
+                                    data = JSON.parse(dataStr);
+                                } catch {
+                                    continue;
+                                }
+                                if (curEvent === "meta") {
+                                    meta = {
+                                        preferredTier:
+                                            data.preferredTier || "–",
+                                        difficulty: data.difficulty ?? null,
+                                        count: data.count || n,
+                                    };
+                                    refreshBoard();
+                                } else if (curEvent === "result") {
+                                    resultsByI.set(data.i, data);
+                                    renderRow(data);
+                                    refreshBoard();
+                                    scrollDown();
+                                } else if (curEvent === "done") {
+                                    donePayload = data;
+                                    if (Array.isArray(data.results)) {
+                                        for (const row of data.results) {
+                                            if (!resultsByI.has(row.i)) {
+                                                resultsByI.set(row.i, row);
+                                                renderRow(row);
+                                            }
+                                        }
+                                    }
+                                    refreshBoard(false);
+                                } else if (curEvent === "error") {
+                                    prog.innerHTML = `<span class="st-fail">실패</span> · ${esc(String(data.error || "?"))}`;
+                                }
+                                curEvent = "message";
+                            } else if (line === "") {
+                                curEvent = "message";
+                            }
+                        }
+                    }
+                    if (!donePayload && resultsByI.size) refreshBoard(false);
+                } catch (err) {
+                    prog.innerHTML = `<span class="st-fail">실패</span> · ${esc(err.message || String(err))}`;
+                }
+                scrollDown();
+            }
+
+            $("send").addEventListener("click", async () => {
+                const btn = $("send");
+                const user = $("user").value.trim();
+                if (!user) {
+                    alert("ROLE_USER 는 필수입니다.");
+                    return;
+                }
+
+                if ($("stress").checked) {
+                    let n = Math.floor(Number($("stressN").value) || 0);
+                    if (n < 1) n = 1;
+                    if (n > 32) n = 32;
+                    $("stressN").value = String(n);
+                    btn.disabled = true;
+                    $("user").value = "";
+                    $("user").style.height = "auto";
+                    try {
+                        await runStressTest(user, n);
+                    } catch (err) {
+                        alert("모델 스트레스 테스트 실패: " + err.message);
+                    } finally {
+                        btn.disabled = false;
+                    }
+                    return;
+                }
+
+                const { body, content, useRagPipeline } = buildChatBody(user);
 
                 addUser(user, content);
                 const el = addAssistant();
@@ -1632,7 +2480,7 @@
 
                 const useStream = $("stream").checked;
                 try {
-                    if ($("rag").checked) {
+                    if ($("rag").checked && !useRagPipeline) {
                         await sendRag(el, user, t0, content || undefined);
                     } else if (useStream) {
                         await sendStream(el, body, user, t0);
@@ -1738,12 +2586,49 @@
                 let meta = {};
                 let done = null;
                 let wfSteps = [];
+                let holdMode = false; // 보안 게이트: 통과 전까지 답을 감춘다
                 const textEl = startStreamText(el);
                 // 스트리밍 중 파이프라인 상태 표시용
                 const wfHost = document.createElement("div");
                 wfHost.className = "wf-box";
                 wfHost.style.display = "none";
                 el.insertBefore(wfHost, el.firstChild);
+
+                let statusEl = null;
+                if (body.RAG) {
+                    statusEl = document.createElement("div");
+                    statusEl.className = "rag-status";
+                    statusEl.style.cssText =
+                        "color:var(--muted);font-size:.9em;margin-bottom:.4em";
+                    statusEl.textContent = "문서 검색 중…";
+                    el.insertBefore(statusEl, textEl);
+                }
+
+                function clearRagStatus() {
+                    if (statusEl) {
+                        statusEl.remove();
+                        statusEl = null;
+                    }
+                }
+
+                // 보안 게이트 대기 배너 (작성 중 / 보안 점검 중). token·meta 로 지워지지 않음.
+                let holdEl = null;
+                function setHold(msg) {
+                    if (!holdEl) {
+                        holdEl = document.createElement("div");
+                        holdEl.className = "sec-hold";
+                        holdEl.style.cssText =
+                            "color:var(--muted);font-size:.9em;margin-bottom:.4em";
+                        el.insertBefore(holdEl, textEl);
+                    }
+                    holdEl.textContent = msg;
+                }
+                function clearHold() {
+                    if (holdEl) {
+                        holdEl.remove();
+                        holdEl = null;
+                    }
+                }
 
                 function renderWfLive() {
                     if (!wfSteps.length) {
@@ -1776,12 +2661,35 @@
                 }
 
                 await readSse(r, (event, data) => {
-                    if (event === "token") {
+                    if (event === "status") {
+                        if (statusEl)
+                            statusEl.textContent =
+                                data.message || statusEl.textContent;
+                        scrollDown();
+                    } else if (event === "token") {
+                        if (holdMode) return; // 보안 대기 중엔 부분 답을 그리지 않음
+                        clearRagStatus();
                         answer += data.text;
                         textEl.innerHTML = renderMd(answer);
                         scrollDown();
+                    } else if (event === "security") {
+                        if (data.type === "security_done") {
+                            setHold(
+                                data.allow === false
+                                    ? "보안 정책에 따라 차단되었습니다."
+                                    : "보안 점검 통과 · 표시 중…",
+                            );
+                        } else {
+                            setHold("보안 점검 중입니다…");
+                        }
+                        scrollDown();
                     } else if (event === "meta") {
+                        clearRagStatus();
                         meta = { ...meta, ...data };
+                        if (data.securityHold) {
+                            holdMode = true;
+                            setHold("작성 중입니다…");
+                        }
                         if (data.workflow?.length && !wfSteps.length) {
                             wfSteps = data.workflow.map((s) => ({
                                 ...s,
@@ -1790,6 +2698,7 @@
                             renderWfLive();
                         }
                     } else if (event === "workflow") {
+                        clearRagStatus();
                         if (data.steps?.length) {
                             wfSteps = data.steps.map((s) => ({
                                 ...s,
@@ -1798,6 +2707,7 @@
                             renderWfLive();
                         }
                     } else if (event === "step") {
+                        clearRagStatus();
                         const cur = wfSteps.find((s) => s.i === data.i);
                         if (cur) {
                             cur.status = data.status;
@@ -1810,8 +2720,12 @@
                         }
                         renderWfLive();
                     } else if (event === "done") {
+                        clearRagStatus();
+                        clearHold();
                         done = data;
                     } else if (event === "error") {
+                        clearRagStatus();
+                        clearHold();
                         fillError(el, data.error || "스트리밍 오류");
                     }
                 });
@@ -1855,6 +2769,9 @@
                                     device: s.device,
                                 })),
                             workflowTrace: done.workflowTrace,
+                            rag: done.rag || meta.rag || Boolean(body.RAG),
+                            strict: done.strict ?? meta.strict ?? body.strict,
+                            sources: done.sources || meta.sources || undefined,
                         },
                         ms,
                     );
@@ -1886,6 +2803,10 @@
                 if (content) payload.content = content;
                 const sys = $("system").value.trim();
                 if (sys) payload.ROLE_SYSTEM = sys;
+                if ($("memory").checked && convo.length > 0) {
+                    payload.HISTORY = convo.slice(-12);
+                }
+                attachMemIds(payload);
 
                 // 스트리밍 꺼짐: 기존 동기 방식
                 if (!$("stream").checked) {

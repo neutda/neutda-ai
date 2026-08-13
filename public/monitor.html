@@ -6,129 +6,1396 @@
         <title>neutda-ai · 서버 모니터링</title>
         <link rel="stylesheet" href="/dashboard.css" />
         <style>
-            table {
-                min-width: 1280px;
+            /* ===== 부하 스냅샷 컨트롤 바 ===== */
+            .snap-bar {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-wrap: wrap;
+                background: var(--card, #161b22);
+                border: 1px solid var(--border, #30363d);
+                border-left: 3px solid var(--accent, #6c8cff);
+                border-radius: 10px;
+                padding: 10px 14px;
+                margin: 14px 20px 4px;
+            }
+            .snap-title {
+                font-weight: 700;
+                font-size: 14px;
+                white-space: nowrap;
+            }
+            .snap-bar input {
+                flex: 1 1 240px;
+                min-width: 180px;
+                background: var(--bg, #0d1117);
+                border: 1px solid var(--border, #30363d);
+                border-radius: 8px;
+                color: inherit;
+                padding: 7px 10px;
+                font-size: 13px;
+            }
+            .snap-btn {
+                border: 0;
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-size: 13px;
+                font-weight: 700;
+                cursor: pointer;
+                white-space: nowrap;
+            }
+            .snap-btn.start {
+                background: #238636;
+                color: #fff;
+            }
+            .snap-btn.start:hover {
+                background: #2ea043;
+            }
+            .snap-btn.stop {
+                background: #da3633;
+                color: #fff;
+            }
+            .snap-btn.stop:hover {
+                background: #f85149;
+            }
+            .snap-btn:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            .snap-rec {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-wrap: wrap;
+                flex: 1 1 auto;
+            }
+            .snap-dot {
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: #da3633;
+                box-shadow: 0 0 0 0 rgba(218, 54, 51, 0.6);
+                animation: snapPulse 1.2s infinite;
+            }
+            @keyframes snapPulse {
+                0% {
+                    box-shadow: 0 0 0 0 rgba(218, 54, 51, 0.6);
+                }
+                70% {
+                    box-shadow: 0 0 0 8px rgba(218, 54, 51, 0);
+                }
+                100% {
+                    box-shadow: 0 0 0 0 rgba(218, 54, 51, 0);
+                }
+            }
+            .snap-recinfo {
+                font-size: 13px;
+                font-weight: 600;
+            }
+            .snap-recinfo b {
+                color: var(--accent, #6c8cff);
+            }
+            .snap-link {
+                color: var(--muted, #8b949e);
+                font-size: 12px;
+                cursor: pointer;
+                text-decoration: none;
+                white-space: nowrap;
+            }
+            .snap-link:hover {
+                color: var(--accent, #6c8cff);
+            }
+            .snap-msg {
+                flex-basis: 100%;
+                font-size: 12px;
+                color: var(--muted, #8b949e);
+                min-height: 0;
+            }
+            .snap-msg.err {
+                color: #f85149;
+            }
+            .snap-msg.ok {
+                color: #3fb950;
+            }
+            /* 리포트/목록 모달 */
+            .snap-modal {
+                position: fixed;
+                inset: 0;
+                background: rgba(0, 0, 0, 0.6);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 1000;
+                padding: 20px;
+            }
+            .snap-modal-box {
+                background: var(--card, #161b22);
+                border: 1px solid var(--border, #30363d);
+                border-radius: 12px;
+                width: min(880px, 100%);
+                max-height: 86vh;
+                display: flex;
+                flex-direction: column;
+            }
+            .snap-modal-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 12px 16px;
+                border-bottom: 1px solid var(--border, #30363d);
+            }
+            .snap-modal-head button {
+                background: none;
+                border: 0;
+                color: var(--muted, #8b949e);
+                font-size: 18px;
+                cursor: pointer;
+            }
+            .snap-modal-body {
+                padding: 16px;
+                overflow: auto;
+            }
+            .snap-modal-body h4 {
+                margin: 16px 0 6px;
+                font-size: 13px;
+                color: var(--accent, #6c8cff);
+            }
+            .snap-modal-body h4:first-child {
+                margin-top: 0;
+            }
+            .snap-tbl {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+                margin-top: 4px;
+            }
+            .snap-tbl th,
+            .snap-tbl td {
+                border: 1px solid var(--border, #30363d);
+                padding: 5px 8px;
+                text-align: right;
+            }
+            .snap-tbl th:first-child,
+            .snap-tbl td:first-child {
+                text-align: left;
+            }
+            .snap-tbl th {
+                background: rgba(108, 140, 255, 0.08);
+                color: var(--muted, #8b949e);
+                font-weight: 600;
+            }
+            .snap-list-row {
+                display: flex;
+                justify-content: space-between;
+                gap: 10px;
+                padding: 9px 10px;
+                border: 1px solid var(--border, #30363d);
+                border-radius: 8px;
+                margin-bottom: 6px;
+                cursor: pointer;
+            }
+            .snap-list-row:hover {
+                border-color: var(--accent, #6c8cff);
+            }
+            .snap-list-row .meta {
+                color: var(--muted, #8b949e);
+                font-size: 12px;
+            }
+            /* ===== 서버별 모니터링 카드 ===== */
+            .node-grid {
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 14px;
+            }
+            .node-card {
+                background: var(--card, #161b22);
+                border: 1px solid var(--border, #30363d);
+                border-radius: 12px;
+                padding: 14px 16px;
+            }
+            .node-card.parent {
+                border-color: rgba(108, 140, 255, 0.45);
+                box-shadow: 0 0 0 1px rgba(108, 140, 255, 0.12);
+            }
+            .node-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                flex-wrap: wrap;
+                margin-bottom: 4px;
+            }
+            .node-head .id {
+                font-weight: 700;
+                font-size: 15px;
+            }
+            .node-head .host {
+                color: var(--muted, #8b949e);
+                font-size: 12px;
+                margin-left: 6px;
+            }
+            .node-head .tag {
+                font-size: 11px;
+                color: var(--accent, #6c8cff);
+                background: rgba(108, 140, 255, 0.12);
+                border-radius: 999px;
+                padding: 2px 8px;
+                margin-left: 8px;
+            }
+            .node-live {
+                display: flex;
+                gap: 10px;
+                align-items: stretch;
+                margin: 12px 0 8px;
+            }
+            .node-live > [data-slot="metrics"] {
+                flex: 1 1 58%;
+                min-width: 0;
+                display: flex;
+                flex-direction: column;
+            }
+            .node-live .node-res {
+                display: grid;
+                grid-template-columns: minmax(120px, 0.34fr) minmax(0, 1fr);
+                gap: 8px;
+                margin: 0;
+                flex: 1 1 auto;
+                align-self: stretch;
+                align-items: stretch;
+                min-height: 0;
+                width: 100%;
+            }
+            .node-live .node-res .res-gpus {
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 8px;
+                min-width: 0;
+                min-height: 0;
+                align-content: stretch;
+                align-items: stretch;
+            }
+            /* GPU 2~4장: 2열 카드 */
+            .node-live[data-gpus="2"] .res-gpus,
+            .node-live[data-gpus="3"] .res-gpus,
+            .node-live[data-gpus="4"] .res-gpus {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .node-live[data-gpus="3"] .res-gpus > .res:last-child:nth-child(3) {
+                grid-column: 1 / -1;
+            }
+            /* 5장↑ 또는 공간이 부족하면 차트는 아래로 */
+            .node-live.gpus-many {
+                flex-wrap: wrap;
+            }
+            .node-live.gpus-many > [data-slot="metrics"] {
+                flex: 1 1 100%;
+            }
+            .node-live.gpus-many .chart-wrap {
+                flex: 1 1 100%;
+                min-height: 160px;
+            }
+            .node-live.gpus-many .res-gpus {
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            }
+            .node-live .node-res .res-sys {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                min-width: 0;
+                min-height: 0;
+                align-self: stretch;
+            }
+            .node-live .node-res .res {
+                width: auto;
+                min-width: 0;
+                padding: 10px 14px;
+                box-sizing: border-box;
+            }
+            .node-live .node-res .res-sys .res {
+                flex: 1 1 0;
+                min-height: 0;
+            }
+            .node-live .node-res .res-gpus > .res {
+                min-height: 0;
+                height: 100%;
+                display: flex;
+                flex-direction: column;
+            }
+            .node-live .node-res .res-gpus > .res .gpu-procs {
+                flex: 1 1 auto;
+            }
+            .node-live .node-res .res .pct {
+                font-size: 16px;
+            }
+            .node-live .node-res .res .sub {
+                font-size: 11px;
+                gap: 2px 8px;
+            }
+            /* GPU: VRAM 점유 · 사용률을 나란히 */
+            .gpu-dual {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                margin-top: 4px;
+            }
+            .gpu-dual .gm-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+                margin-bottom: 2px;
+            }
+            .gpu-dual .gm-head b {
+                font-size: 15px;
+                font-weight: 700;
+                font-variant-numeric: tabular-nums;
+                color: var(--text, #e6edf3);
+            }
+            .gpu-dual .meter {
+                margin: 4px 0 0;
+            }
+            .gpu-dual .gpu-procs {
+                grid-column: 1 / -1;
+                margin-top: 4px;
+            }
+            .gpu-dual .gm-util .meter > span {
+                background: #3fb950;
+            }
+            .gpu-dual .gm-util .meter.warn > span {
+                background: #d29922;
+            }
+            .gpu-dual .gm-util .meter.crit > span {
+                background: #f85149;
+            }
+            .node-live .chart-wrap {
+                flex: 1 1 42%;
+                min-width: 0;
+                margin: 0;
+                margin-top: 0;
+                padding: 10px 12px;
+                display: flex;
+                flex-direction: column;
+                box-sizing: border-box;
+                min-height: 160px;
+                align-self: stretch;
+                overflow: hidden;
+            }
+            .node-live .chart-legend {
+                margin-bottom: 6px;
+                gap: 12px;
+                flex-wrap: wrap;
+                flex: 0 0 auto;
+            }
+            .node-live .chart-canvas-box {
+                flex: 1 1 auto;
+                min-height: 160px;
+                position: relative;
+                width: 100%;
+            }
+            .node-live canvas[data-chart] {
+                position: absolute;
+                inset: 0;
+                width: 100%;
+                height: 100%;
+                display: block;
+            }
+            @media (max-width: 1100px) {
+                .node-live[data-gpus="2"] .res-gpus {
+                    grid-template-columns: 1fr;
+                }
+            }
+            @media (max-width: 960px) {
+                .node-live {
+                    flex-direction: column;
+                }
+                .node-live .node-res {
+                    grid-template-columns: 1fr;
+                }
+                .node-live .node-res .res-sys {
+                    flex-direction: row;
+                }
+                .node-live .node-res .res-sys .res {
+                    flex: 1 1 0;
+                }
+                .node-live[data-gpus="2"] .res-gpus,
+                .node-live[data-gpus="3"] .res-gpus,
+                .node-live[data-gpus="4"] .res-gpus {
+                    grid-template-columns: 1fr;
+                }
+                .node-live .chart-canvas-box {
+                    min-height: 160px;
+                }
+            }
+            .node-servers {
+                min-width: 0 !important;
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+                margin-top: 6px;
+            }
+            .node-servers td,
+            .node-servers th {
+                padding: 5px 7px;
+                border-top: 1px solid var(--border, #30363d);
+                text-align: left;
+                white-space: nowrap;
+            }
+            .node-servers th {
+                color: var(--muted, #8b949e);
+                font-weight: 500;
+                border-top: 0;
+            }
+            .node-servers .num {
+                text-align: right;
+                font-variant-numeric: tabular-nums;
+            }
+            .node-servers .roles {
+                white-space: nowrap;
+                max-width: none;
+                line-height: 1.2;
+            }
+            .node-servers .roles .role-ro {
+                font-size: 10px;
+                padding: 1px 6px;
+                margin-right: 3px;
+                vertical-align: middle;
+            }
+            .node-servers .err {
+                max-width: 160px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                color: var(--err, #f85149);
+            }
+            .node-empty {
+                font-size: 12px;
+                color: var(--muted, #8b949e);
+                padding: 6px 2px;
+            }
+            .table-scroll-soft {
+                overflow-x: auto;
+                margin: 0 -4px;
+                padding: 0 4px;
+            }
+
+            /* 헤더 요약 카운트 */
+            .hdr-stats {
+                display: flex;
+                align-items: center;
+                gap: 4px 2px;
+                flex-wrap: wrap;
+                flex: 1 1 auto;
+                min-width: 0;
+                justify-content: flex-end;
+            }
+            .hdr-stat {
+                display: inline-flex;
+                align-items: baseline;
+                gap: 5px;
+                padding: 3px 8px;
+                border-radius: 999px;
+                background: rgba(255, 255, 255, 0.04);
+                border: 1px solid var(--border, #30363d);
+                font-size: 12px;
+                line-height: 1.3;
+                white-space: nowrap;
+            }
+            .hdr-stat .hk {
+                color: var(--muted, #8b949e);
+                font-weight: 500;
+            }
+            .hdr-stat .hv {
+                font-weight: 700;
+                font-variant-numeric: tabular-nums;
+            }
+            .hdr-stat .hv.ok {
+                color: var(--ok, #3fb950);
+            }
+            .hdr-stat .hv.warn {
+                color: var(--warn, #d29922);
+            }
+            .hdr-stat .hv.err {
+                color: var(--err, #f85149);
+            }
+            .hdr-stat .hv.accent {
+                color: var(--accent, #6c8cff);
+            }
+            .hdr-sep {
+                width: 1px;
+                height: 14px;
+                background: var(--border, #30363d);
+                margin: 0 4px;
+                flex: 0 0 auto;
+            }
+            header.mon-head {
+                gap: 10px 16px;
+            }
+            header.mon-head h1 {
+                flex: 0 0 auto;
+            }
+            header.mon-head .tools {
+                flex: 0 0 auto;
+            }
+
+            /* ===== 좌:서버 / 우:부하 (각자 스크롤, 겹침 방지) ===== */
+            .app-main {
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+                min-height: 0;
+            }
+            .monitor-split {
+                flex: 1 1 auto;
+                min-height: 0;
+                display: grid;
+                grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.75fr);
+                gap: 16px;
+                align-items: stretch;
+                overflow: hidden;
+            }
+            .monitor-col {
+                display: flex;
+                flex-direction: column;
+                min-width: 0;
+                min-height: 0;
+                height: 100%;
+                overflow: hidden;
+                border: 1px solid var(--border, #30363d);
+                border-radius: 12px;
+                background: rgba(13, 15, 21, 0.35);
+            }
+            /* 왼쪽 서버 상태: 좁은 폭에서 차트 잘림 방지 → 메트릭 위 / 차트 아래 */
+            .monitor-col:not(.load-side) .node-live {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .monitor-col:not(.load-side) .node-live > [data-slot="metrics"] {
+                flex: 0 0 auto;
+                width: 100%;
+            }
+            .monitor-col:not(.load-side) .node-live .chart-wrap {
+                flex: 0 0 auto;
+                width: 100%;
+                min-width: 0;
+                min-height: 200px;
+                height: 220px;
+            }
+            .monitor-col:not(.load-side) .node-card {
+                overflow: hidden;
+                max-width: 100%;
+            }
+            .monitor-col:not(.load-side) .node-live .node-res {
+                grid-template-columns: minmax(110px, 0.32fr) minmax(0, 1fr);
+            }
+            .monitor-col > .sec-head {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 10px;
+                flex-wrap: wrap;
+                flex: 0 0 auto;
+                margin: 0;
+                padding: 12px 14px 10px;
+                border-bottom: 1px solid var(--border, #30363d);
+                background: var(--card, #161b22);
+                border-radius: 12px 12px 0 0;
+            }
+            .monitor-col > .sec-head h2 {
+                margin: 0;
+                font-size: 15px;
+            }
+            .monitor-col-scroll {
+                flex: 1 1 auto;
+                min-height: 0;
+                overflow-x: hidden;
+                overflow-y: auto;
+                padding: 12px 14px 16px;
+                overscroll-behavior: contain;
+            }
+            .load-side .monitor-col-scroll {
+                overflow: hidden;
+                display: flex;
+                flex-direction: column;
+                padding: 10px 12px 12px;
+            }
+            .load-glance {
+                flex: 1 1 auto;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+                overflow: hidden;
+            }
+            .lg-hero {
+                display: grid;
+                grid-template-columns: 1fr auto;
+                gap: 10px;
+                align-items: center;
+                padding: 12px 14px;
+                border-radius: 12px;
+                border: 1px solid var(--border, #30363d);
+                background: var(--card, #161b22);
+                position: relative;
+                overflow: hidden;
+            }
+            .lg-hero::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                opacity: 0.14;
+                pointer-events: none;
+                background: radial-gradient(
+                    120% 90% at 0% 0%,
+                    var(--load-glow, #6c8cff),
+                    transparent 55%
+                );
+            }
+            .lg-hero[data-load="idle"] {
+                --load-glow: #3fb950;
+            }
+            .lg-hero[data-load="normal"] {
+                --load-glow: #6c8cff;
+            }
+            .lg-hero[data-load="busy"] {
+                --load-glow: #d29922;
+            }
+            .lg-hero .lg-main {
+                position: relative;
+                z-index: 1;
+            }
+            .lg-hero .lg-label {
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+                margin-bottom: 2px;
+            }
+            .lg-hero .lg-num {
+                font-size: 32px;
+                font-weight: 750;
+                font-variant-numeric: tabular-nums;
+                line-height: 1.05;
+                letter-spacing: -0.03em;
+            }
+            .lg-hero .lg-num span {
+                font-size: 15px;
+                font-weight: 600;
+                color: var(--muted, #8b949e);
+                margin-left: 2px;
+            }
+            .lg-hero .lg-eq {
+                margin-top: 4px;
+                font-size: 12px;
+                color: var(--muted, #8b949e);
+            }
+            .lg-hero .lg-eq b {
+                color: var(--text, #e6edf3);
+                font-weight: 700;
+            }
+            .lg-hero .lg-badge {
+                position: relative;
+                z-index: 1;
+                text-align: right;
+            }
+            .lg-strip {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 8px;
+            }
+            .lg-cell {
+                background: var(--card, #161b22);
+                border: 1px solid var(--border, #30363d);
+                border-radius: 10px;
+                padding: 8px 10px;
+                min-width: 0;
+            }
+            .lg-cell .lk {
+                font-size: 10px;
+                color: var(--muted, #8b949e);
+            }
+            .lg-cell .lv {
+                font-size: 18px;
+                font-weight: 700;
+                font-variant-numeric: tabular-nums;
+                margin-top: 2px;
+                line-height: 1.15;
+            }
+            .lg-cell .lv.warn {
+                color: var(--warn, #d29922);
+            }
+            .lg-cell .lv.ok {
+                color: var(--ok, #3fb950);
+            }
+            .lg-cell .lv.accent {
+                color: var(--accent, #6c8cff);
+            }
+            .lg-meter {
+                height: 6px;
+                border-radius: 999px;
+                background: #0d0f15;
+                border: 1px solid var(--border, #30363d);
+                overflow: hidden;
+                margin-top: 6px;
+            }
+            .lg-meter > span {
+                display: block;
+                height: 100%;
+                border-radius: 999px;
+            }
+            .lg-meter.tone-ok > span {
+                background: #3fb950;
+            }
+            .lg-meter.tone-accent > span {
+                background: #6c8cff;
+            }
+            .lg-meter.tone-warn > span {
+                background: #d29922;
+            }
+            .lg-meter.tone-err > span {
+                background: #f85149;
+            }
+            .lg-slots {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                padding: 0 2px;
+            }
+            .lg-slots .slot {
+                width: 12px;
+                height: 18px;
+                border-radius: 3px;
+                background: #0d0f15;
+                border: 1px solid var(--border, #30363d);
+            }
+            .lg-slots .slot.on {
+                background: var(--accent, #6c8cff);
+                border-color: transparent;
+            }
+            .lg-slots .slot.wait {
+                background: var(--warn, #d29922);
+                border-color: transparent;
+            }
+            .lg-backends {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+            .lg-be {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) 48px;
+                gap: 6px 8px;
+                align-items: center;
+                font-size: 11px;
+            }
+            .lg-be .nm {
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                color: var(--muted, #8b949e);
+            }
+            .lg-be .nm b {
+                color: var(--text, #e6edf3);
+                font-weight: 600;
+            }
+            .lg-be .pct {
+                text-align: right;
+                font-variant-numeric: tabular-nums;
+                font-weight: 700;
+            }
+            .lg-be .bar {
+                grid-column: 1 / -1;
+                height: 5px;
+                border-radius: 999px;
+                background: #0d0f15;
+                border: 1px solid var(--border, #30363d);
+                overflow: hidden;
+            }
+            .lg-be .bar > span {
+                display: block;
+                height: 100%;
+                background: var(--accent, #6c8cff);
+            }
+            .lg-jobs {
+                flex: 1 1 auto;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                overflow: hidden;
+                border-top: 1px solid var(--border, #30363d);
+                padding-top: 8px;
+            }
+            .lg-tabs {
+                display: flex;
+                gap: 4px;
+                flex: 0 0 auto;
+            }
+            .lg-tab {
+                flex: 1 1 0;
+                min-width: 0;
+                border: 1px solid var(--border, #30363d);
+                background: #0d0f15;
+                color: var(--muted, #8b949e);
+                border-radius: 8px;
+                padding: 6px 8px;
+                font-size: 11px;
+                font-weight: 600;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 5px;
+            }
+            .lg-tab:hover {
+                color: var(--text, #e6edf3);
+                border-color: #3d4454;
+            }
+            .lg-tab.active {
+                color: var(--text, #e6edf3);
+                background: rgba(108, 140, 255, 0.12);
+                border-color: rgba(108, 140, 255, 0.45);
+            }
+            .lg-tab.active[data-tab="failed"] {
+                background: rgba(248, 81, 73, 0.12);
+                border-color: rgba(248, 81, 73, 0.4);
+            }
+            .lg-tab.active[data-tab="done"] {
+                background: rgba(63, 185, 80, 0.12);
+                border-color: rgba(63, 185, 80, 0.4);
+            }
+            .lg-tab .n {
+                font-variant-numeric: tabular-nums;
+                font-size: 10px;
+                opacity: 0.85;
+            }
+            .lg-jobs .jh {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                font-size: 11px;
+                color: var(--muted, #8b949e);
+                flex: 0 0 auto;
+            }
+            .lg-job-rows {
+                flex: 1 1 auto;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                overflow-x: hidden;
+                overflow-y: auto;
+                overscroll-behavior: contain;
+                padding-right: 2px;
+            }
+            .lg-hero,
+            .lg-slots,
+            .lg-strip,
+            .lg-backends {
+                flex: 0 0 auto;
+            }
+            .lg-job {
+                display: grid;
+                grid-template-columns: auto minmax(0, 1fr) auto;
+                gap: 6px;
+                align-items: center;
+                font-size: 11px;
+                padding: 5px 7px;
+                border-radius: 7px;
+                background: #0d0f15;
+                border: 1px solid var(--border, #30363d);
+            }
+            .lg-job .tag {
+                font-size: 10px;
+                font-weight: 700;
+                padding: 1px 5px;
+                border-radius: 999px;
+            }
+            .lg-job .tag.run {
+                background: rgba(108, 140, 255, 0.18);
+                color: var(--accent, #6c8cff);
+            }
+            .lg-job .tag.wait {
+                background: rgba(210, 153, 34, 0.18);
+                color: var(--warn, #d29922);
+            }
+            .lg-job .tag.ok {
+                background: rgba(63, 185, 80, 0.18);
+                color: var(--ok, #3fb950);
+            }
+            .lg-job .tag.fail {
+                background: rgba(248, 81, 73, 0.18);
+                color: #f85149;
+            }
+            .lg-job .meta {
+                font-size: 10px;
+                color: var(--muted, #8b949e);
+                white-space: nowrap;
+            }
+            .lg-job .txt {
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                color: var(--muted, #8b949e);
+            }
+            .lg-job .tm {
+                font-variant-numeric: tabular-nums;
+                color: var(--muted, #8b949e);
+            }
+            .lg-empty {
+                font-size: 12px;
+                color: var(--muted, #8b949e);
+                padding: 4px 0;
+            }
+            .pill.load-idle {
+                background: rgba(63, 185, 80, 0.15);
+                color: var(--ok, #3fb950);
+            }
+            .pill.load-normal {
+                background: rgba(108, 140, 255, 0.15);
+                color: var(--accent, #6c8cff);
+            }
+            .pill.load-busy {
+                background: rgba(210, 153, 34, 0.18);
+                color: var(--warn, #d29922);
+            }
+            @media (max-width: 1100px) {
+                .node-live[data-gpus="2"] .res-gpus {
+                    grid-template-columns: 1fr;
+                }
+            }
+            @media (max-width: 960px) {
+                .node-live {
+                    flex-direction: column;
+                }
+                .node-live .node-res {
+                    grid-template-columns: 1fr;
+                }
+                .node-live .node-res .res-sys {
+                    flex-direction: row;
+                }
+                .node-live .node-res .res-sys .res {
+                    flex: 1 1 0;
+                }
+                .node-live[data-gpus="2"] .res-gpus,
+                .node-live[data-gpus="3"] .res-gpus,
+                .node-live[data-gpus="4"] .res-gpus {
+                    grid-template-columns: 1fr;
+                }
+                .node-live .chart-canvas-box {
+                    min-height: 160px;
+                }
+            }
+            .node-servers {
+                min-width: 0 !important;
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+                margin-top: 6px;
+            }
+            .node-servers td,
+            .node-servers th {
+                padding: 5px 7px;
+                border-top: 1px solid var(--border, #30363d);
+                text-align: left;
+                white-space: nowrap;
+            }
+            .node-servers th {
+                color: var(--muted, #8b949e);
+                font-weight: 500;
+                border-top: 0;
+            }
+            .node-servers .num {
+                text-align: right;
+                font-variant-numeric: tabular-nums;
+            }
+            .node-servers .roles {
+                white-space: nowrap;
+                max-width: none;
+                line-height: 1.2;
+            }
+            .node-servers .roles .role-ro {
+                font-size: 10px;
+                padding: 1px 6px;
+                margin-right: 3px;
+                vertical-align: middle;
+            }
+            .node-servers .err {
+                max-width: 160px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                color: var(--err, #f85149);
+            }
+            .node-empty {
+                font-size: 12px;
+                color: var(--muted, #8b949e);
+                padding: 6px 2px;
+            }
+            .table-scroll-soft {
+                overflow-x: auto;
+                margin: 0 -4px;
+                padding: 0 4px;
+            }
+
+            @media (max-width: 1100px) {
+                .app-main {
+                    overflow: auto;
+                }
+                .monitor-split {
+                    grid-template-columns: 1fr;
+                    flex: none;
+                    min-height: auto;
+                    overflow: visible;
+                }
+                .monitor-col {
+                    height: auto;
+                    max-height: min(70vh, 720px);
+                }
             }
         </style>
+        <link rel="stylesheet" href="/nav.css" />
     </head>
     <body>
         <div class="wrap">
-            <header>
-                <h1>
-                    서버 모니터링
-                    <span id="routeBadge" class="route-badge">–</span>
-                </h1>
-                <div><span id="updated" class="updated"></span></div>
+            <header class="mon-head">
+                <h1>서버 모니터링</h1>
+                <div class="hdr-stats" id="hdrStats" title="">
+                    <span class="hdr-stat"
+                        ><span class="hk">agent</span>
+                        <span class="hv" id="sAgents">–</span></span
+                    >
+                    <span class="hdr-stat"
+                        ><span class="hk">연결</span>
+                        <span class="hv ok" id="sAgentsUp">–</span></span
+                    >
+                    <span class="hdr-stat"
+                        ><span class="hk">모델</span>
+                        <span class="hv" id="sModelsPair">–</span></span
+                    >
+                    <span class="hdr-sep" aria-hidden="true"></span>
+                    <span class="hdr-stat"
+                        ><span class="hk">라우팅</span>
+                        <span class="hv" id="sRouting">–</span></span
+                    >
+                    <span class="hdr-stat"
+                        ><span class="hk">1분</span>
+                        <span class="hv accent" id="sRpm">–</span></span
+                    >
+                    <span class="hdr-stat"
+                        ><span class="hk">진행</span>
+                        <span class="hv" id="sInflight">–</span></span
+                    >
+                </div>
+                <div class="tools">
+                    <span id="updated" class="updated"></span>
+                </div>
             </header>
-
-            <div class="summary">
-                <div class="card">
-                    <div class="k">백엔드</div>
-                    <div class="v" id="sBackends">–</div>
+            <div class="snap-bar" id="snapBar">
+                <div class="snap-rec" id="snapIdle" style="flex: 1 1 auto">
+                    <span class="snap-title">📸 부하 스냅샷</span>
+                    <input
+                        id="snapLabel"
+                        placeholder="설정 라벨 (예: medium par 8→12, large ngl 60)"
+                    />
+                    <button id="snapStart" class="snap-btn start">
+                        ● 스냅샷 시작
+                    </button>
+                    <a class="snap-link" id="snapListLink">지난 스냅샷 ▾</a>
                 </div>
-                <div class="card">
-                    <div class="k">정상</div>
-                    <div class="v" id="sHealthy" style="color: var(--ok)">
-                        –
+                <div class="snap-rec" id="snapRec" style="display: none">
+                    <span class="snap-dot"></span>
+                    <span class="snap-recinfo" id="snapRecInfo">기록 중…</span>
+                    <button id="snapStop" class="snap-btn stop">
+                        ■ 종료 &amp; 리포트
+                    </button>
+                    <a class="snap-link" id="snapListLink2">지난 스냅샷 ▾</a>
+                </div>
+                <div class="snap-msg" id="snapMsg"></div>
+            </div>
+            <div class="app-main">
+                <div class="monitor-split">
+                    <div class="monitor-col">
+                        <div class="sec-head">
+                            <h2>
+                                서버별 상태
+                                <span
+                                    class="muted"
+                                    id="nodeCount"
+                                    style="font-weight: 400"
+                                ></span>
+                            </h2>
+                        </div>
+                        <div class="monitor-col-scroll">
+                            <div class="node-grid" id="nodeGrid">
+                                <div class="muted">불러오는 중…</div>
+                            </div>
+                            <p
+                                class="muted"
+                                id="hint"
+                                style="margin-top: 14px"
+                            ></p>
+                        </div>
+                    </div>
+                    <div class="monitor-col load-side">
+                        <div class="sec-head">
+                            <h2>부하 현황</h2>
+                        </div>
+                        <div class="monitor-col-scroll">
+                            <div class="load-glance" id="queueOverview">
+                                <div class="lg-empty">불러오는 중…</div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-                <div class="card">
-                    <div class="k">진행 중(in-flight)</div>
-                    <div class="v" id="sInflight">–</div>
-                </div>
-                <div class="card">
-                    <div class="k">처리량(최근 1분)</div>
-                    <div class="v" id="sRpm" style="color: var(--accent)">
-                        –
-                    </div>
-                </div>
-                <div class="card">
-                    <div class="k">총 요청</div>
-                    <div class="v" id="sTotal">–</div>
-                </div>
-                <div class="card">
-                    <div class="k">총 오류</div>
-                    <div class="v" id="sErrors" style="color: var(--err)">
-                        –
-                    </div>
-                </div>
             </div>
+        </div>
 
-            <h2 style="margin-top: 4px">실시간 시스템 자원</h2>
-            <div class="res-grid" id="resGrid">
-                <div class="res"><div class="muted">불러오는 중…</div></div>
-            </div>
-
-            <div class="chart-wrap">
-                <div class="chart-legend" id="chartLegend"></div>
-                <canvas id="resChart"></canvas>
-            </div>
-
-            <h2>
-                티어 라우팅 효과
-                <span class="muted" id="svSince" style="font-weight: 400"></span>
-            </h2>
-            <div class="savings-grid">
-                <div class="card">
-                    <div class="k">연산량 절감 (전부 large 처리 대비)</div>
-                    <div class="v" id="svSaved" style="color: var(--ok)">–</div>
-                    <div class="muted" id="svSavedSub" style="margin-top: 4px"></div>
+        <div class="snap-modal" id="snapModal" style="display: none">
+            <div class="snap-modal-box">
+                <div class="snap-modal-head">
+                    <b id="snapModalTitle">리포트</b>
+                    <button id="snapModalClose" title="닫기">✕</button>
                 </div>
-                <div class="card">
-                    <div class="k">누적 처리 토큰</div>
-                    <div class="v" id="svTokens">–</div>
-                    <div class="muted" id="svTokensSub" style="margin-top: 4px"></div>
-                </div>
-                <div class="card">
-                    <div class="k">티어별 요청 분포</div>
-                    <div class="tier-dist" id="tierDist"></div>
-                    <div class="tier-legend" id="tierLegend"></div>
-                </div>
+                <div class="snap-modal-body" id="snapModalBody"></div>
             </div>
-
-            <h2>백엔드 상태</h2>
-            <div class="table-scroll">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>백엔드</th>
-                            <th>별칭</th>
-                            <th>티어</th>
-                            <th>장치</th>
-                            <th>역할</th>
-                            <th>모델</th>
-                            <th>상태</th>
-                            <th>프로세스</th>
-                            <th class="num">진행 중</th>
-                            <th class="num">라우팅</th>
-                            <th class="num">채팅</th>
-                            <th class="num">오류</th>
-                            <th class="num">평균(ms)</th>
-                            <th class="num">헬스(ms)</th>
-                            <th>비고</th>
-                        </tr>
-                    </thead>
-                    <tbody id="rows">
-                        <tr>
-                            <td colspan="15" class="muted">불러오는 중…</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-            <p class="muted" id="hint" style="margin-top: 14px"></p>
         </div>
 
         <script>
             const $ = (id) => document.getElementById(id);
-            const COLS = 15;
+            const fmt = (n) =>
+                n == null || !Number.isFinite(Number(n))
+                    ? "–"
+                    : Number(n).toLocaleString("ko-KR");
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/"/g, "&quot;");
+
+            /** url → pool backend 스냅샷 */
+            let backByUrl = new Map();
+            /** 부모(/api/metrics) 최신값 — 카드 1번에 고정 */
+            let parentMetrics = null;
+            /** /api/agents 목록 */
+            let agents = [];
+            /** url → servers.json 실행상태 (running, startError) */
+            let svByUrl = new Map();
+            /** 부하현황 작업 탭: live | done | failed */
+            let loadJobsTab = "live";
+            /** 마지막 /api/status (요약 재계산용) */
+            let lastStatus = null;
+
+            function renderQueue(status) {
+                const load = status?.load;
+                const el = $("queueOverview");
+                if (!el) return;
+
+                if (!load) {
+                    const q = status?.queue;
+                    el.innerHTML = `<div class="lg-empty">load 보드 대기… (inFlight ${fmt(q?.solveInFlight)})</div>`;
+                    return;
+                }
+
+                const api = load.api || {};
+                const model = load.model || {};
+                const left = load.leftover || {};
+                const apiPct = Number(api.utilPct) || 0;
+                const modelPct = Number(model.utilPct) || 0;
+                const pending = Number(model.pending ?? left.pending) || 0;
+                const totalWork =
+                    Number(model.totalWork) ||
+                    (Number(model.inFlight) || 0) + pending;
+                const overflow =
+                    Number(left.overflowEstimate ?? model.overflow) || 0;
+                const state =
+                    overflow > 0 || pending > 0
+                        ? "busy"
+                        : model.inFlight > 0
+                          ? "normal"
+                          : "idle";
+                const stateLabel =
+                    state === "busy"
+                        ? "대기 있음"
+                        : state === "normal"
+                          ? "처리 중"
+                          : "한가함";
+                const statePill =
+                    state === "busy"
+                        ? "load-busy"
+                        : state === "normal"
+                          ? "load-normal"
+                          : "load-idle";
+
+                const apiTone =
+                    apiPct >= 90
+                        ? "tone-err"
+                        : apiPct >= 60
+                          ? "tone-warn"
+                          : "tone-ok";
+                const modelTone =
+                    modelPct >= 100 || overflow > 0
+                        ? "tone-warn"
+                        : modelPct >= 60
+                          ? "tone-accent"
+                          : "tone-ok";
+
+                const cap = Math.max(1, Number(model.capacity) || 1);
+                const showSlots = Math.min(cap, 16);
+                const filled = Math.min(
+                    showSlots,
+                    Math.round(
+                        (Math.min(Number(model.inFlight) || 0, cap) / cap) *
+                            showSlots,
+                    ),
+                );
+                const slotCells = Array.from(
+                    { length: showSlots },
+                    (_, i) =>
+                        `<span class="slot${i < filled ? " on" : ""}"></span>`,
+                ).join("");
+
+                const beLines = (model.backends || [])
+                    .slice(0, 6)
+                    .map((b) => {
+                        const pct = Number(b.utilPct) || 0;
+                        return `<div class="lg-be">
+              <div class="nm"><b>${esc(b.name)}</b> · ${fmt(b.inFlight)}/${fmt(b.parallel)}</div>
+              <div class="pct">${fmt(pct)}%</div>
+              <div class="bar"><span style="width:${Math.min(100, pct)}%"></span></div>
+            </div>`;
+                    })
+                    .join("");
+
+                const processing = left.processing || [];
+                const waiting = left.waiting || [];
+                const apiWait = left.apiWaiting || api.waiting || [];
+                const hist = load.history || {};
+                const doneJobs = hist.done || [];
+                const failedJobs = hist.failed || [];
+                const liveItems = [
+                    ...processing.map((j) => ({ ...j, _kind: "run" })),
+                    ...waiting.map((j) => ({ ...j, _kind: "wait" })),
+                ];
+
+                function fmtDur(ms) {
+                    if (!Number.isFinite(ms)) return "";
+                    return ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${ms}ms`;
+                }
+
+                function liveRow(j) {
+                    const ms = Number(j.elapsedMs ?? j.waitMs);
+                    const tag =
+                        j._kind === "run"
+                            ? '<span class="tag run">실행</span>'
+                            : '<span class="tag wait">대기</span>';
+                    return `<div class="lg-job">${tag}<div class="txt" title="${esc(j.preview || "")}">${esc(j.preview || "(미리보기 없음)")}</div><div class="tm">${esc(fmtDur(ms))}</div></div>`;
+                }
+
+                function histRow(j, kind) {
+                    const tag =
+                        kind === "done"
+                            ? '<span class="tag ok">완료</span>'
+                            : '<span class="tag fail">실패</span>';
+                    const tip = [
+                        j.preview || "",
+                        j.tier ? `tier=${j.tier}` : "",
+                        j.alias || "",
+                        j.error ? `err=${j.error}` : "",
+                    ]
+                        .filter(Boolean)
+                        .join(" · ");
+                    const sub =
+                        kind === "failed" && j.error
+                            ? `<div class="txt" title="${esc(tip)}">${esc(j.preview || "(미리보기 없음)")}<div class="meta">${esc(String(j.error).slice(0, 80))}</div></div>`
+                            : `<div class="txt" title="${esc(tip)}">${esc(j.preview || "(미리보기 없음)")}</div>`;
+                    const side = [j.tier || j.alias || "", fmtDur(Number(j.ms))]
+                        .filter(Boolean)
+                        .join(" · ");
+                    return `<div class="lg-job">${tag}${sub}<div class="tm">${esc(side)}</div></div>`;
+                }
+
+                const tab = loadJobsTab;
+                let rowsHtml = "";
+                let jhLeft = "";
+                let jhRight = "";
+                if (tab === "done") {
+                    rowsHtml = doneJobs.length
+                        ? doneJobs.map((j) => histRow(j, "done")).join("")
+                        : '<div class="lg-empty">완료된 작업 없음</div>';
+                    jhLeft = "완료된 작업";
+                    jhRight = `${fmt(doneJobs.length)}건 · 최근 최대 120`;
+                } else if (tab === "failed") {
+                    rowsHtml = failedJobs.length
+                        ? failedJobs.map((j) => histRow(j, "failed")).join("")
+                        : '<div class="lg-empty">실패한 작업 없음</div>';
+                    jhLeft = "실패한 작업";
+                    jhRight = `${fmt(failedJobs.length)}건 · 최근 최대 120`;
+                } else {
+                    rowsHtml = liveItems.length
+                        ? liveItems.map(liveRow).join("")
+                        : '<div class="lg-empty">진행·대기 질문 없음</div>';
+                    jhLeft = "진행 · 대기";
+                    jhRight = `실행 ${fmt(processing.length)} · 대기 ${fmt(waiting.length)}${apiWait.length ? ` · API ${fmt(apiWait.length)}` : ""}`;
+                }
+
+                el.innerHTML = `
+          <div class="lg-hero" data-load="${state}">
+            <div class="lg-main">
+              <div class="lg-label">모델 슬롯</div>
+              <div class="lg-num">${fmt(model.inFlight)}<span>/ ${fmt(model.capacity)}</span></div>
+              <div class="lg-eq">전체 <b>${fmt(totalWork)}</b> = 실행 ${fmt(model.inFlight)} + 대기 ${fmt(pending)}</div>
+            </div>
+            <div class="lg-badge">
+              <span class="pill ${statePill}">${stateLabel}</span>
+            </div>
+          </div>
+          <div class="lg-slots" title="슬롯 사용">${slotCells}</div>
+          <div class="lg-strip">
+            <div class="lg-cell">
+              <div class="lk">API HTTP</div>
+              <div class="lv accent">${fmt(api.jobs)}</div>
+              <div class="lg-meter ${apiTone}"><span style="width:${apiPct}%"></span></div>
+            </div>
+            <div class="lg-cell">
+              <div class="lk">실행 중</div>
+              <div class="lv">${fmt(model.inFlight)}</div>
+              <div class="lg-meter ${modelTone}"><span style="width:${Math.min(100, modelPct)}%"></span></div>
+            </div>
+            <div class="lg-cell">
+              <div class="lk">대기·잔여</div>
+              <div class="lv ${overflow > 0 ? "warn" : "ok"}">${fmt(overflow)}</div>
+              <div class="lg-meter ${overflow > 0 ? "tone-warn" : "tone-ok"}"><span style="width:${Math.min(100, Math.round((overflow / Math.max(1, totalWork || 1)) * 100))}%"></span></div>
+            </div>
+          </div>
+          ${beLines ? `<div class="lg-backends">${beLines}</div>` : ""}
+          <div class="lg-jobs">
+            <div class="lg-tabs" role="tablist">
+              <button type="button" class="lg-tab${tab === "live" ? " active" : ""}" data-tab="live">진행·대기 <span class="n">${fmt(liveItems.length)}</span></button>
+              <button type="button" class="lg-tab${tab === "done" ? " active" : ""}" data-tab="done">완료 <span class="n">${fmt(doneJobs.length)}</span></button>
+              <button type="button" class="lg-tab${tab === "failed" ? " active" : ""}" data-tab="failed">실패 <span class="n">${fmt(failedJobs.length)}</span></button>
+            </div>
+            <div class="jh"><span>${jhLeft}</span><span>${jhRight}</span></div>
+            <div class="lg-job-rows">${rowsHtml}</div>
+          </div>`;
+            }
 
             function escAttr(s) {
                 return String(s ?? "")
                     .replace(/&/g, "&amp;")
-                    .replace(/"/g, "&quot;");
+                    .replace(/"/g, "&quot;")
+                    .replace(/</g, "&lt;");
             }
 
+            function meterClass(pct) {
+                return pct >= 90
+                    ? "meter crit"
+                    : pct >= 70
+                      ? "meter warn"
+                      : "meter";
+            }
+            const gb = (mb) =>
+                mb == null || !Number.isFinite(Number(mb))
+                    ? "–"
+                    : (Number(mb) / 1024).toFixed(1) + " GB";
+
             function roleBadges(b) {
+                if (!b) return '<span class="muted">–</span>';
                 const r = b.roles || {};
                 const items = [
                     [
@@ -139,253 +1406,275 @@
                     ["router", "라우터", r.router ?? b.routerEnabled],
                     ["planner", "설계", r.planner ?? b.plannerEnabled],
                     ["embedding", "임베딩", r.embedding ?? b.embeddingEnabled],
-                    ["security", "보안검증", r.security ?? b.securityEnabled],
+                    ["security", "보안", r.security ?? b.securityEnabled],
                 ];
-                return items
+                const on = items.filter(([, , v]) => v);
+                if (!on.length) return '<span class="muted">–</span>';
+                return on
                     .map(
-                        ([, label, on]) =>
-                            `<span class="role-ro ${on ? "on" : ""}">${label}</span>`,
+                        ([, label]) =>
+                            `<span class="role-ro on">${label}</span>`,
                     )
                     .join("");
             }
 
-            async function refresh() {
-                try {
-                    const [r, rs] = await Promise.all([
-                        fetch("/api/status"),
-                        fetch("/api/servers").catch(() => null),
-                    ]);
-                    const s = await r.json();
-                    let servers = [];
-                    try {
-                        servers = (await rs?.json())?.servers ?? [];
-                    } catch {}
-                    const svByUrl = new Map(servers.map((x) => [x.url, x]));
-
-                    $("sBackends").textContent = s.totalBackends;
-                    $("sHealthy").textContent = s.healthyBackends;
-                    $("sInflight").textContent = s.totalInFlight;
-                    $("sRpm").textContent = s.requestsLastMin ?? "–";
-                    $("sTotal").textContent = s.totalRequests;
-                    $("sErrors").textContent = s.totalErrors;
-
-                    renderSavings(s.stats);
-
-                    const eff = s.routing?.effectiveMode ?? "heuristic";
-                    const badge = $("routeBadge");
-                    badge.textContent =
-                        eff === "llm"
-                            ? "티어 판정: LLM 라우터"
-                            : "티어 판정: 글자수 휴리스틱";
-                    badge.className =
-                        "route-badge" + (eff === "llm" ? "" : " heuristic");
-
-                    const maxLoad = Math.max(
-                        1,
-                        ...s.backends.map((b) => b.inFlight),
-                    );
-                    const tierRank = { large: 0, medium: 1, small: 2 };
-                    const backends = [...s.backends].sort((a, b) => {
-                        const ta = tierRank[a.tier] ?? 9;
-                        const tb = tierRank[b.tier] ?? 9;
-                        if (ta !== tb) return ta - tb;
-                        const ga = a.device === "gpu" ? 0 : 1;
-                        const gb = b.device === "gpu" ? 0 : 1;
-                        if (ga !== gb) return ga - gb;
-                        return String(a.url).localeCompare(String(b.url));
-                    });
-                    $("rows").innerHTML = backends
-                        .map((b) => {
-                            const sv = svByUrl.get(b.url);
-                            let proc = '<span class="muted">–</span>';
-                            if (sv) {
-                                proc =
-                                    sv.running && !b.healthy
-                                        ? '<span class="pw-loading">로딩중…</span>'
-                                        : `<span class="pw-state" style="margin-left:0">${sv.running ? "ON" : "OFF"}</span>`;
-                                if (!sv.running && sv.startError) {
-                                    proc += `<span class="start-err" title="${escAttr(sv.startError)}">${escAttr(sv.startError)}</span>`;
-                                }
-                            }
-                            return `
-          <tr>
-            <td>${b.url}</td>
-            <td>${escAttr(sv?.alias || sv?.name || b.alias || "–")}</td>
-            <td><span class="tier tier-${b.tier}">${b.tier ?? "–"}</span></td>
-            <td><span class="dev dev-${b.device || "na"}">${b.device ? b.device.toUpperCase() : "–"}</span></td>
-            <td>${roleBadges(b)}</td>
-            <td class="model" title="${b.model ?? ""}">${b.model ? b.model.split(/[\\/]/).pop() : '<span class="muted">–</span>'}</td>
-            <td><span class="pill ${b.healthy ? "up" : "down"}"><span class="dot"></span>${b.healthy ? "정상" : "다운"}</span></td>
-            <td>${proc}</td>
-            <td class="num">${b.inFlight}<div class="bar"><span style="width:${(b.inFlight / maxLoad) * 100}%"></span></div></td>
-            <td class="num">${b.routerRequests ?? 0}</td>
-            <td class="num">${b.chatRequests ?? 0}</td>
-            <td class="num">${b.totalErrors}</td>
-            <td class="num">${b.avgLatencyMs ?? "–"}</td>
-            <td class="num">${b.healthLatencyMs ?? "–"}</td>
-            <td class="err" title="${b.lastError ?? ""}">${b.lastError ?? ""}</td>
-          </tr>`;
-                        })
-                        .join("");
-
-                    $("hint").innerHTML =
-                        s.healthyBackends === 0
-                            ? '정상 백엔드가 없습니다. <a href="/models.html">모델 관리</a> 에서 모델 서버를 추가하거나 전원을 켜세요.'
-                            : eff === "heuristic"
-                              ? '라우터 역할이 모두 꺼져 있어 글자수·키워드 휴리스틱으로 티어를 판정합니다. <a href="/models.html">모델 관리</a> 에서 라우터 토글을 켜세요.'
-                              : "";
-                    $("updated").textContent =
-                        "갱신 " + new Date().toLocaleTimeString();
-                } catch (e) {
-                    $("rows").innerHTML =
-                        `<tr><td colspan="${COLS}" class="err">상태 조회 실패: ${e.message}</td></tr>`;
-                }
-            }
-
-            // ===== 티어 라우팅 효과 (절감 통계) =====
-            const TIER_COLORS = {
-                small: "var(--warn)",
-                medium: "var(--ok)",
-                large: "var(--accent)",
-            };
-            const fmt = (n) => Number(n ?? 0).toLocaleString("ko-KR");
-
-            function renderSavings(st) {
-                if (!st) return;
-                const sv = st.savings || {};
-                // 토큰 기준 절감률 우선, 없으면 요청 수 기준
-                const pct = sv.savedPctTokens ?? sv.savedPctRequests;
-                $("svSaved").textContent = pct == null ? "–" : pct + "%";
-                $("svSavedSub").textContent =
-                    pct == null
-                        ? "아직 처리된 요청이 없습니다."
-                        : sv.savedPctTokens != null
-                          ? `토큰 가중 기준 · 요청 수 기준 ${sv.savedPctRequests}%`
-                          : "요청 수 기준 (토큰 usage 미집계)";
-                $("svTokens").textContent = fmt(st.totals?.tokens);
-                $("svTokensSub").textContent =
-                    st.totals?.tokens > 0
-                        ? `large 환산 시 약 ${fmt(sv.largeEquivalentTokens)} 토큰 상당`
-                        : "";
-                $("svSince").textContent = st.since
-                    ? `(${new Date(st.since).toLocaleDateString("ko-KR")} 부터 누적)`
-                    : "";
-
-                const tiers = st.tiers || {};
-                const totalReq = st.totals?.requests || 0;
-                const order = ["small", "medium", "large"];
-                $("tierDist").innerHTML = order
-                    .map((t) => {
-                        const req = tiers[t]?.requests || 0;
-                        const w = totalReq ? (req / totalReq) * 100 : 0;
-                        return `<span class="seg-${t}" style="width:${w}%" title="${t}: ${fmt(req)}건"></span>`;
-                    })
-                    .join("");
-                $("tierLegend").innerHTML = order
-                    .map((t) => {
-                        const req = tiers[t]?.requests || 0;
-                        const p = totalReq
-                            ? Math.round((req / totalReq) * 100)
-                            : 0;
-                        return `<span><span class="sw" style="background:${TIER_COLORS[t]}"></span>${t} <b>${fmt(req)}건 (${p}%)</b></span>`;
-                    })
-                    .join("");
-            }
-
-            refresh();
-            setInterval(refresh, 1000);
-
-            function meterClass(pct) {
-                return pct >= 90
-                    ? "meter crit"
-                    : pct >= 70
-                      ? "meter warn"
-                      : "meter";
-            }
-            function resCard(name, sub, pct, extra) {
+            function resCard(name, sub, pct, extra, body = "") {
                 return `<div class="res">
         <div class="top"><div class="name">${name} ${extra ? `<small>${extra}</small>` : ""}</div><div class="pct">${pct == null ? "–" : pct + "%"}</div></div>
-        <div class="${meterClass(pct ?? 0)}"><span style="width:${pct ?? 0}%"></span></div>
+        ${body}
         <div class="sub">${sub}</div>
       </div>`;
             }
-            const gb = (mb) => (mb / 1024).toFixed(1) + " GB";
 
-            async function refreshMetrics() {
-                try {
-                    const m = await (await fetch("/api/metrics")).json();
-                    const cards = [];
-                    for (const g of m.gpus || []) {
-                        const sub = [
-                            `VRAM ${gb(g.memUsedMb)} / ${gb(g.memTotalMb)}`,
-                            g.tempC != null ? `${g.tempC}°C` : null,
-                            g.powerW != null ? `${g.powerW} W` : null,
-                            `사용률 ${g.utilPct}%`,
-                        ]
-                            .filter(Boolean)
-                            .join(" · ");
-                        cards.push(
-                            resCard(
-                                `GPU${g.index} <small>${g.name}</small>`,
-                                sub,
-                                g.memUsagePct,
-                                "VRAM",
-                            ),
-                        );
-                    }
-                    if (!(m.gpus || []).length) {
-                        cards.push(
-                            `<div class="res"><div class="name">GPU</div><div class="sub" style="margin-top:8px">nvidia-smi 사용 불가</div></div>`,
-                        );
-                    }
-                    cards.push(
+            const GPU_PROC_COLORS = [
+                "#3fb950",
+                "#6c8cff",
+                "#d29922",
+                "#39c5cf",
+                "#e879a9",
+                "#8b9dc3",
+            ];
+
+            /** GPU VRAM 프로세스 → 모델별 구간 + 범례 */
+            function gpuVramParts(g) {
+                const total = Number(g.memTotalMb) || 0;
+                const used = Number(g.memUsedMb) || 0;
+                const procs = Array.isArray(g.processes) ? g.processes : [];
+                const rows = [];
+                let accounted = 0;
+                for (let i = 0; i < procs.length; i++) {
+                    const p = procs[i];
+                    const mb = Number(p.memUsedMb) || 0;
+                    if (mb <= 0) continue;
+                    accounted += mb;
+                    const base =
+                        p.serverAlias ||
+                        p.serverName ||
+                        p.processName ||
+                        (p.pid != null ? `PID ${p.pid}` : "unknown");
+                    const label =
+                        p.port != null ? `${base} (:${p.port})` : base;
+                    rows.push({
+                        label,
+                        mb,
+                        estimated: !!p.estimated,
+                        color: GPU_PROC_COLORS[i % GPU_PROC_COLORS.length],
+                    });
+                }
+                const other = Math.max(0, used - accounted);
+                if (other >= 16) {
+                    rows.push({ label: "기타", mb: other, color: "#5a6270" });
+                }
+                const pct = g.memUsagePct;
+                if (!rows.length) {
+                    return {
+                        meter: `<div class="${meterClass(pct ?? 0)}"><span style="width:${pct ?? 0}%"></span></div>`,
+                        procs: "",
+                    };
+                }
+                const segs = rows
+                    .map((r) => {
+                        const w =
+                            total > 0 ? Math.max(0.3, (r.mb / total) * 100) : 0;
+                        return `<span style="width:${w}%;background:${r.color}" title="${escAttr(r.label)}: ${gb(r.mb)}"></span>`;
+                    })
+                    .join("");
+                const legend = rows
+                    .map((r) => {
+                        const share =
+                            total > 0 ? Math.round((r.mb / total) * 100) : 0;
+                        const est = r.estimated ? " · 추정" : "";
+                        return `<div class="gpu-proc-row"><span class="swatch" style="background:${r.color}"></span><span class="lab" title="${escAttr(r.label)}">${escAttr(r.label)}</span><span class="val">${gb(r.mb)} · ${share}%${est}</span></div>`;
+                    })
+                    .join("");
+                const note = g.processesEstimated
+                    ? `<div class="gpu-proc-row" style="opacity:.75"><span class="lab">Windows WDDM — 모델별 추정 점유</span><span class="val"></span></div>`
+                    : "";
+                return {
+                    meter: `<div class="${meterClass(pct ?? 0)} stacked">${segs}</div>`,
+                    procs: `<div class="gpu-procs">${legend}${note}</div>`,
+                };
+            }
+
+            /** GPU 카드 본문: VRAM 점유 + GPU 사용률(컴퓨트) 분리 */
+            function gpuDualBody(g) {
+                const memPct = g.memUsagePct;
+                const utilPct =
+                    typeof g.utilPct === "number" && isFinite(g.utilPct)
+                        ? Math.round(g.utilPct)
+                        : null;
+                const { meter, procs } = gpuVramParts(g);
+                return `<div class="gpu-dual">
+          <div class="gm gm-vram">
+            <div class="gm-head"><span>VRAM 점유</span><b>${memPct == null ? "–" : memPct + "%"}</b></div>
+            ${meter}
+          </div>
+          <div class="gm gm-util">
+            <div class="gm-head"><span>GPU 사용률</span><b>${utilPct == null ? "–" : utilPct + "%"}</b></div>
+            <div class="${meterClass(utilPct ?? 0)}"><span style="width:${utilPct ?? 0}%"></span></div>
+          </div>
+          ${procs}
+        </div>`;
+            }
+
+            /** 메트릭 객체 → 자원 카드 HTML (CPU/RAM 왼쪽 · GPU 가운데) */
+            function metricsCardsHtml(m) {
+                if (!m) {
+                    return `<div class="node-empty">메트릭 수집 대기…</div>`;
+                }
+                const gpus = [];
+                for (const g of m.gpus || []) {
+                    const sub = [
+                        `VRAM ${gb(g.memUsedMb)} / ${gb(g.memTotalMb)}`,
+                        g.tempC != null ? `${g.tempC}°C` : null,
+                        g.powerW != null ? `${g.powerW} W` : null,
+                    ]
+                        .filter(Boolean)
+                        .join(" · ");
+                    gpus.push(
+                        `<div class="res">
+        <div class="top"><div class="name">GPU${g.index} <small>${escAttr(g.name || "")}</small></div></div>
+        ${gpuDualBody(g)}
+        <div class="sub">${sub}</div>
+      </div>`,
+                    );
+                }
+                if (!gpus.length) {
+                    gpus.push(
+                        `<div class="res"><div class="name">GPU</div><div class="sub" style="margin-top:8px">nvidia-smi 사용 불가</div></div>`,
+                    );
+                }
+                const sys = [];
+                if (m.cpu) {
+                    sys.push(
                         resCard(
                             "CPU",
-                            `${m.cpu.cores} 코어 · ${m.cpu.model}`,
+                            `${m.cpu.cores ?? "–"} 코어 · ${escAttr(m.cpu.model || "")}`,
                             m.cpu.usagePct,
+                            "",
+                            `<div class="${meterClass(m.cpu.usagePct ?? 0)}"><span style="width:${m.cpu.usagePct ?? 0}%"></span></div>`,
                         ),
                     );
-                    cards.push(
+                }
+                if (m.mem) {
+                    sys.push(
                         resCard(
                             "RAM",
                             `${gb(m.mem.usedMb)} / ${gb(m.mem.totalMb)} (여유 ${gb(m.mem.freeMb)})`,
                             m.mem.usagePct,
+                            "",
+                            `<div class="${meterClass(m.mem.usagePct ?? 0)}"><span style="width:${m.mem.usagePct ?? 0}%"></span></div>`,
                         ),
                     );
-                    $("resGrid").innerHTML = cards.join("");
-
-                    const g0 = (m.gpus || [])[0];
-                    pushPoint("vram", g0 ? g0.memUsagePct : null);
-                    pushPoint("util", g0 ? g0.utilPct : null);
-                    pushPoint("cpu", m.cpu.usagePct);
-                    pushPoint("ram", m.mem.usagePct);
-                    drawChart();
-                } catch (e) {
-                    $("resGrid").innerHTML =
-                        `<div class="res"><div class="err">자원 조회 실패: ${e.message}</div></div>`;
                 }
+                const gpuCount = (m.gpus || []).length;
+                return `<div class="node-res" data-gpus="${gpuCount}">
+          <div class="res-sys">${sys.join("")}</div>
+          <div class="res-gpus">${gpus.join("")}</div>
+        </div>`;
             }
 
-            // ===== 실시간 라인 그래프 =====
-            const SERIES = [
-                { key: "vram", label: "GPU VRAM", color: "#6c8cff" },
-                { key: "util", label: "GPU 사용률", color: "#3fb950" },
-                { key: "cpu", label: "CPU", color: "#d29922" },
-                { key: "ram", label: "RAM", color: "#f85149" },
+            // ===== 노드별 실시간 차트 (관리서버 + 하위서버) =====
+            const GPU_UTIL_COLORS = [
+                "#3fb950",
+                "#34d399",
+                "#a3e635",
+                "#2dd4bf",
+                "#86efac",
+                "#67e8f9",
             ];
-            const MAXP = 60; // 최근 60 샘플 유지
-            const hist = { vram: [], util: [], cpu: [], ram: [] };
-            function pushPoint(key, val) {
+            const MAXP = 60;
+            /** nodeId → { cpu:[], ram:[], gpuIndexes:[], utilN:[] } */
+            const histByNode = new Map();
+
+            function ensureHist(nodeId) {
+                let h = histByNode.get(nodeId);
+                if (!h) {
+                    h = { cpu: [], ram: [], gpuIndexes: [] };
+                    histByNode.set(nodeId, h);
+                }
+                return h;
+            }
+
+            function pushPoint(hist, key, val) {
+                if (!hist[key]) hist[key] = [];
                 const arr = hist[key];
                 arr.push(typeof val === "number" && isFinite(val) ? val : null);
                 if (arr.length > MAXP) arr.shift();
             }
 
-            function drawChart() {
-                const cv = $("resChart");
+            function pushMetrics(nodeId, m) {
+                const hist = ensureHist(nodeId);
+                const gpus = m?.gpus || [];
+                hist.gpuIndexes = gpus.map((g) =>
+                    Number.isFinite(Number(g.index)) ? Number(g.index) : 0,
+                );
+                for (const g of gpus) {
+                    const i = Number.isFinite(Number(g.index))
+                        ? Number(g.index)
+                        : 0;
+                    pushPoint(hist, `util${i}`, g.utilPct);
+                }
+                pushPoint(hist, "cpu", m?.cpu?.usagePct);
+                pushPoint(hist, "ram", m?.mem?.usagePct);
+            }
+
+            /** GPU 사용률(+CPU/RAM) 시리즈 — VRAM은 카드에만, 차트에서는 제외 */
+            function seriesFor(hist) {
+                const idxs =
+                    hist?.gpuIndexes?.length > 0 ? hist.gpuIndexes : [0];
+                const multi = idxs.length > 1;
+                const out = [];
+                for (const i of idxs) {
+                    out.push({
+                        key: `util${i}`,
+                        label: multi ? `GPU${i} 사용률` : "GPU 사용률",
+                        color: GPU_UTIL_COLORS[i % GPU_UTIL_COLORS.length],
+                    });
+                }
+                out.push({ key: "cpu", label: "CPU", color: "#d29922" });
+                out.push({ key: "ram", label: "RAM", color: "#f85149" });
+                return out;
+            }
+
+            function chartBlock(nodeId) {
+                return `<div class="chart-wrap" data-slot="chart">
+            <div class="chart-legend" data-legend="${escAttr(nodeId)}"></div>
+            <div class="chart-canvas-box">
+              <canvas data-chart="${escAttr(nodeId)}"></canvas>
+            </div>
+          </div>`;
+            }
+
+            function syncLiveGpuAttr(liveEl, m) {
+                if (!liveEl) return;
+                const n = (m?.gpus || []).length;
+                liveEl.setAttribute("data-gpus", String(n));
+                liveEl.classList.toggle("gpus-many", n >= 5);
+            }
+
+            /** GPU/CPU/RAM + 실시간 차트를 한 줄로 */
+            function liveBlock(nodeId, m) {
+                const n = (m?.gpus || []).length;
+                const many = n >= 5 ? " gpus-many" : "";
+                return `<div class="node-live${many}" data-slot="live" data-gpus="${n}">
+            <div data-slot="metrics">${metricsCardsHtml(m)}</div>
+            ${chartBlock(nodeId)}
+          </div>`;
+            }
+
+            function drawChart(cv, legendEl, hist) {
+                if (!cv || !hist) return;
+                const box = cv.parentElement;
                 const dpr = window.devicePixelRatio || 1;
-                const cssW = cv.clientWidth || 600;
-                const cssH = cv.clientHeight || 220;
+                const cssW = Math.max(
+                    1,
+                    box?.clientWidth || cv.clientWidth || 600,
+                );
+                const cssH = Math.max(
+                    1,
+                    box?.clientHeight || cv.clientHeight || 220,
+                );
                 cv.width = Math.round(cssW * dpr);
                 cv.height = Math.round(cssH * dpr);
                 const ctx = cv.getContext("2d");
@@ -402,7 +1691,6 @@
                 const xOf = (i) =>
                     padL + (MAXP === 1 ? 0 : (i / (MAXP - 1)) * plotW);
 
-                // 그리드 + Y 라벨
                 ctx.font = "10px ui-sans-serif,system-ui";
                 ctx.textBaseline = "middle";
                 for (let v = 0; v <= 100; v += 25) {
@@ -417,10 +1705,10 @@
                     ctx.fillText(v + "%", padL - 6, y);
                 }
 
-                // 시리즈 라인
-                for (const s of SERIES) {
-                    const arr = hist[s.key];
-                    const offset = MAXP - arr.length; // 오른쪽 정렬(최신이 우측)
+                const series = seriesFor(hist);
+                for (const s of series) {
+                    const arr = hist[s.key] || [];
+                    const offset = MAXP - arr.length;
                     ctx.strokeStyle = s.color;
                     ctx.lineWidth = 1.8;
                     ctx.beginPath();
@@ -441,16 +1729,938 @@
                     ctx.stroke();
                 }
 
-                // 범례(현재값 포함)
-                $("chartLegend").innerHTML = SERIES.map((s) => {
-                    const arr = hist[s.key];
-                    const last = arr.length ? arr[arr.length - 1] : null;
-                    return `<span class="lg"><span class="sw" style="background:${s.color}"></span>${s.label} <b>${last == null ? "–" : last + "%"}</b></span>`;
-                }).join("");
+                if (legendEl) {
+                    legendEl.innerHTML = series
+                        .map((s) => {
+                            const arr = hist[s.key] || [];
+                            const last = arr.length
+                                ? arr[arr.length - 1]
+                                : null;
+                            return `<span class="lg"><span class="sw" style="background:${s.color}"></span>${s.label} <b>${last == null ? "–" : last + "%"}</b></span>`;
+                        })
+                        .join("");
+                }
             }
 
-            refreshMetrics();
-            setInterval(refreshMetrics, 1000);
+            function drawAllCharts() {
+                for (const cv of document.querySelectorAll(
+                    "canvas[data-chart]",
+                )) {
+                    const id = cv.getAttribute("data-chart");
+                    const legend = document.querySelector(
+                        `[data-legend="${CSS.escape(id)}"]`,
+                    );
+                    drawChart(cv, legend, ensureHist(id));
+                }
+            }
+
+            /** 레이아웃 stretch 반영 후 그리기 */
+            function scheduleDrawCharts() {
+                requestAnimationFrame(() =>
+                    requestAnimationFrame(drawAllCharts),
+                );
+            }
+
+            function serverRow(s) {
+                const b = backByUrl.get(s.url);
+                const sv = svByUrl.get(s.url);
+                const healthy = b?.healthy;
+                const pill = healthy
+                    ? '<span class="pill up"><span class="dot"></span>정상</span>'
+                    : '<span class="pill down"><span class="dot"></span>다운</span>';
+                let proc = '<span class="muted">–</span>';
+                if (sv) {
+                    proc =
+                        sv.running && !healthy
+                            ? '<span class="pw-loading">로딩중…</span>'
+                            : `<span class="pw-state">${sv.running ? "ON" : "OFF"}</span>`;
+                    if (!sv.running && sv.startError) {
+                        proc += `<span class="start-err" title="${escAttr(sv.startError)}">${escAttr(sv.startError)}</span>`;
+                    }
+                }
+                const model = b?.model ? b.model.split(/[\\/]/).pop() : "";
+                return `<tr>
+          <td>${escAttr(s.alias || s.name || b?.alias || "–")}
+            <div class="muted" style="font-size:10px">${escAttr(s.url || "")}</div>
+          </td>
+          <td><span class="tier tier-${s.tier || b?.tier || "na"}">${s.tier || b?.tier || "–"}</span></td>
+          <td><span class="dev dev-${s.device || b?.device || "na"}">${(s.device || b?.device || "–").toUpperCase()}</span></td>
+          <td class="roles">${roleBadges(b)}</td>
+          <td title="${escAttr(b?.model || "")}">${model ? escAttr(model) : '<span class="muted">–</span>'}</td>
+          <td>${pill}</td>
+          <td>${proc}</td>
+          <td class="num">${b?.inFlight ?? 0}</td>
+          <td class="num">${b?.chatRequests ?? 0}</td>
+          <td class="num">${b?.totalErrors ?? 0}</td>
+          <td class="num">${b?.avgLatencyMs ?? "–"}</td>
+          <td class="err" title="${escAttr(b?.lastError || "")}">${escAttr(b?.lastError || "")}</td>
+        </tr>`;
+            }
+
+            function serversTable(servers) {
+                const list = servers || [];
+                if (!list.length) {
+                    return `<div class="node-empty">관리 중인 모델 서버가 없습니다. <a href="/server-admin.html">서버/모델관리</a>에서 추가하세요.</div>`;
+                }
+                const rows = list.map(serverRow).join("");
+                return `<div class="table-scroll-soft"><table class="node-servers">
+          <thead><tr>
+            <th>모델 서버</th><th>티어</th><th>장치</th><th>역할</th><th>모델</th>
+            <th>상태</th><th>프로세스</th>
+            <th class="num">진행</th><th class="num">채팅</th><th class="num">오류</th><th class="num">평균(ms)</th>
+            <th>비고</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>`;
+            }
+
+            function parentCard() {
+                return `<div class="node-card parent" data-id="__parent__">
+          <div class="node-head">
+            <div>
+              <span class="pill up"><span class="dot"></span>up</span>
+              <span class="id">관리서버</span>
+              <span class="host">${escAttr(location.hostname || "localhost")}</span>
+              <span class="tag">컨트롤 플레인</span>
+            </div>
+          </div>
+          ${liveBlock("__parent__", parentMetrics)}
+          <div class="node-empty" style="margin-top:8px">모델 백엔드는 하위 관리서버 카드에 표시됩니다. 제어는 <a href="/server-admin.html">서버/모델관리</a>.</div>
+        </div>`;
+            }
+
+            function agentCard(a) {
+                const up = a.status === "up";
+                const pill = up
+                    ? '<span class="pill up"><span class="dot"></span>up</span>'
+                    : '<span class="pill down"><span class="dot"></span>down</span>';
+                return `<div class="node-card" data-id="${escAttr(a.id)}">
+          <div class="node-head">
+            <div>
+              ${pill}
+              <span class="id">${escAttr(a.id)}</span>
+              <span class="host">${escAttr(a.host)}</span>
+              <span class="tag">하위 관리서버</span>
+            </div>
+            <div class="muted" style="font-size:12px" data-slot="count">${(a.servers || []).length}개 모델</div>
+          </div>
+          ${liveBlock(a.id, a.metrics)}
+          <div data-slot="servers">${serversTable(a.servers)}</div>
+        </div>`;
+            }
+
+            /** 카드 골격이 바뀌었을 때만 전체 재구성 (agent 추가/삭제) */
+            let lastAgentKey = "";
+            function agentKey() {
+                return agents.map((a) => a.id).join("|");
+            }
+
+            function hasParentChart() {
+                return !!document.querySelector(
+                    'canvas[data-chart="__parent__"]',
+                );
+            }
+
+            function renderNodes(force) {
+                const key = agentKey();
+                const needRebuild =
+                    force || key !== lastAgentKey || !hasParentChart();
+                if (needRebuild) {
+                    lastAgentKey = key;
+                    const parts = [parentCard()];
+                    for (const a of agents) parts.push(agentCard(a));
+                    $("nodeGrid").innerHTML = parts.join("");
+                    $("nodeCount").textContent =
+                        agents.length > 0
+                            ? `· 관리서버 + ${agents.length}개 노드`
+                            : "· 관리서버";
+                    scheduleDrawCharts();
+                    return;
+                }
+                // 부분 갱신: 메트릭·서버 테이블만 (차트 canvas 유지)
+                const parentSlot = document.querySelector(
+                    '.node-card.parent [data-slot="metrics"]',
+                );
+                if (parentSlot) {
+                    parentSlot.innerHTML = metricsCardsHtml(parentMetrics);
+                    syncLiveGpuAttr(
+                        parentSlot.closest('[data-slot="live"]'),
+                        parentMetrics,
+                    );
+                }
+                for (const a of agents) {
+                    const card = document.querySelector(
+                        `.node-card[data-id="${CSS.escape(a.id)}"]`,
+                    );
+                    if (!card) continue;
+                    const headPill = card.querySelector(".node-head .pill");
+                    if (headPill) {
+                        const up = a.status === "up";
+                        headPill.className = `pill ${up ? "up" : "down"}`;
+                        headPill.innerHTML = `<span class="dot"></span>${up ? "up" : "down"}`;
+                    }
+                    const count = card.querySelector('[data-slot="count"]');
+                    if (count)
+                        count.textContent = `${(a.servers || []).length}개 모델`;
+                    const m = card.querySelector('[data-slot="metrics"]');
+                    if (m) {
+                        m.innerHTML = metricsCardsHtml(a.metrics);
+                        syncLiveGpuAttr(
+                            m.closest('[data-slot="live"]'),
+                            a.metrics,
+                        );
+                    }
+                    const s = card.querySelector('[data-slot="servers"]');
+                    if (s) s.innerHTML = serversTable(a.servers);
+                }
+                scheduleDrawCharts();
+            }
+
+            function renderClusterSummary(s) {
+                const ups = agents.filter((a) => a.status === "up").length;
+                const downs = agents.length - ups;
+                const modelTotal = agents.reduce(
+                    (n, a) => n + (a.servers || []).length,
+                    0,
+                );
+                const modelOk = (s.backends || []).filter(
+                    (b) => b.healthy,
+                ).length;
+                const eff = s.routing?.effectiveMode ?? "heuristic";
+                const routers = s.routing?.activeRouterCount ?? 0;
+                const planners = s.routing?.activePlannerCount ?? 0;
+                const inflight = s.totalInFlight ?? 0;
+                const err = s.totalErrors ?? 0;
+
+                $("sAgents").textContent = String(agents.length);
+
+                const upEl = $("sAgentsUp");
+                upEl.textContent =
+                    agents.length === 0 ? "0" : `${ups}/${agents.length}`;
+                upEl.className =
+                    "hv " +
+                    (agents.length === 0 ? "" : downs > 0 ? "warn" : "ok");
+
+                const pair = $("sModelsPair");
+                pair.textContent =
+                    modelTotal === 0 ? "0" : `${modelOk}/${modelTotal}`;
+                pair.className =
+                    "hv " +
+                    (modelTotal === 0
+                        ? ""
+                        : modelOk === 0
+                          ? "err"
+                          : modelOk < modelTotal
+                            ? "warn"
+                            : "ok");
+
+                const routeEl = $("sRouting");
+                routeEl.textContent = eff === "llm" ? "LLM" : "휴리스틱";
+                routeEl.className = "hv " + (eff === "llm" ? "accent" : "warn");
+                routeEl.title =
+                    eff === "llm"
+                        ? `라우터 ${routers} · 설계 ${planners}`
+                        : "라우터 역할 꺼짐";
+
+                $("sRpm").textContent = String(s.requestsLastMin ?? 0);
+                $("sInflight").textContent = String(inflight);
+                $("sInflight").title = `누적오류 ${err}`;
+
+                const hdr = $("hdrStats");
+                if (hdr) {
+                    hdr.title = [
+                        agents.length === 0
+                            ? "agent 미등록"
+                            : downs > 0
+                              ? `agent 끊김 ${downs}`
+                              : "agent 전부 연결",
+                        `모델 정상 ${modelOk} / 전체 ${modelTotal}`,
+                        `오류 누적 ${err}`,
+                    ].join(" · ");
+                }
+
+                const badge = $("routeBadge");
+                if (badge) {
+                    badge.textContent =
+                        eff === "llm"
+                            ? "티어 판정: LLM 라우터"
+                            : "티어 판정: 글자수 휴리스틱";
+                    badge.className =
+                        "route-badge" + (eff === "llm" ? "" : " heuristic");
+                }
+
+                if (agents.length === 0) {
+                    $("hint").innerHTML =
+                        '하위 관리서버가 없습니다. 각 머신에서 <code>npm run agent</code> 또는 <code>npm run solo</code> 로 등록하세요. 제어는 <a href="/server-admin.html">서버/모델관리</a>.';
+                } else if (modelTotal === 0) {
+                    $("hint").innerHTML =
+                        '등록된 모델 서버가 없습니다. <a href="/server-admin.html">서버/모델관리</a>에서 모델을 추가·기동하세요.';
+                } else if (modelOk === 0) {
+                    $("hint").innerHTML =
+                        '모델 서버가 모두 다운입니다. <a href="/server-admin.html">서버/모델관리</a>에서 기동하세요.';
+                } else if (eff === "heuristic") {
+                    $("hint").innerHTML =
+                        '라우터 역할이 꺼져 있어 글자수 휴리스틱으로 티어를 판정합니다. <a href="/server-admin.html">서버/모델관리</a>에서 라우터를 켜세요.';
+                } else {
+                    $("hint").innerHTML = "";
+                }
+            }
+
+            async function refreshStatus() {
+                try {
+                    const [r, rs] = await Promise.all([
+                        fetch("/api/status"),
+                        fetch("/api/servers").catch(() => null),
+                    ]);
+                    const s = await r.json();
+                    let servers = [];
+                    try {
+                        servers = (await rs?.json())?.servers ?? [];
+                    } catch {}
+                    svByUrl = new Map(servers.map((x) => [x.url, x]));
+                    backByUrl = new Map(
+                        (s.backends || []).map((b) => [b.url, b]),
+                    );
+
+                    lastStatus = s;
+                    renderClusterSummary(s);
+                    renderQueue(s);
+
+                    $("updated").textContent =
+                        "갱신 " + new Date().toLocaleTimeString();
+
+                    // 서버 행(상태·진행·오류)만 갱신
+                    if ($("nodeGrid").querySelector(".node-card")) {
+                        for (const a of agents) {
+                            const card = document.querySelector(
+                                `.node-card[data-id="${CSS.escape(a.id)}"]`,
+                            );
+                            const slot = card?.querySelector(
+                                '[data-slot="servers"]',
+                            );
+                            if (slot) slot.innerHTML = serversTable(a.servers);
+                        }
+                    }
+                } catch (e) {
+                    $("hint").innerHTML =
+                        `<span class="err">상태 조회 실패: ${escAttr(e.message)}</span>`;
+                }
+            }
+
+            async function refreshParentMetrics() {
+                try {
+                    const m = await (await fetch("/api/metrics")).json();
+                    parentMetrics = m;
+                    pushMetrics("__parent__", m);
+                    if (!hasParentChart()) renderNodes(true);
+                    else {
+                        const parentSlot = document.querySelector(
+                            '.node-card.parent [data-slot="metrics"]',
+                        );
+                        if (parentSlot) {
+                            parentSlot.innerHTML =
+                                metricsCardsHtml(parentMetrics);
+                            syncLiveGpuAttr(
+                                parentSlot.closest('[data-slot="live"]'),
+                                parentMetrics,
+                            );
+                        }
+                        scheduleDrawCharts();
+                    }
+                } catch (e) {
+                    parentMetrics = null;
+                    if (!hasParentChart()) renderNodes(true);
+                    const parentSlot = document.querySelector(
+                        '.node-card.parent [data-slot="metrics"]',
+                    );
+                    if (parentSlot) {
+                        parentSlot.innerHTML = `<div class="err">자원 조회 실패: ${escAttr(e.message)}</div>`;
+                    }
+                }
+            }
+
+            async function refreshAgents() {
+                try {
+                    const j = await (await fetch("/api/agents")).json();
+                    agents = j.agents || [];
+                    // 하위 서버 메트릭 → 각 노드 차트 히스토리에 적재
+                    for (const a of agents) {
+                        if (a.metrics) pushMetrics(a.id, a.metrics);
+                    }
+                    renderNodes();
+                    if (lastStatus) renderClusterSummary(lastStatus);
+                } catch (e) {
+                    agents = [];
+                    renderNodes(true);
+                    if (lastStatus) renderClusterSummary(lastStatus);
+                    $("hint").innerHTML =
+                        `<span class="err">하위 관리서버 조회 실패: ${escAttr(e.message)}</span>`;
+                }
+            }
+
+            // 초기 + 주기 갱신
+            const queueEl = $("queueOverview");
+            if (queueEl) {
+                queueEl.addEventListener("click", (e) => {
+                    const btn = e.target.closest(".lg-tab[data-tab]");
+                    if (!btn || !queueEl.contains(btn)) return;
+                    const next = btn.getAttribute("data-tab");
+                    if (!next || next === loadJobsTab) return;
+                    loadJobsTab = next;
+                    if (lastStatus) renderQueue(lastStatus);
+                });
+            }
+            renderNodes(true);
+            refreshStatus();
+            refreshParentMetrics();
+            refreshAgents();
+            setInterval(refreshStatus, 1000);
+            setInterval(refreshParentMetrics, 1000);
+            setInterval(refreshAgents, 2000);
+
+            // ===== 부하 스냅샷 세션 =====
+            const snapDur = (ms) => {
+                const s = Math.max(0, Math.floor(Number(ms) / 1000));
+                const h = String(Math.floor(s / 3600)).padStart(2, "0");
+                const m = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+                const ss = String(s % 60).padStart(2, "0");
+                return `${h}:${m}:${ss}`;
+            };
+            function snapMsg(text, cls) {
+                const el = $("snapMsg");
+                el.textContent = text || "";
+                el.className = "snap-msg" + (cls ? " " + cls : "");
+            }
+            async function snapPoll() {
+                try {
+                    const r = await fetch("/api/loadsession/active");
+                    const a = await r.json();
+                    if (a && a.state === "recording") {
+                        $("snapIdle").style.display = "none";
+                        $("snapRec").style.display = "flex";
+                        $("snapRecInfo").innerHTML =
+                            `기록 중 <b>${esc(a.label || a.id)}</b> · ` +
+                            `${snapDur(a.elapsedMs)}`;
+                    } else {
+                        $("snapRec").style.display = "none";
+                        $("snapIdle").style.display = "flex";
+                    }
+                } catch {
+                    /* 폴링 실패는 조용히 */
+                }
+            }
+            async function snapStart() {
+                const label = $("snapLabel").value.trim();
+                $("snapStart").disabled = true;
+                snapMsg("시작하는 중…");
+                try {
+                    const r = await fetch("/api/loadsession/start", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ label }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok)
+                        throw new Error(d.message || d.error || "시작 실패");
+                    snapMsg(
+                        "스냅샷 기록 시작됨. 이제 설정 변경은 잠깁니다 — 종료 후 변경하세요.",
+                        "ok",
+                    );
+                    await snapPoll();
+                } catch (e) {
+                    snapMsg(e.message, "err");
+                } finally {
+                    $("snapStart").disabled = false;
+                }
+            }
+            async function snapStop() {
+                $("snapStop").disabled = true;
+                snapMsg("종료·집계 중…");
+                try {
+                    const r = await fetch("/api/loadsession/stop", {
+                        method: "POST",
+                    });
+                    const d = await r.json();
+                    if (!r.ok)
+                        throw new Error(d.message || d.error || "종료 실패");
+                    snapMsg("스냅샷 종료됨. 리포트를 엽니다.", "ok");
+                    await snapPoll();
+                    snapShowReport(d);
+                } catch (e) {
+                    snapMsg(e.message, "err");
+                } finally {
+                    $("snapStop").disabled = false;
+                }
+            }
+            function snapTbl(headers, rows) {
+                const h = headers.map((x) => `<th>${esc(x)}</th>`).join("");
+                const b = rows
+                    .map(
+                        (row) =>
+                            "<tr>" +
+                            row
+                                .map(
+                                    (c) =>
+                                        `<td>${c == null ? "–" : esc(String(c))}</td>`,
+                                )
+                                .join("") +
+                            "</tr>",
+                    )
+                    .join("");
+                return `<table class="snap-tbl"><thead><tr>${h}</tr></thead><tbody>${b}</tbody></table>`;
+            }
+            // 시간축 스파크라인 SVG (avg 실선 + max 흐린선). x=점 인덱스(균등)
+            function snapSpark(pts, key, opt) {
+                opt = opt || {};
+                if (!pts || !pts.length) return "";
+                const W = 600,
+                    H = 48,
+                    pad = 3;
+                const n = pts.length;
+                const vals = pts.map((p) => Number(p[key]) || 0);
+                const yMax = opt.yMax || Math.max(1, ...vals);
+                const X = (i) =>
+                    n <= 1 ? pad : pad + (i / (n - 1)) * (W - 2 * pad);
+                const Y = (v) =>
+                    H - pad - (Math.min(v, yMax) / yMax) * (H - 2 * pad);
+                const line = (k) =>
+                    pts
+                        .map(
+                            (p, i) =>
+                                X(i).toFixed(1) +
+                                "," +
+                                Y(Number(p[k]) || 0).toFixed(1),
+                        )
+                        .join(" ");
+                const c = opt.color || "#6c8cff";
+                let svg =
+                    '<svg viewBox="0 0 ' +
+                    W +
+                    " " +
+                    H +
+                    '" preserveAspectRatio="none" style="width:100%;height:42px;display:block;background:var(--bg,#0d1117);border:1px solid var(--border,#30363d);border-radius:6px">';
+                if (opt.maxKey)
+                    svg +=
+                        '<polyline fill="none" stroke="' +
+                        c +
+                        '" stroke-opacity="0.28" stroke-width="1" points="' +
+                        line(opt.maxKey) +
+                        '"/>';
+                svg +=
+                    '<polyline fill="none" stroke="' +
+                    c +
+                    '" stroke-width="1.5" points="' +
+                    line(key) +
+                    '"/></svg>';
+                return svg;
+            }
+            function snapSparkRow(label, peakText, pts, key, opt) {
+                return (
+                    '<div style="margin:6px 0"><div class="meta" style="font-size:11px;display:flex;justify-content:space-between;gap:8px"><span>' +
+                    esc(label) +
+                    "</span><span>" +
+                    esc(peakText || "") +
+                    "</span></div>" +
+                    snapSpark(pts, key, opt) +
+                    "</div>"
+                );
+            }
+            function snapShowReport(s) {
+                $("snapModalTitle").textContent =
+                    "리포트 · " + (s.label || s.id);
+                const cfg = s.configAtStart || {};
+                const d = s.delta || {};
+                const t = d.totals || {};
+                let html = "";
+                html +=
+                    `<div class="meta" style="color:var(--muted);font-size:12px">` +
+                    `${esc(s.startedAt || "")} ~ ${esc(s.endedAt || "")} · 기간 ${snapDur(s.durationMs)}</div>`;
+
+                html += "<h4>구간 총계</h4>";
+                html += snapTbl(
+                    ["요청", "토큰", "에러", "에러율%"],
+                    [
+                        [
+                            fmt(t.requests),
+                            fmt(t.tokens),
+                            fmt(t.errors),
+                            t.errorRatePct ?? 0,
+                        ],
+                    ],
+                );
+                if (!t.requests) {
+                    html +=
+                        `<div class="meta" style="color:var(--muted);font-size:12px;margin-top:4px">` +
+                        `이 구간에 처리된 요청이 없습니다(백엔드·트래픽 있는 환경에서 값이 채워집니다).</div>`;
+                }
+
+                html += "<h4>티어별</h4>";
+                const bt = d.byTier || {};
+                html += snapTbl(
+                    ["티어", "요청", "토큰", "지연합(ms)"],
+                    ["small", "medium", "large"].map((k) => [
+                        k,
+                        fmt(bt[k]?.requests),
+                        fmt(bt[k]?.tokens),
+                        fmt(bt[k]?.totalMs),
+                    ]),
+                );
+
+                // 시간축 부하 추이 (언제 피크였나)
+                const se = s.series;
+                if (se && Array.isArray(se.points) && se.points.length) {
+                    const sm = se.summary || {};
+                    const tp = sm.tierPressure || {};
+                    const ivMs = se.intervalMs || 0;
+                    const ivTxt =
+                        ivMs >= 1000
+                            ? Math.round(ivMs / 1000) + "s"
+                            : ivMs + "ms";
+                    html +=
+                        "<h4>시간축 · 부하 추이 (" +
+                        fmt(se.pointCount) +
+                        "점 · 간격 " +
+                        ivTxt +
+                        ")</h4>";
+                    const g0 = sm.gpu && sm.gpu[0];
+                    if (g0) {
+                        html += snapSparkRow(
+                            "GPU0 사용률 %",
+                            "평균 " +
+                                g0.utilAvg +
+                                "% · 피크 " +
+                                g0.utilPeak +
+                                "%",
+                            se.points,
+                            "gpu0Util",
+                            {
+                                yMax: 100,
+                                color: "#6c8cff",
+                                maxKey: "gpu0UtilMax",
+                            },
+                        );
+                        html += snapSparkRow(
+                            "GPU0 VRAM %",
+                            "피크 " + g0.memPeakPct + "%",
+                            se.points,
+                            "gpu0Mem",
+                            { yMax: 100, color: "#d29922" },
+                        );
+                    }
+                    if (tp.large) {
+                        html += snapSparkRow(
+                            "large 압박도",
+                            "평균 " +
+                                tp.large.avg +
+                                " · 피크 " +
+                                tp.large.peak +
+                                " · 포화시간 " +
+                                tp.large.satRatioPct +
+                                "%",
+                            se.points,
+                            "large",
+                            { yMax: 1, color: "#f85149" },
+                        );
+                    }
+                    html += snapSparkRow(
+                        "큐 깊이",
+                        "피크 " + (sm.queue ? sm.queue.depthPeak : "–"),
+                        se.points,
+                        "q",
+                        { color: "#3fb950" },
+                    );
+
+                    if (Array.isArray(sm.gpu) && sm.gpu.length) {
+                        html += snapTbl(
+                            [
+                                "GPU",
+                                "util평균%",
+                                "util피크%",
+                                "VRAM피크%",
+                                "온도피크",
+                                "전력피크W",
+                                "util피크시각",
+                            ],
+                            sm.gpu.map((g) => [
+                                "GPU" + g.index,
+                                g.utilAvg,
+                                g.utilPeak,
+                                g.memPeakPct,
+                                g.tempPeak,
+                                g.powerPeakW,
+                                String(g.utilPeakAt || "")
+                                    .replace("T", " ")
+                                    .replace(/\..*$/, ""),
+                            ]),
+                        );
+                    }
+                    html += snapTbl(
+                        ["티어", "압박평균", "압박피크", "포화시간%"],
+                        ["large", "medium", "small"].map((t) => [
+                            t,
+                            tp[t]?.avg ?? "–",
+                            tp[t]?.peak ?? "–",
+                            tp[t]?.satRatioPct ?? "–",
+                        ]),
+                    );
+                }
+
+                // 모델별 (같은 모델을 여러 백엔드가 서빙하면 합산)
+                if (Array.isArray(d.byModel) && d.byModel.length) {
+                    html += "<h4>모델별</h4>";
+                    html += snapTbl(
+                        [
+                            "모델",
+                            "티어",
+                            "요청",
+                            "채팅",
+                            "라우터",
+                            "보안",
+                            "에러",
+                            "에러율%",
+                            "평균ms",
+                        ],
+                        d.byModel.map((m) => [
+                            m.model,
+                            m.tier,
+                            fmt(m.requests),
+                            fmt(m.chatRequests),
+                            fmt(m.routerRequests),
+                            fmt(m.securityRequests),
+                            fmt(m.errors),
+                            m.errorRatePct ?? "–",
+                            m.avgMs ?? "–",
+                        ]),
+                    );
+                }
+
+                // 에러 상세 — 무슨 에러였는지 조회
+                const er = s.errors || {};
+                html +=
+                    "<h4>에러" +
+                    (er.total
+                        ? " · 총 " +
+                          fmt(er.total) +
+                          "건" +
+                          (er.perHour != null
+                              ? " · 시간당 " + fmt(er.perHour) + "건"
+                              : "")
+                        : "") +
+                    "</h4>";
+                if (!er.total) {
+                    html +=
+                        '<div class="meta" style="color:var(--muted);font-size:12px">이 구간에 에러 없음.</div>';
+                } else {
+                    if (Array.isArray(er.byType) && er.byType.length) {
+                        html +=
+                            '<div class="meta" style="font-size:12px;margin:6px 0 2px">유형별</div>';
+                        html += snapTbl(
+                            ["에러 유형", "건수", "HTTP"],
+                            er.byType.map((t) => [
+                                t.type,
+                                fmt(t.count),
+                                t.status ?? "–",
+                            ]),
+                        );
+                    }
+                    if (Array.isArray(er.byModel) && er.byModel.length) {
+                        html +=
+                            '<div class="meta" style="font-size:12px;margin:8px 0 2px">모델별</div>';
+                        html += snapTbl(
+                            ["모델", "티어", "건수"],
+                            er.byModel.map((m) => [
+                                m.model,
+                                m.tier,
+                                fmt(m.count),
+                            ]),
+                        );
+                    }
+                    if (Array.isArray(er.samples) && er.samples.length) {
+                        const dropped = er.sampleDropped || 0;
+                        html +=
+                            '<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--accent);font-size:12px">' +
+                            "최근 에러 상세 " +
+                            fmt(er.samples.length) +
+                            "건 펼치기" +
+                            (dropped > 0
+                                ? " (전체 " +
+                                  fmt(er.total) +
+                                  "건 중 최신분, " +
+                                  fmt(dropped) +
+                                  "건 상세 생략 — 총계·유형별 집계는 전량 반영)"
+                                : "") +
+                            '</summary><div style="margin-top:6px">';
+                        html += er.samples
+                            .map((x) => {
+                                const when = String(x.ts || "")
+                                    .replace("T", " ")
+                                    .replace(/\..*$/, "");
+                                const head =
+                                    when +
+                                    " · " +
+                                    esc(x.kind || "?") +
+                                    " · " +
+                                    esc(x.model || "?") +
+                                    (x.status
+                                        ? " · HTTP " + esc(String(x.status))
+                                        : "") +
+                                    (x.retryable ? " · 재시도" : "");
+                                return (
+                                    '<div style="border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin-bottom:5px">' +
+                                    '<div class="meta" style="font-size:11px">' +
+                                    head +
+                                    "</div>" +
+                                    '<div style="font-size:12px;color:#f0883e;word-break:break-word">' +
+                                    esc(x.message || "") +
+                                    "</div></div>"
+                                );
+                            })
+                            .join("");
+                        html += "</div></details>";
+                    }
+                }
+
+                html += "<h4>큐 부하</h4>";
+                const q = d.queue || {};
+                html += snapTbl(
+                    [
+                        "인입",
+                        "시작",
+                        "거절",
+                        "거절율%",
+                        "타임아웃",
+                        "타임아웃율%",
+                        "큐피크(전체)",
+                    ],
+                    [
+                        [
+                            fmt(q.enqueued),
+                            fmt(q.started),
+                            fmt(q.rejected),
+                            q.rejectRatePct ?? 0,
+                            fmt(q.timedOut),
+                            q.timeoutRatePct ?? 0,
+                            fmt(q.peakDepthFinal),
+                        ],
+                    ],
+                );
+
+                html += "<h4>load-aware 강등 (large 용량 압박)</h4>";
+                const la = d.loadAware || {};
+                html += snapTbl(
+                    [
+                        "large 판정",
+                        "→medium 강등",
+                        "강등율%",
+                        "여유유지",
+                        "고난이도유지",
+                        "하드락",
+                    ],
+                    [
+                        [
+                            fmt(la.largeDecisions),
+                            fmt(la.demoteLargeToMedium),
+                            la.demoteRatePct ?? 0,
+                            fmt(la.skippedFreeOk),
+                            fmt(la.skippedHighDiff),
+                            fmt(la.skippedHardLock),
+                        ],
+                    ],
+                );
+
+                html += "<h4>시작 시점 설정 (튜닝 스탬프)</h4>";
+                const servers = Array.isArray(cfg.servers) ? cfg.servers : [];
+                if (servers.length) {
+                    html += snapTbl(
+                        ["서버", "티어", "ngl", "ctx", "parallel", "gpu"],
+                        servers.map((sv) => [
+                            sv.name,
+                            sv.tier,
+                            sv.ngl,
+                            sv.ctx,
+                            sv.parallel,
+                            sv.gpu,
+                        ]),
+                    );
+                } else {
+                    html += `<div class="meta" style="color:var(--muted);font-size:12px">로컬 서버 정의 없음(원격 agent 노드 구성).</div>`;
+                }
+
+                $("snapModalBody").innerHTML = html;
+                $("snapModal").style.display = "flex";
+            }
+            async function snapShowList() {
+                $("snapModalTitle").textContent = "지난 스냅샷";
+                $("snapModalBody").innerHTML =
+                    '<div class="meta">불러오는 중…</div>';
+                $("snapModal").style.display = "flex";
+                try {
+                    const r = await fetch("/api/loadsession");
+                    const list = await r.json();
+                    if (!Array.isArray(list) || !list.length) {
+                        $("snapModalBody").innerHTML =
+                            '<div class="meta">저장된 스냅샷이 없습니다.</div>';
+                        return;
+                    }
+                    $("snapModalBody").innerHTML = list
+                        .map((s) => {
+                            const tot = s.totals
+                                ? `요청 ${fmt(s.totals.requests)} · 토큰 ${fmt(s.totals.tokens)}`
+                                : s.state;
+                            return (
+                                `<div class="snap-list-row" data-id="${esc(s.id)}">` +
+                                `<span><b>${esc(s.label || s.id)}</b><br>` +
+                                `<span class="meta">${esc(s.startedAt || "")} · ${snapDur(s.durationMs)}</span></span>` +
+                                `<span class="meta">${esc(tot)}</span></div>`
+                            );
+                        })
+                        .join("");
+                    $("snapModalBody")
+                        .querySelectorAll(".snap-list-row")
+                        .forEach((row) => {
+                            row.onclick = async () => {
+                                const id = row.getAttribute("data-id");
+                                const rr = await fetch(
+                                    "/api/loadsession/" +
+                                        encodeURIComponent(id),
+                                );
+                                if (rr.ok) snapShowReport(await rr.json());
+                            };
+                        });
+                } catch (e) {
+                    $("snapModalBody").innerHTML =
+                        '<div class="meta">불러오기 실패: ' +
+                        esc(e.message) +
+                        "</div>";
+                }
+            }
+            $("snapStart").onclick = snapStart;
+            $("snapStop").onclick = snapStop;
+            $("snapLabel").addEventListener("keydown", (e) => {
+                if (e.key === "Enter") snapStart();
+            });
+            $("snapListLink").onclick = snapShowList;
+            $("snapListLink2").onclick = snapShowList;
+            $("snapModalClose").onclick = () =>
+                ($("snapModal").style.display = "none");
+            $("snapModal").addEventListener("click", (e) => {
+                if (e.target === $("snapModal"))
+                    $("snapModal").style.display = "none";
+            });
+            snapPoll();
+            setInterval(snapPoll, 2000);
+
+            window.addEventListener("resize", scheduleDrawCharts);
+            // 좌측 컬럼 폭 변화 시 차트 재그리기 (창 리사이즈만으로는 부족)
+            if (typeof ResizeObserver !== "undefined") {
+                const ro = new ResizeObserver(() => scheduleDrawCharts());
+                const grid = $("nodeGrid");
+                if (grid) ro.observe(grid);
+                const leftCol = document.querySelector(
+                    ".monitor-col:not(.load-side) .monitor-col-scroll",
+                );
+                if (leftCol) ro.observe(leftCol);
+            }
         </script>
         <script src="/nav.js"></script>
     </body>

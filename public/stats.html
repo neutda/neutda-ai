@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · 사용통계</title>
+        <link rel="stylesheet" href="/dashboard.css" />
+        <style>
+            .page-lead {
+                color: var(--muted);
+                font-size: 13px;
+                margin: 0 0 16px;
+            }
+            .summary {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                gap: 12px;
+                margin-bottom: 8px;
+            }
+            .summary .card .k {
+                font-size: 12px;
+                color: var(--muted);
+            }
+            .summary .card .v {
+                font-size: 26px;
+                font-weight: 700;
+                font-variant-numeric: tabular-nums;
+                margin-top: 4px;
+            }
+            .summary .card .v.v-badge {
+                font-size: inherit;
+                font-weight: inherit;
+                font-variant-numeric: normal;
+                display: flex;
+                align-items: center;
+                min-height: 32px;
+                line-height: 1;
+            }
+            .summary .card .v.v-badge .pill {
+                margin: 0;
+            }
+            .summary .card .sub {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 4px;
+            }
+            .sec-head {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin: 28px 0 12px;
+            }
+            .sec-head h2 {
+                margin: 0;
+            }
+            table.stat {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+            }
+            table.stat th,
+            table.stat td {
+                padding: 8px 10px;
+                border-top: 1px solid var(--border);
+                text-align: left;
+                vertical-align: middle;
+            }
+            table.stat th {
+                color: var(--muted);
+                font-weight: 500;
+                border-top: 0;
+            }
+            table.stat .num {
+                text-align: right;
+                font-variant-numeric: tabular-nums;
+            }
+            table.stat .muted {
+                color: var(--muted);
+            }
+            .panel {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 4px 6px 8px;
+                overflow-x: auto;
+            }
+            .pill {
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                font-size: 11px;
+                padding: 2px 8px;
+                border-radius: 999px;
+                background: rgba(154, 163, 178, 0.12);
+                color: var(--muted);
+            }
+            .pill.up {
+                background: rgba(63, 185, 80, 0.15);
+                color: var(--ok);
+            }
+            .pill.down {
+                background: rgba(248, 81, 73, 0.12);
+                color: var(--err);
+            }
+            .pill.load-idle {
+                background: rgba(63, 185, 80, 0.15);
+                color: var(--ok);
+            }
+            .pill.load-normal {
+                background: rgba(108, 140, 255, 0.15);
+                color: var(--accent);
+            }
+            .pill.load-busy {
+                background: rgba(210, 153, 34, 0.18);
+                color: var(--warn);
+            }
+            .pill.load-saturated,
+            .pill.load-offline {
+                background: rgba(248, 81, 73, 0.12);
+                color: var(--err);
+            }
+            .flow-list {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .flow-row {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) 72px 88px;
+                gap: 10px;
+                align-items: center;
+                font-size: 13px;
+            }
+            .flow-row .name {
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .flow-bar {
+                height: 8px;
+                background: #0d0f15;
+                border-radius: 4px;
+                overflow: hidden;
+                margin-top: 4px;
+            }
+            .flow-bar > span {
+                display: block;
+                height: 100%;
+                background: var(--accent);
+            }
+            .two-col {
+                display: grid;
+                grid-template-columns: 1.2fr 1fr;
+                gap: 12px;
+            }
+            @media (max-width: 900px) {
+                .two-col {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+            <link rel="stylesheet" href="/nav.css" />
+    </head>
+    <body>
+        <div class="wrap">
+            <header>
+                <h1>사용통계</h1>
+                <div class="tools">
+                    <span id="updated" class="updated"></span>
+                </div>
+            </header>
+            <div class="app-main">
+            <p class="page-lead">
+                채팅·파이프라인 사용량과 티어 라우팅 절감 효과를 모아서 봅니다.
+            </p>
+
+            <div class="summary" id="overview"></div>
+
+            <div class="sec-head">
+                <h2>
+                    티어 라우팅 효과
+                    <span
+                        class="muted"
+                        id="svSince"
+                        style="font-weight: 400"
+                    ></span>
+                </h2>
+            </div>
+            <div class="savings-grid">
+                <div class="card">
+                    <div class="k">연산량 절감 (전부 large 처리 대비)</div>
+                    <div class="v" id="svSaved" style="color: var(--ok)">–</div>
+                    <div
+                        class="muted"
+                        id="svSavedSub"
+                        style="margin-top: 4px"
+                    ></div>
+                </div>
+                <div class="card">
+                    <div class="k">누적 처리 토큰</div>
+                    <div class="v" id="svTokens">–</div>
+                    <div
+                        class="muted"
+                        id="svTokensSub"
+                        style="margin-top: 4px"
+                    ></div>
+                </div>
+                <div class="card">
+                    <div class="k">티어별 요청 분포</div>
+                    <div class="tier-dist" id="tierDist"></div>
+                    <div class="tier-legend" id="tierLegend"></div>
+                </div>
+            </div>
+
+            <div class="sec-head">
+                <h2>티어별 상세</h2>
+                <span class="muted" style="font-size: 12px"
+                    >요청·토큰·평균 지연 (누적)</span
+                >
+            </div>
+            <div class="panel">
+                <table class="stat" id="tierTable">
+                    <thead>
+                        <tr>
+                            <th>티어</th>
+                            <th class="num">요청</th>
+                            <th class="num">토큰</th>
+                            <th class="num">평균 지연</th>
+                            <th class="num">비용 가중</th>
+                            <th class="num">비중</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+
+            <div class="sec-head">
+                <h2>백엔드 사용량</h2>
+                <span class="muted" style="font-size: 12px"
+                    >풀에 등록된 모델 서버 (프로세스 기동 이후)</span
+                >
+            </div>
+            <div class="panel">
+                <table class="stat" id="backendTable">
+                    <thead>
+                        <tr>
+                            <th>모델</th>
+                            <th>티어</th>
+                            <th>상태</th>
+                            <th class="num">해결</th>
+                            <th class="num">라우터</th>
+                            <th class="num">설계</th>
+                            <th class="num">보안</th>
+                            <th class="num">전체</th>
+                            <th class="num">오류</th>
+                            <th class="num">평균 지연</th>
+                            <th class="num">진행</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+
+            <div class="sec-head">
+                <h2>파이프라인 사용</h2>
+                <span class="muted" id="wfWindow" style="font-size: 12px"></span>
+            </div>
+            <div class="summary" id="wfOverview"></div>
+            <div class="two-col" style="margin-top: 12px">
+                <div class="panel" style="padding: 14px 16px">
+                    <div class="k" style="margin-bottom: 10px">역할별 단계</div>
+                    <table class="stat" id="wfRoleTable">
+                        <thead>
+                            <tr>
+                                <th>역할</th>
+                                <th class="num">단계</th>
+                                <th class="num">평균 ms</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="panel" style="padding: 14px 16px">
+                    <div class="k" style="margin-bottom: 10px">
+                        자주 쓰는 흐름
+                    </div>
+                    <div class="flow-list" id="wfFlows"></div>
+                </div>
+            </div>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const TIER_COLORS = {
+                small: "var(--warn)",
+                medium: "var(--ok)",
+                large: "var(--accent)",
+            };
+            const TIER_ORDER = ["small", "medium", "large"];
+            const fmt = (n) =>
+                n == null || !Number.isFinite(Number(n))
+                    ? "–"
+                    : Number(n).toLocaleString("ko-KR");
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/"/g, "&quot;");
+
+            function card(k, v, sub = "", color = "", opts = {}) {
+                const vClass = opts.badge ? "v v-badge" : "v";
+                return `<div class="card">
+          <div class="k">${k}</div>
+          <div class="${vClass}"${color ? ` style="color:${color}"` : ""}>${v}</div>
+          ${sub ? `<div class="sub">${sub}</div>` : ""}
+        </div>`;
+            }
+
+            function renderOverview(status, stats) {
+                const tot = stats?.totals || {};
+                $("overview").innerHTML = [
+                    card(
+                        "누적 요청",
+                        fmt(tot.requests),
+                        stats?.since
+                            ? `${new Date(stats.since).toLocaleDateString("ko-KR")}~`
+                            : "",
+                    ),
+                    card("누적 토큰", fmt(tot.tokens)),
+                    card(
+                        "최근 1분",
+                        fmt(status?.requestsLastMin),
+                        "요청/분",
+                        "var(--accent)",
+                    ),
+                    card(
+                        "진행 중",
+                        fmt(status?.totalInFlight),
+                        `풀 누적 ${fmt(status?.totalRequests)}`,
+                    ),
+                    card(
+                        "오류",
+                        fmt(status?.totalErrors),
+                        "풀 누적",
+                        status?.totalErrors > 0 ? "var(--err)" : "",
+                    ),
+                    card(
+                        "해결 가능 서버",
+                        fmt(status?.healthyBackends),
+                        `전체 등록 ${fmt(status?.totalBackends)} · 헬스·해결역할·비전용`,
+                        "var(--ok)",
+                    ),
+                    card(
+                        "슬롯 강등",
+                        fmt(status?.loadAware?.demoteLargeToMedium),
+                        status?.loadAware?.lastDemoteAt
+                            ? `최근 ${new Date(status.loadAware.lastDemoteAt).toLocaleTimeString("ko-KR")}`
+                            : "large→medium load-demote",
+                    ),
+                ].join("");
+            }
+
+            function renderSavings(st) {
+                if (!st) return;
+                const sv = st.savings || {};
+                const pct = sv.savedPctTokens ?? sv.savedPctRequests;
+                $("svSaved").textContent = pct == null ? "–" : pct + "%";
+                $("svSavedSub").textContent =
+                    pct == null
+                        ? "아직 처리된 요청이 없습니다."
+                        : sv.savedPctTokens != null
+                          ? `토큰 가중 기준 · 요청 수 기준 ${sv.savedPctRequests}%`
+                          : "요청 수 기준 (토큰 usage 미집계)";
+                $("svTokens").textContent = fmt(st.totals?.tokens);
+                $("svTokensSub").textContent =
+                    st.totals?.tokens > 0
+                        ? `large 환산 시 약 ${fmt(sv.largeEquivalentTokens)} 토큰 상당`
+                        : "";
+                $("svSince").textContent = st.since
+                    ? `(${new Date(st.since).toLocaleDateString("ko-KR")} 부터 누적)`
+                    : "";
+
+                const tiers = st.tiers || {};
+                const totalReq = st.totals?.requests || 0;
+                $("tierDist").innerHTML = TIER_ORDER.map((t) => {
+                    const req = tiers[t]?.requests || 0;
+                    const w = totalReq ? (req / totalReq) * 100 : 0;
+                    return `<span class="seg-${t}" style="width:${w}%" title="${t}: ${fmt(req)}건"></span>`;
+                }).join("");
+                $("tierLegend").innerHTML = TIER_ORDER.map((t) => {
+                    const req = tiers[t]?.requests || 0;
+                    const p = totalReq
+                        ? Math.round((req / totalReq) * 100)
+                        : 0;
+                    return `<span><span class="sw" style="background:${TIER_COLORS[t]}"></span>${t} <b>${fmt(req)}건 (${p}%)</b></span>`;
+                }).join("");
+            }
+
+            function renderTierTable(st) {
+                const tb = $("tierTable").querySelector("tbody");
+                const tiers = st?.tiers || {};
+                const totalReq = st?.totals?.requests || 0;
+                tb.innerHTML = TIER_ORDER.map((t) => {
+                    const row = tiers[t] || {};
+                    const req = row.requests || 0;
+                    const avgMs =
+                        req > 0 && row.totalMs
+                            ? Math.round(row.totalMs / req)
+                            : null;
+                    const share = totalReq
+                        ? Math.round((req / totalReq) * 100)
+                        : 0;
+                    return `<tr>
+            <td><span class="sw" style="background:${TIER_COLORS[t]};width:10px;height:10px;border-radius:2px;display:inline-block;margin-right:6px;vertical-align:-1px"></span>${t}</td>
+            <td class="num">${fmt(req)}</td>
+            <td class="num">${fmt(row.tokens)}</td>
+            <td class="num">${avgMs == null ? "–" : fmt(avgMs) + " ms"}</td>
+            <td class="num">${row.weight ?? "–"}</td>
+            <td class="num">${share}%</td>
+          </tr>`;
+                }).join("");
+            }
+
+            function renderBackends(status) {
+                const tb = $("backendTable").querySelector("tbody");
+                const list = [...(status?.backends || [])].sort((a, b) => {
+                    const ta = a.tier || "";
+                    const tb0 = b.tier || "";
+                    if (ta !== tb0) return ta.localeCompare(tb0);
+                    return (b.totalRequests || 0) - (a.totalRequests || 0);
+                });
+                if (!list.length) {
+                    tb.innerHTML = `<tr><td colspan="11" class="muted">등록된 백엔드가 없습니다.</td></tr>`;
+                    return;
+                }
+                tb.innerHTML = list
+                    .map((b) => {
+                        const name =
+                            b.alias ||
+                            (b.model
+                                ? String(b.model).split(/[\\/]/).pop()
+                                : b.url);
+                        const pill = b.healthy
+                            ? `<span class="pill up"><span class="dot"></span>up</span>`
+                            : `<span class="pill down"><span class="dot"></span>down</span>`;
+                        return `<tr>
+              <td title="${esc(b.url)}">${esc(name)}</td>
+              <td>${esc(b.tier || "–")}</td>
+              <td>${pill}</td>
+              <td class="num">${fmt(b.chatRequests)}</td>
+              <td class="num">${fmt(b.routerRequests)}</td>
+              <td class="num">${fmt(b.plannerRequests)}</td>
+              <td class="num">${fmt(b.securityRequests)}</td>
+              <td class="num">${fmt(b.totalRequests)}</td>
+              <td class="num">${fmt(b.totalErrors)}</td>
+              <td class="num">${b.avgLatencyMs == null ? "–" : fmt(b.avgLatencyMs) + " ms"}</td>
+              <td class="num">${fmt(b.inFlight)}</td>
+            </tr>`;
+                    })
+                    .join("");
+            }
+
+            function renderWorkflow(wf) {
+                if (!wf || wf.error) {
+                    $("wfOverview").innerHTML = card(
+                        "파이프라인",
+                        "–",
+                        wf?.error || "기록 없음",
+                    );
+                    $("wfRoleTable").querySelector("tbody").innerHTML = "";
+                    $("wfFlows").innerHTML =
+                        `<div class="muted">히스토리가 없습니다.</div>`;
+                    $("wfWindow").textContent = "";
+                    return;
+                }
+                const c = wf.counts || {};
+                const a = wf.averages || {};
+                const win = wf.window || {};
+                $("wfWindow").textContent = win.entries
+                    ? `최근 ${fmt(win.entries)}건` +
+                      (win.since
+                          ? ` · ${new Date(win.since).toLocaleDateString("ko-KR")}~`
+                          : "")
+                    : "";
+                $("wfOverview").innerHTML = [
+                    card(
+                        "직접 응답",
+                        fmt(c.direct),
+                        "workflow 미사용",
+                    ),
+                    card(
+                        "파이프라인",
+                        fmt(c.workflow),
+                        c.pipelinePct != null
+                            ? `전체의 ${c.pipelinePct}%`
+                            : "",
+                        "var(--accent)",
+                    ),
+                    card("긴 입력(맵리듀스)", fmt(c.long)),
+                    card(
+                        "평균 단계",
+                        a.workflow?.steps == null
+                            ? "–"
+                            : String(a.workflow.steps),
+                        a.workflow?.totalMs != null
+                            ? `평균 ${fmt(a.workflow.totalMs)} ms`
+                            : "",
+                    ),
+                ].join("");
+
+                const roles = wf.byRole || [];
+                const rtb = $("wfRoleTable").querySelector("tbody");
+                rtb.innerHTML = roles.length
+                    ? roles
+                          .slice(0, 12)
+                          .map(
+                              (r) => `<tr>
+              <td>${esc(r.key)}</td>
+              <td class="num">${fmt(r.steps)}</td>
+              <td class="num">${r.avgMs == null ? "–" : fmt(r.avgMs)}</td>
+            </tr>`,
+                          )
+                          .join("")
+                    : `<tr><td colspan="3" class="muted">데이터 없음</td></tr>`;
+
+                const flows = wf.flows || [];
+                const maxRuns = Math.max(1, ...flows.map((f) => f.runs || 0));
+                $("wfFlows").innerHTML = flows.length
+                    ? flows
+                          .map(
+                              (f) => `<div class="flow-row">
+              <div>
+                <div class="name" title="${esc(f.flow)}">${esc(f.flow)}</div>
+                <div class="flow-bar"><span style="width:${((f.runs || 0) / maxRuns) * 100}%"></span></div>
+              </div>
+              <div class="num">${fmt(f.runs)}회</div>
+              <div class="num muted">${f.avgMs == null ? "–" : fmt(f.avgMs) + " ms"}</div>
+            </div>`,
+                          )
+                          .join("")
+                    : `<div class="muted">흐름 기록 없음</div>`;
+            }
+
+            async function refresh() {
+                try {
+                    const [statusRes, statsRes, wfRes] = await Promise.all([
+                        fetch("/api/status"),
+                        fetch("/api/stats"),
+                        fetch("/api/workflow/stats?limit=300"),
+                    ]);
+                    const status = await statusRes.json();
+                    const stats = await statsRes.json();
+                    let wf = null;
+                    try {
+                        wf = await wfRes.json();
+                    } catch {
+                        wf = { error: "파이프라인 통계 조회 실패" };
+                    }
+                    renderOverview(status, stats);
+                    renderSavings(stats);
+                    renderTierTable(stats);
+                    renderBackends(status);
+                    renderWorkflow(wf);
+                    $("updated").textContent =
+                        "갱신 " + new Date().toLocaleTimeString();
+                } catch (e) {
+                    $("updated").textContent = "오류: " + e.message;
+                }
+            }
+
+            refresh();
+            setInterval(refresh, 3000);
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>

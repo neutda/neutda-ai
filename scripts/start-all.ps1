@@ -234,13 +234,17 @@ $env:LLAMA_BACKENDS = ($backends -join ",")
 $env:PORT = "$Port"
 Write-Host "[up] LLAMA_BACKENDS=$($env:LLAMA_BACKENDS)"
 $expLog = Join-Path $logDir "express.log"
-Start-Process -FilePath "node" -ArgumentList @("src/server.js") -WorkingDirectory $root `
-  -RedirectStandardOutput $expLog -RedirectStandardError "$expLog.err" -WindowStyle Hidden | Out-Null
+$expErr = "$expLog.err"
+$node = (Get-Command node -ErrorAction Stop).Source
+# append — 재시작해도 express.log 이어짐
+$cmd = "`"$node`" src/server.js >> `"$expLog`" 2>> `"$expErr`""
+Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $cmd) -WorkingDirectory $root `
+  -WindowStyle Hidden | Out-Null
 
 Start-Sleep -Seconds 2
 Write-Host ""
 Write-Host "[up] 완료!" -ForegroundColor Green
 Write-Host "     테스트 콘솔 : http://localhost:$Port/"
-Write-Host "     모델 관리   : http://localhost:$Port/models.html"
+Write-Host "     서버/모델관리 : http://localhost:$Port/server-admin.html"
 Write-Host "     서버 모니터 : http://localhost:$Port/monitor.html"
 Write-Host "     종료        : npm run down"

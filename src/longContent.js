@@ -15,6 +15,10 @@ import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { pool } from "./pool.js";
+import {
+  replyLanguageReminder,
+  replyLanguageSystemLine,
+} from "./replyLanguage.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LONGDOC_DIR = path.join(ROOT, "data", "longdocs");
@@ -32,14 +36,36 @@ function truncate(s, max) {
   return t.length <= max ? t : t.slice(0, max) + "…";
 }
 
-/** 텍스트 길이(문자)로 긴 입력 여부 판정. 이미지 요청은 제외. */
+/**
+ * Qwen 계열 대략 토큰 수 (한글·한자는 토큰을 많이 씀).
+ * 정확한 tokenizer 대신 보수적 상한으로 컨텍스트 초과를 미리 피한다.
+ */
+export function estimateTokens(text) {
+  const s = String(text ?? "");
+  if (!s) return 0;
+  const hangul = (s.match(/[가-힣]/g) || []).length;
+  const han = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+  const other = Math.max(0, s.length - hangul - han);
+  return Math.ceil(hangul * 1.35 + han * 1.6 + other * 0.4);
+}
+
+/** 텍스트 길이·추정 토큰으로 긴 입력 여부 판정. 이미지 요청은 제외. */
 export function needsLongPipeline(body) {
   const hasImage =
     body?.content !== undefined && body?.content !== null && body?.content !== "";
   if (hasImage) return false;
   const user = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
   const sys = typeof body?.ROLE_SYSTEM === "string" ? body.ROLE_SYSTEM : "";
-  return user.length + sys.length > config.longTriggerChars;
+  const combined = user + "\n" + sys;
+  if (combined.length > config.longTriggerChars) return true;
+  return estimateTokens(combined) > config.longTriggerTokens;
+}
+
+export function isContextOverflowError(err) {
+  const msg = String(err?.message ?? err ?? "");
+  return /exceed_context_size|context size|n_prompt_tokens|available context/i.test(
+    msg,
+  );
 }
 
 /** 긴 내용을 물리 파일로 저장하고 {id, file} 반환. */
@@ -130,7 +156,7 @@ const MAP_SYSTEM = [
   "주어진 문서 '일부'에서 사용자 요청과 관련된 사실을 하나도 빠짐없이 뽑아라.",
   "특히 숫자·금액·날짜·비율, 사람/조직/부서/제품 등 고유명사는 원문 표현 그대로 반드시 포함하라.",
   "반복되는 일반 설명은 건너뛰되, 구체적 사실이 한 줄이라도 있으면 무조건 추출하라.",
-  "간결한 한국어 불릿으로 정리하라. 추측·결론은 만들지 마라(다음 단계가 종합).",
+  "간결한 불릿으로 정리하라. 추측·결론은 만들지 마라(다음 단계가 종합).",
   "관련 사실이 전혀 없을 때에만 정확히 '(핵심 없음)' 이라고만 답하라.",
 ].join("\n");
 
@@ -143,6 +169,7 @@ function buildMapUser(userQ, sysText, chunk, idx, total) {
     `사용자 요청(지시):\n${truncate(userQ, TASK_HINT_CHARS)}`,
     `문서 조각 ${idx + 1}/${total}:\n${chunk}`,
     "이 조각에서 요청 수행에 필요한 내용만 추출:",
+    replyLanguageReminder(userQ, { pipeline: true }),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -152,13 +179,15 @@ function buildReduceMessages({ userQ, sysText, partials, isFinal }) {
   const joined = partials
     .map((p, i) => `--- 조각 ${p.i ?? i + 1} 추출 ---\n${p.text}`)
     .join("\n\n");
+  const langLine = replyLanguageSystemLine(userQ);
   const system = isFinal
     ? [
         "너는 긴 문서 파이프라인의 '종합' 단계다.",
         "아래는 문서 각 부분에서 뽑은 내용이다. 이를 근거로 사용자 요청에 대한 최종 답을 작성하라.",
         sysText ? `사용자 시스템 지시도 반드시 반영: ${sysText}` : "",
         "중복은 합치고 누락 없이 종합하되, 조각 라벨·메타는 답에 쓰지 마라. 완성된 답 본문만 출력하라.",
-        config.enforceLanguage ? config.langDirective : "",
+        langLine,
+        "부분 추출 언어가 달라도 최종 답은 사용자 질문과 같은 언어로.",
       ]
         .filter(Boolean)
         .join("\n")
@@ -166,20 +195,20 @@ function buildReduceMessages({ userQ, sysText, partials, isFinal }) {
         "너는 긴 문서 파이프라인의 '부분 병합' 단계다.",
         "아래 여러 조각 추출들을 사용자 요청 관점에서 중복 없이 하나로 합쳐라.",
         "정보 손실 없이 요약·정리만 하고, 최종 결론은 만들지 마라(다음 단계가 종합).",
-      ].join("\n");
-  const koreanHint =
-    isFinal && config.enforceLanguage && /[가-힣]/.test(userQ)
-      ? "(답변은 반드시 한국어로만 작성하고, 중국어를 섞지 마세요.)"
-      : "";
+        langLine,
+      ]
+        .filter(Boolean)
+        .join("\n");
+  const langHint = replyLanguageReminder(userQ, { pipeline: true });
   const user = [
-    sysText ? `사용자 시스템 지시:\n${truncate(sysText, 400)}` : "",
-    `사용자 요청(지시):\n${truncate(userQ, TASK_HINT_CHARS)}`,
-    `추출 모음:\n${joined}`,
-    isFinal ? "위 내용을 종합한 최종 답:" : "위 내용을 손실 없이 하나로 병합:",
-    koreanHint,
+    `사용자 요청:\n${truncate(userQ, 2000)}`,
+    joined,
+    isFinal ? "위 추출을 종합한 최종 답:" : "위 추출들을 하나로 병합:",
+    langHint,
   ]
     .filter(Boolean)
     .join("\n\n");
+
   return [
     { role: "system", content: system },
     { role: "user", content: user },
@@ -250,7 +279,7 @@ export async function runLongContent({ body, temperature, onEvent }) {
     {
       kind: "router",
       title: "긴 입력 처리 계획",
-      planner: `긴 입력 자동 분할 (${userQ.length}자 > ${config.longTriggerChars}자)`,
+      planner: `긴 입력 자동 분할 (${userQ.length}자/~${estimateTokens(userQ)}tok, 한도 ${config.longTriggerChars}자/${config.longTriggerTokens}tok)`,
       routerTier: null,
       reason: `컨텍스트 초과 방지: ${chunks.length}개 청크로 나눠 맵리듀스 (파일 저장: ${path.basename(saved.file)})`,
       decision: "청크 맵리듀스",
@@ -298,7 +327,16 @@ export async function runLongContent({ body, temperature, onEvent }) {
       try {
         const { result, backendUrl, tier, device, alias } = await pool.chat({
           messages: [
-            { role: "system", content: MAP_SYSTEM },
+            {
+              role: "system",
+              content: [
+                MAP_SYSTEM,
+                replyLanguageSystemLine(userQ),
+                "추출 결과도 사용자 질문과 같은 언어로.",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            },
             {
               role: "user",
               content: buildMapUser(userQ, sysText, chunks[i], i, chunks.length),

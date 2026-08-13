@@ -22,18 +22,35 @@
                 box-sizing: border-box;
                 display: flex;
                 flex-direction: column;
-                padding: 14px 20px 14px;
+                padding: 0;
             }
-            .security-page > header {
-                margin-bottom: 8px;
-                flex-shrink: 0;
+            .security-page > .app-main {
+                flex: 1;
+                min-height: 0;
+                overflow: hidden;
+                padding: 14px 20px 16px;
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
             }
-            .security-page > header h1 {
+            .sec-master {
+                display: inline-flex;
+                align-items: center;
+                gap: 10px;
+            }
+            .sec-master-lab {
+                font-size: 13px;
+                font-weight: 700;
+                color: var(--muted);
+            }
+            .sec-master-lab.on {
+                color: var(--ok);
+            }
+            .sec-master-lab.off {
+                color: #f07178;
+            }
+            .security-page > .app-main > .lead {
                 margin: 0;
-                font-size: 20px;
-            }
-            .security-page > .lead {
-                margin: 0 0 12px;
                 flex-shrink: 0;
                 font-size: 13px;
             }
@@ -328,17 +345,27 @@
                 flex: 1;
             }
         </style>
+            <link rel="stylesheet" href="/nav.css" />
     </head>
     <body>
         <div class="wrap security-page">
             <header>
                 <h1>보안 관리</h1>
-                <div><span id="updated" class="updated"></span></div>
+                <div class="tools sec-master">
+                    <span class="sec-master-lab" id="secEnabledLabel">보안검증</span>
+                    <label class="role-switch" title="끄면 최종 답변 보안 게이트를 건너뜁니다">
+                        <input type="checkbox" id="secEnabled" />
+                        <span class="role-slider"></span>
+                    </label>
+                    <span id="updated" class="updated"></span>
+                </div>
             </header>
+            <div class="app-main">
             <p class="muted lead">
-                보안 정책(보안 내역)을 만들고, 모델 관리에서 «보안검증» 기능이
-                켜진 모델에만 입힐 수 있습니다. 배정된 정책은 최종 답변 직전
-                보안검증 워크플로우에서 사용됩니다.
+                상단 스위치로 보안검증 전체를 끌 수 있습니다(정책·배정은 유지).
+                켜 둔 상태에서도 답변 토큰은 실시간 스트리밍되며, 차단 시에만 최종
+                문구가 교체됩니다. 정책은 서버/모델관리의 «보안검증»이 켜진 모델에만
+                입힐 수 있습니다.
             </p>
 
             <div class="layout">
@@ -377,6 +404,7 @@
                         </button>
                     </div>
                 </div>
+            </div>
             </div>
         </div>
 
@@ -539,7 +567,7 @@
                 }
                 if (!secServers.length) {
                     $("assignGrid").innerHTML =
-                        '<div class="empty">보안검증이 켜진 모델이 없습니다. 모델 관리에서 «보안검증» 기능을 먼저 켜 주세요.</div>';
+                        '<div class="empty">보안검증이 켜진 모델이 없습니다. 서버/모델관리에서 «보안검증» 기능을 먼저 켜 주세요.</div>';
                     return;
                 }
                 $("assignGrid").innerHTML = secServers
@@ -604,6 +632,15 @@
                 if (!rs.ok) throw new Error(sd.error || "서버 로드 실패");
                 policies = pd.policies || [];
                 servers = sd.servers || [];
+                const on = pd.enabled !== false;
+                const tog = $("secEnabled");
+                const lab = $("secEnabledLabel");
+                if (tog) tog.checked = on;
+                if (lab) {
+                    lab.textContent = on ? "보안검증 ON" : "보안검증 OFF";
+                    lab.classList.toggle("on", on);
+                    lab.classList.toggle("off", !on);
+                }
                 if (
                     selectedId &&
                     !policies.some((p) => p.id === selectedId)
@@ -616,6 +653,32 @@
                 $("updated").textContent =
                     "갱신 " + new Date().toLocaleTimeString();
             }
+
+            $("secEnabled").addEventListener("change", async () => {
+                const enabled = $("secEnabled").checked;
+                const lab = $("secEnabledLabel");
+                try {
+                    const r = await fetch("/api/security/enabled", {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ enabled }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "저장 실패");
+                    if (lab) {
+                        lab.textContent = d.enabled
+                            ? "보안검증 ON"
+                            : "보안검증 OFF";
+                        lab.classList.toggle("on", d.enabled);
+                        lab.classList.toggle("off", !d.enabled);
+                    }
+                    $("updated").textContent =
+                        "갱신 " + new Date().toLocaleTimeString();
+                } catch (err) {
+                    $("secEnabled").checked = !enabled;
+                    alert(err.message || "보안검증 스위치 변경 실패");
+                }
+            });
 
             $("policyList").addEventListener("click", (e) => {
                 const edit = e.target.closest(".policy-edit");
