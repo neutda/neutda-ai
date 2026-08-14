@@ -12,6 +12,16 @@ export function isRagRequest(body) {
   return false;
 }
 
+/** 인사·단답 등 문서 검색이 필요 없는 발화 */
+export function isSmallTalk(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (t.length > 40) return false;
+  return /^(안녕(하세요|하신가|히\s*가세요)?|하이|헬로|hello|hi|hey|ㅎㅇ|ㅎㅎ+|ㅋ+|네+|아니요|아니|응+|ㅇㅇ|ㄱㅅ|고마워|감사합니다?|고맙습니다|수고(하세요|했어)?|잘\s*가|바이|bye)[\s!.~]*$/i.test(
+    t,
+  );
+}
+
 export function ragOptions(body) {
   const strict = body?.strict !== false && body?.ragStrict !== false;
   const raw = Number(body?.topK ?? body?.TOP_K);
@@ -68,14 +78,18 @@ export function ragSystemAddon(strict, hasVision, question = "", userSystem) {
     base =
       "너는 제공된 '참고 문서'만 근거로 답하는 어시스턴트다." +
       vision +
-      " 문서에 없는 내용은 절대 추측하지 말고, 질문 언어에 맞춰 '문서 내용에 없습니다.'에 해당하는 짧은 거절만 하라. " +
+      " 지금 사용자 질문이 유일한 과제다. 이전 대화·기억은 참고만 하고, 지금 질문이 이전 주제나 문서와 무관하면 이전 설명을 반복하지 마라. " +
+      "지금 질문이 인사·잡담이면 문서 요약 없이 짧게 인사로만 답하라. " +
+      "문서에 없는 내용은 절대 추측하지 말고, 질문 언어에 맞춰 '문서 내용에 없습니다.'에 해당하는 짧은 거절만 하라. " +
       "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라. " +
       lang;
   } else {
     base =
       "너는 '참고 문서'를 우선 근거로 사용하는 어시스턴트다." +
       vision +
-      " 문서에 없으면 너의 일반 지식으로 보완해 답하라. " +
+      " 지금 사용자 질문이 유일한 과제다. 이전 대화·기억은 참고만 하고, 지금 질문이 이전 주제나 문서와 무관하면 이전 설명을 반복하지 마라. " +
+      "지금 질문이 인사·잡담이면 문서 요약 없이 짧게 인사로만 답하라. " +
+      "문서에 없으면 너의 일반 지식으로 보완해 답하라. " +
       "답변에 [출처 N] 같은 출처 표기는 넣지 말고 내용만 자연스럽게 답하라. " +
       lang;
   }
@@ -126,6 +140,20 @@ export async function loadRagForRequest(body) {
 
   const { strict, topK } = ragOptions(body);
   const q = ragRetrieveQuery(body);
+
+  if (isSmallTalk(q)) {
+    return {
+      hits: [],
+      context: "",
+      sources: [],
+      strict,
+      topK,
+      skipped: true,
+      emptyStrict: false,
+      reused: false,
+      retrieveQuery: q,
+    };
+  }
 
   await rag.load();
   const hits = q.trim() ? await rag.retrieveAsync(q, topK) : [];

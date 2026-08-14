@@ -25,6 +25,22 @@
             },
             "models": [
                 {
+                    "id": "qwen2.5-7b-gpu",
+                    "label": "Qwen2.5 7B Instruct (GPU)",
+                    "path": "models/qwen2.5-7b-instruct-q4_k_m.gguf",
+                    "layers": 28,
+                    "ctx": 4096,
+                    "ngl": 99
+                },
+                {
+                    "id": "qwen2.5-7b-cpu",
+                    "label": "Qwen2.5 7B Instruct (CPU)",
+                    "path": "models/qwen2.5-7b-instruct-q4_k_m.gguf",
+                    "layers": 28,
+                    "ctx": 4096,
+                    "ngl": 0
+                },
+                {
                     "id": "qwen2.5-3b-gpu",
                     "label": "Qwen2.5 3B Instruct (GPU)",
                     "path": "models/qwen2.5-3b-instruct-q4_k_m.gguf",

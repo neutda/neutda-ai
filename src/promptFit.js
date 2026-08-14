@@ -210,6 +210,23 @@ export function fitMessagesForBackend(messages, backend, maxTokens = 512) {
     }
   }
 
+  // 4) 시스템(개인기억·역할)이 예산을 채우면 user만 잘라선 부족하다.
+  //    긴 코드 붙여넣기가 기억으로 재주입된 경우가 전형적.
+  if (est > budget) {
+    for (const m of msgs) {
+      if (m.role !== "system") continue;
+      const othersTok = estimateMessagesTokens(msgs.filter((x) => x !== m));
+      const allow = Math.max(64, budget - othersTok);
+      const text = contentToText(m.content);
+      const next = truncateTextToTokens(text, allow);
+      if (next !== text) {
+        setMessageText(m, next);
+        notes.push("시스템 메시지 강제 축소");
+      }
+    }
+    est = estimateMessagesTokens(msgs);
+  }
+
   return {
     messages: msgs,
     truncated: true,

@@ -12,20 +12,23 @@
             "ngl": 99,
             "gpu": "0",
             "embedding": true,
-            "router": true
+            "planner": true,
+            "router": true,
+            "security": true
         },
         {
             "name": "medium-1",
-            "alias": "Qwen2.5 3B Instruct (GPU)",
+            "alias": "Qwen2.5 7B Instruct (GPU)",
             "tier": "medium",
             "port": 8081,
-            "model": "models/qwen2.5-3b-instruct-q4_k_m.gguf",
+            "model": "models/qwen2.5-7b-instruct-q4_k_m.gguf",
             "ctx": 4096,
             "ngl": 30,
             "parallel": 8,
             "gpu": "0",
-            "layers": 36,
-            "planner": true
+            "layers": 28,
+            "router": true,
+            "security": true
         }
     ]
 }

@@ -28,9 +28,11 @@ class LlamaError extends Error {
  * @param {boolean} [params.enableThinking]
  * @returns {Promise<{content: string, reasoning: string, raw: object}>}
  */
-export async function chatCompletion({ baseUrl, messages, temperature, maxTokens, enableThinking }) {
+export async function chatCompletion({ baseUrl, messages, temperature, maxTokens, enableThinking, timeoutMs }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+  const waitMs =
+    Number(timeoutMs) > 0 ? Number(timeoutMs) : config.requestTimeoutMs;
+  const timeout = setTimeout(() => controller.abort(), waitMs);
 
   let response;
   try {
@@ -51,7 +53,7 @@ export async function chatCompletion({ baseUrl, messages, temperature, maxTokens
   } catch (err) {
     if (err.name === "AbortError") {
       // 타임아웃은 다른 백엔드로 재시도 가능
-      throw new LlamaError(`모델 응답 타임아웃 (${config.requestTimeoutMs}ms 초과)`, { retryable: true });
+      throw new LlamaError(`모델 응답 타임아웃 (${waitMs}ms 초과)`, { retryable: true });
     }
     // 연결 실패 = 서버가 응답 못 함 → 백엔드 다운으로 간주
     throw new LlamaError(`llama-server 연결 실패: ${err.message}`, {
@@ -81,7 +83,8 @@ export async function chatCompletion({ baseUrl, messages, temperature, maxTokens
   const message = data?.choices?.[0]?.message ?? {};
   const content = message.content ?? "";
   const reasoning = message.reasoning_content ?? "";
-  return { content, reasoning, raw: data };
+  // usage 를 top-level 로도 노출(스트리밍 반환과 형태 통일). 외부 API 토큰 집계용.
+  return { content, reasoning, usage: data?.usage ?? null, raw: data };
 }
 
 /**

@@ -48,10 +48,26 @@
                     match: (p) => p.includes("security"),
                 },
                 {
-                    href: "/api.html",
+                    href: "/knowledge.html",
+                    label: "기초 지식 관리",
+                    icon: "📚",
+                    match: (p) => p.endsWith("/knowledge.html"),
+                },
+                {
+                    href: "/rules.html",
+                    label: "JSON 결과 관리",
+                    icon: "⚖️",
+                    match: (p) => p.endsWith("/rules.html"),
+                },
+                {
+                    href: "/api-manage.html",
                     label: "외부 접근 관리",
                     icon: "🔌",
-                    match: (p) => p.includes("api.html"),
+                    match: (p) =>
+                        p.includes("api-manage") ||
+                        p.includes("api-knowledge") ||
+                        p.includes("api-rules") ||
+                        p.includes("api.html"),
                 },
             ],
         },

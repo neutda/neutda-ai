@@ -319,10 +319,14 @@ export const config = {
   longTriggerTokens: num(process.env.LONG_TRIGGER_TOKENS, 3000),
   // 청크 하나의 목표 글자수(맵 입력이 medium ctx 4096 을 넘지 않도록)
   longChunkChars: num(process.env.LONG_CHUNK_CHARS, 1800),
+  // 코드는 함수 단위로 더 크게 묶어 잘림을 줄인다 (라틴 토큰 밀도 낮음)
+  longCodeChunkChars: num(process.env.LONG_CODE_CHUNK_CHARS, 3200),
   // 청크 간 겹침(문맥 보존)
   longChunkOverlap: num(process.env.LONG_CHUNK_OVERLAP, 180),
   // 리듀스(병합) 1회 입력 상한 — 넘으면 계층적으로 나눠 병합 (large ctx 8192 안에서)
   longReduceInputChars: num(process.env.LONG_REDUCE_INPUT_CHARS, 4500),
+  // 코드 리뷰 메모(한글) 병합은 토큰이 커서 더 작게
+  longCodeReduceInputChars: num(process.env.LONG_CODE_REDUCE_INPUT_CHARS, 2400),
   // 맵 단계 티어(청크별 추출) / 리듀스 단계 티어(종합)
   longMapTier: (process.env.LONG_MAP_TIER || "medium").toLowerCase(),
   longReduceTier: (process.env.LONG_REDUCE_TIER || "large").toLowerCase(),
@@ -399,7 +403,7 @@ export const config = {
     // 벡터 커버리지가 이 값 미만이면 의미검색 대신 BM25 즉시
     vectorCoverageMin: num(process.env.RAG_VECTOR_COVERAGE_MIN, 0.5),
     // 코사인 유사도 하한 (이하 hit 제거)
-    cosineCutoff: num(process.env.RAG_COSINE_CUTOFF, 0.05),
+    cosineCutoff: num(process.env.RAG_COSINE_CUTOFF, 0.32),
   },
 
   // ===== BM25 랭킹 파라미터 (문서 RAG · 개인기억 공용) =====

@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · 기초 지식 관리</title>
+        <style>
+            :root {
+                --bg: #0f1117;
+                --panel: #171a23;
+                --border: #272b38;
+                --text: #e7e9ee;
+                --muted: #9aa3b2;
+                --accent: #6c8cff;
+                --accent-2: #4f6bd6;
+                --ok: #3fb950;
+                --err: #f85149;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                font-family:
+                    ui-sans-serif, system-ui, "Segoe UI", "Malgun Gothic",
+                    sans-serif;
+                background: var(--bg);
+                color: var(--text);
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap {
+                width: 100%;
+                flex: 1;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap > header {
+                flex: 0 0 auto;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 14px 20px;
+                border-bottom: 1px solid var(--border);
+            }
+            .wrap > header h1 {
+                font-size: 17px;
+                margin: 0;
+            }
+            .hdr-desc {
+                margin: 4px 0 0;
+                font-size: 12.5px;
+                color: var(--muted);
+                font-weight: 400;
+            }
+            .hdr-desc a {
+                color: var(--accent);
+                text-decoration: none;
+            }
+            .hdr-desc a:hover {
+                text-decoration: underline;
+            }
+            a.link-btn {
+                display: inline-flex;
+                align-items: center;
+                background: transparent;
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 5px 9px;
+                font-size: 12px;
+                font-weight: 600;
+                text-decoration: none;
+            }
+            a.link-btn:hover {
+                background: #1c2030;
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .app-main {
+                flex: 1;
+                min-height: 0;
+                overflow: hidden;
+                padding: 16px 20px;
+                display: flex;
+                gap: 16px;
+            }
+            button {
+                background: var(--accent-2);
+                color: #fff;
+                border: 0;
+                border-radius: 8px;
+                padding: 9px 14px;
+                font-size: 13px;
+                font-weight: 600;
+                font-family: inherit;
+                cursor: pointer;
+            }
+            button:hover {
+                background: var(--accent);
+            }
+            button.sm {
+                padding: 5px 9px;
+                font-size: 12px;
+            }
+            button.secondary {
+                background: transparent;
+                color: var(--text);
+                border: 1px solid var(--border);
+            }
+            button.secondary:hover {
+                background: #1c2030;
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            button.danger {
+                background: transparent;
+                color: var(--err);
+                border: 1px solid rgba(248, 81, 73, 0.4);
+            }
+            button.danger:hover {
+                background: rgba(248, 81, 73, 0.12);
+            }
+            /* 좌: 지식셋 목록 */
+            .cols {
+                flex: 0 0 250px;
+                display: flex;
+                flex-direction: column;
+                min-height: 0;
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                overflow: hidden;
+            }
+            .cols .hd {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                padding: 8px 10px;
+                border-bottom: 1px solid var(--border);
+                font-size: 12px;
+                font-weight: 700;
+                color: var(--muted);
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .cols .hd button {
+                text-transform: none;
+                letter-spacing: 0;
+            }
+            .cols .list {
+                overflow: auto;
+                padding: 6px;
+                flex: 1;
+            }
+            .col-item {
+                padding: 9px 10px;
+                border-radius: 8px;
+                border: 1px solid transparent;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .col-item:hover {
+                background: #12151d;
+            }
+            .col-item.active {
+                background: rgba(108, 140, 255, 0.16);
+                border-color: rgba(108, 140, 255, 0.4);
+            }
+            .col-item .nm {
+                flex: 1;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            .col-item .cnt {
+                font-size: 11px;
+                color: var(--muted);
+            }
+            /* 우: 문서 관리 */
+            .docs {
+                flex: 1;
+                min-width: 0;
+                display: flex;
+                flex-direction: column;
+                min-height: 0;
+                overflow: hidden;
+            }
+            .docs .col-head {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 12px;
+                margin-bottom: 12px;
+                flex: 0 0 auto;
+            }
+            .docs h2 {
+                margin: 0;
+                font-size: 16px;
+            }
+            .docs .cdesc {
+                color: var(--muted);
+                font-size: 12.5px;
+                margin: 2px 0 0;
+            }
+            .docs-table-wrap {
+                flex: 1;
+                min-height: 0;
+                overflow: auto;
+            }
+            .tabbar {
+                display: flex;
+                gap: 6px;
+                margin-bottom: 10px;
+            }
+            .tabbar button {
+                background: transparent;
+                border: 1px solid var(--border);
+                color: var(--muted);
+            }
+            .tabbar button.on {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            label {
+                display: block;
+                font-size: 12px;
+                font-weight: 600;
+                margin: 8px 0 5px;
+                color: var(--muted);
+            }
+            input[type="text"],
+            textarea {
+                width: 100%;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                color: var(--text);
+                padding: 9px 11px;
+                font-size: 14px;
+                font-family: inherit;
+            }
+            textarea {
+                min-height: 90px;
+                resize: vertical;
+            }
+            input[type="file"] {
+                font-size: 13px;
+                color: var(--muted);
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+            }
+            thead th {
+                text-align: left;
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: var(--muted);
+                font-weight: 600;
+                padding: 8px 10px;
+                border-bottom: 1px solid var(--border);
+            }
+            tbody td {
+                padding: 9px 10px;
+                border-bottom: 1px solid #1e222e;
+            }
+            .muted {
+                color: var(--muted);
+            }
+            .empty {
+                padding: 22px;
+                text-align: center;
+                color: var(--muted);
+                font-size: 13px;
+            }
+            .msg {
+                font-size: 12px;
+                margin-top: 8px;
+                min-height: 14px;
+            }
+            .msg.err {
+                color: var(--err);
+            }
+            .msg.ok {
+                color: var(--ok);
+            }
+            /* 모달 */
+            .overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(0, 0, 0, 0.55);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                z-index: 500;
+                padding: 20px;
+            }
+            .overlay.show {
+                display: flex;
+            }
+            .modal {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 14px;
+                width: 100%;
+                max-width: 420px;
+                padding: 20px;
+            }
+            .modal.add-modal {
+                max-width: 520px;
+            }
+            .modal h2 {
+                margin: 0 0 14px;
+                font-size: 16px;
+            }
+            .modal-actions {
+                display: flex;
+                justify-content: flex-end;
+                gap: 8px;
+                margin-top: 20px;
+            }
+        </style>
+        <link rel="stylesheet" href="/nav.css" />
+    </head>
+    <body>
+        <div class="wrap">
+            <header>
+                <div>
+                    <h1>기초 지식 관리</h1>
+                    <p class="hdr-desc">
+                        지식셋을 만들고 문서를 넣습니다. API에 입히기는
+                        <a href="/api-knowledge.html">API별 기초지식 설정</a>에서
+                        합니다.
+                    </p>
+                </div>
+            </header>
+            <div class="app-main">
+                <aside class="cols">
+                    <div class="hd">
+                        <span>지식셋</span>
+                        <button class="sm" id="newColBtn">＋ 새 지식셋</button>
+                    </div>
+                    <div class="list" id="colList">
+                        <div class="empty">불러오는 중…</div>
+                    </div>
+                </aside>
+                <section class="docs" id="docsPane">
+                    <div class="empty">
+                        왼쪽에서 지식셋을 선택하거나 새로 만드세요.
+                    </div>
+                </section>
+            </div>
+        </div>
+
+        <!-- 지식셋 생성/편집 모달 -->
+        <div class="overlay" id="overlay">
+            <div class="modal">
+                <h2 id="mTitle">새 지식셋</h2>
+                <input type="hidden" id="mId" />
+                <label>이름</label>
+                <input type="text" id="mName" placeholder="예: 회사 규정" />
+                <label>설명 (선택)</label>
+                <input type="text" id="mDesc" placeholder="이 지식셋에 대한 짧은 설명" />
+                <div class="msg err" id="mErr"></div>
+                <div class="modal-actions">
+                    <button class="secondary" id="mCancel">취소</button>
+                    <button id="mSave">저장</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 문서 추가 모달 -->
+        <div class="overlay" id="addOverlay">
+            <div class="modal add-modal">
+                <h2 id="addTitle">문서 추가</h2>
+                <div class="tabbar">
+                    <button class="on" data-tab="text" id="tabText">텍스트 붙여넣기</button>
+                    <button data-tab="file" id="tabFile">파일 업로드</button>
+                </div>
+                <div id="addText">
+                    <label>제목</label>
+                    <input type="text" id="docName" placeholder="문서 제목" />
+                    <label>내용</label>
+                    <textarea id="docText" placeholder="지식으로 넣을 텍스트를 붙여넣으세요."></textarea>
+                    <div class="modal-actions">
+                        <button class="secondary" id="addCancelText">취소</button>
+                        <button id="addTextBtn">추가</button>
+                    </div>
+                </div>
+                <div id="addFile" style="display: none">
+                    <label>파일 (pdf / docx / hwpx / txt / 이미지 …)</label>
+                    <input type="file" id="docFile" />
+                    <div class="modal-actions">
+                        <button class="secondary" id="addCancelFile">취소</button>
+                        <button id="uploadBtn">업로드</button>
+                    </div>
+                </div>
+                <div class="msg" id="addMsg"></div>
+            </div>
+        </div>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+
+            let collections = [];
+            let selectedId = null;
+            let addTab = "text";
+
+            async function loadCollections(opts = {}) {
+                const d = await (
+                    await fetch("/api/knowledge/collections")
+                ).json();
+                collections = d.collections || [];
+                renderColList();
+                if (selectedId && !collections.some((c) => c.id === selectedId))
+                    selectedId = null;
+                if (!selectedId && collections.length)
+                    selectedId = collections[0].id;
+                if (!opts.keepPane) renderDocsPane();
+            }
+
+            function renderColList() {
+                const el = $("colList");
+                if (!collections.length) {
+                    el.innerHTML =
+                        '<div class="empty">지식셋이 없습니다.<br />“새 지식셋”으로 추가하세요.</div>';
+                    return;
+                }
+                el.innerHTML = collections
+                    .map(
+                        (c) => `<div class="col-item ${c.id === selectedId ? "active" : ""}" data-id="${esc(c.id)}">
+                        <span class="nm" title="${esc(c.name)}">${esc(c.name)}</span>
+                        <span class="cnt">${c.docCount}건</span>
+                    </div>`,
+                    )
+                    .join("");
+            }
+
+            async function renderDocsPane() {
+                const pane = $("docsPane");
+                if (!selectedId) {
+                    pane.innerHTML =
+                        '<div class="empty">왼쪽에서 지식셋을 선택하거나 새로 만드세요.</div>';
+                    return;
+                }
+                const col = collections.find((c) => c.id === selectedId);
+                if (!col) return;
+                pane.innerHTML = `
+                    <div class="col-head">
+                        <div>
+                            <h2>${esc(col.name)}</h2>
+                            <div class="cdesc">${esc(col.description) || '<span class="muted">설명 없음</span>'}</div>
+                        </div>
+                        <div style="display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">
+                            <button id="addDocBtn">＋ 문서 추가</button>
+                            <button class="secondary sm" id="editColBtn">지식셋 편집</button>
+                            <button class="danger sm" id="delColBtn">지식셋 삭제</button>
+                        </div>
+                    </div>
+                    <div class="docs-table-wrap">
+                    <table>
+                        <thead><tr><th>제목</th><th>종류</th><th>청크</th><th>추가일</th><th></th></tr></thead>
+                        <tbody id="docRows"><tr><td colspan="5" class="empty">불러오는 중…</td></tr></tbody>
+                    </table>
+                    </div>
+                `;
+                bindDocsPane();
+                await loadDocs();
+            }
+
+            async function loadDocs() {
+                const rows = $("docRows");
+                try {
+                    const d = await (
+                        await fetch(
+                            `/api/knowledge/collections/${selectedId}/docs`,
+                        )
+                    ).json();
+                    const docs = d.docs || [];
+                    rows.innerHTML = docs.length
+                        ? docs
+                              .map(
+                                  (doc) => `<tr>
+                            <td>${esc(doc.name)}</td>
+                            <td>${doc.kind === "image" ? "🖼 이미지" : "📄 텍스트"}</td>
+                            <td>${doc.chunkCount}</td>
+                            <td class="muted">${new Date(doc.createdAt).toLocaleString("ko-KR")}</td>
+                            <td><button class="danger sm" data-del-doc="${esc(doc.id)}">삭제</button></td>
+                        </tr>`,
+                              )
+                              .join("")
+                        : '<tr><td colspan="5" class="empty">문서가 없습니다.</td></tr>';
+                } catch (e) {
+                    rows.innerHTML = `<tr><td colspan="5" class="empty">불러오기 실패: ${esc(e.message)}</td></tr>`;
+                }
+            }
+
+            function bindDocsPane() {
+                $("editColBtn").onclick = () =>
+                    openModal(collections.find((c) => c.id === selectedId));
+                $("delColBtn").onclick = deleteCollection;
+                $("addDocBtn").onclick = openAddOverlay;
+                $("docRows").onclick = async (e) => {
+                    const btn = e.target.closest("button[data-del-doc]");
+                    if (!btn) return;
+                    if (!confirm("이 문서를 삭제할까요?")) return;
+                    await fetch(
+                        `/api/knowledge/docs/${btn.dataset.delDoc}`,
+                        { method: "DELETE" },
+                    );
+                    await loadDocs();
+                    await loadCollections({ keepPane: true });
+                };
+            }
+
+            function setAddTab(tab) {
+                addTab = tab;
+                $("tabText").classList.toggle("on", tab === "text");
+                $("tabFile").classList.toggle("on", tab === "file");
+                $("addText").style.display = tab === "text" ? "block" : "none";
+                $("addFile").style.display = tab === "file" ? "block" : "none";
+            }
+
+            function openAddOverlay() {
+                const col = collections.find((c) => c.id === selectedId);
+                $("addTitle").textContent = col
+                    ? `문서 추가 · ${col.name}`
+                    : "문서 추가";
+                $("addMsg").className = "msg";
+                $("addMsg").textContent = "";
+                $("docName").value = "";
+                $("docText").value = "";
+                $("docFile").value = "";
+                setAddTab(addTab || "text");
+                $("addOverlay").classList.add("show");
+                if (addTab === "file") $("docFile").focus();
+                else $("docName").focus();
+            }
+
+            function closeAddOverlay() {
+                $("addOverlay").classList.remove("show");
+            }
+
+            async function addTextDoc() {
+                const name = $("docName").value.trim();
+                const text = $("docText").value.trim();
+                const msg = $("addMsg");
+                if (!text) {
+                    msg.className = "msg err";
+                    msg.textContent = "내용을 입력하세요.";
+                    return;
+                }
+                $("addTextBtn").disabled = true;
+                try {
+                    const r = await fetch(
+                        `/api/knowledge/collections/${selectedId}/docs`,
+                        {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ name, text }),
+                        },
+                    );
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "추가 실패");
+                    msg.className = "msg ok";
+                    msg.textContent = `추가됨 (청크 ${d.chunkCount}개)`;
+                    $("docName").value = "";
+                    $("docText").value = "";
+                    closeAddOverlay();
+                    await loadDocs();
+                    await loadCollections({ keepPane: true });
+                } catch (e) {
+                    msg.className = "msg err";
+                    msg.textContent = e.message;
+                } finally {
+                    $("addTextBtn").disabled = false;
+                }
+            }
+
+            async function uploadDoc() {
+                const f = $("docFile").files[0];
+                const msg = $("addMsg");
+                if (!f) {
+                    msg.className = "msg err";
+                    msg.textContent = "파일을 선택하세요.";
+                    return;
+                }
+                const fd = new FormData();
+                fd.append("file", f);
+                $("uploadBtn").disabled = true;
+                msg.className = "msg";
+                msg.textContent = "업로드 중…";
+                try {
+                    const r = await fetch(
+                        `/api/knowledge/collections/${selectedId}/upload`,
+                        { method: "POST", body: fd },
+                    );
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "업로드 실패");
+                    msg.className = "msg ok";
+                    msg.textContent = `업로드됨: ${d.name} (청크 ${d.chunkCount}개)`;
+                    $("docFile").value = "";
+                    closeAddOverlay();
+                    await loadDocs();
+                    await loadCollections({ keepPane: true });
+                } catch (e) {
+                    msg.className = "msg err";
+                    msg.textContent = e.message;
+                } finally {
+                    $("uploadBtn").disabled = false;
+                }
+            }
+
+            async function deleteCollection() {
+                const col = collections.find((c) => c.id === selectedId);
+                if (
+                    !confirm(
+                        `지식셋 "${col?.name}" 과 소속 문서 전체를 삭제할까요?`,
+                    )
+                )
+                    return;
+                await fetch(`/api/knowledge/collections/${selectedId}`, {
+                    method: "DELETE",
+                });
+                selectedId = null;
+                await loadCollections();
+            }
+
+            // ===== 모달 =====
+            function openModal(col) {
+                $("mErr").textContent = "";
+                if (col) {
+                    $("mTitle").textContent = "지식셋 편집";
+                    $("mId").value = col.id;
+                    $("mName").value = col.name;
+                    $("mDesc").value = col.description || "";
+                } else {
+                    $("mTitle").textContent = "새 지식셋";
+                    $("mId").value = "";
+                    $("mName").value = "";
+                    $("mDesc").value = "";
+                }
+                $("overlay").classList.add("show");
+                $("mName").focus();
+            }
+            function closeModal() {
+                $("overlay").classList.remove("show");
+            }
+            async function saveModal() {
+                const id = $("mId").value;
+                const name = $("mName").value.trim();
+                if (!name) {
+                    $("mErr").textContent = "이름을 입력하세요.";
+                    return;
+                }
+                const payload = { name, description: $("mDesc").value.trim() };
+                $("mSave").disabled = true;
+                try {
+                    const url = id
+                        ? `/api/knowledge/collections/${id}`
+                        : "/api/knowledge/collections";
+                    const r = await fetch(url, {
+                        method: id ? "PATCH" : "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "저장 실패");
+                    if (!id && d.collection) selectedId = d.collection.id;
+                    closeModal();
+                    await loadCollections();
+                } catch (e) {
+                    $("mErr").textContent = e.message;
+                } finally {
+                    $("mSave").disabled = false;
+                }
+            }
+
+            $("colList").addEventListener("click", (e) => {
+                const item = e.target.closest(".col-item");
+                if (!item) return;
+                selectedId = item.dataset.id;
+                renderColList();
+                renderDocsPane();
+            });
+            $("newColBtn").onclick = () => openModal(null);
+            $("mCancel").onclick = closeModal;
+            $("mSave").onclick = saveModal;
+            $("overlay").addEventListener("click", (e) => {
+                if (e.target === $("overlay")) closeModal();
+            });
+            $("tabText").onclick = () => setAddTab("text");
+            $("tabFile").onclick = () => setAddTab("file");
+            $("addTextBtn").onclick = addTextDoc;
+            $("uploadBtn").onclick = uploadDoc;
+            $("addCancelText").onclick = closeAddOverlay;
+            $("addCancelFile").onclick = closeAddOverlay;
+            $("addOverlay").addEventListener("click", (e) => {
+                if (e.target === $("addOverlay")) closeAddOverlay();
+            });
+
+            loadCollections();
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>

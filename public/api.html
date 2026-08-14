@@ -256,6 +256,9 @@
                 을 돌려주고, 결과는 자동으로 가져와 표시합니다.
                 <code>WAIT=Y</code> 면 답변이 끝날 때까지 기다렸다가 최종 결과를
                 바로 반환합니다.
+                키가 호출자 JSON을 수락하면, 그 요청에 붙인
+                <code>schema</code> / <code>rule</code> 형식으로만 답합니다.
+                JSON 결과 설정에 고른 항목은 그 한 건에는 쓰지 않습니다.
                 기억 테스트는 <code>U_ID</code>(장기) /
                 <code>S_ID</code>(단기)를 넣고 <code>WAIT=Y</code>로 연속
                 호출하는 편이 쉽습니다.
@@ -381,6 +384,18 @@
                 placeholder="예: 나 파이썬 좋아해 / 내가 뭐 좋아한다고 했지?"
             ></textarea>
 
+            <label
+                >이 요청의 JSON 형식
+                <span class="hint"
+                    >(선택. 키가 호출자 JSON을 수락할 때만, 이 한 건에 적용)</span
+                ></label
+            >
+            <textarea
+                id="schema"
+                rows="4"
+                placeholder='{"title":"","desc":""}'
+            ></textarea>
+
             <button id="send">요청 보내기</button>
 
             <div class="card" id="reqCard" style="display: none">
@@ -454,9 +469,18 @@
                 if (tier) params.set("tier", tier);
                 if (uid) params.set("U_ID", uid);
                 if (sid) params.set("S_ID", sid);
+                const schema = $("schema").value.trim();
+                if (schema) params.set("schema", schema);
                 const url = "/api/ask?" + params.toString();
+                // 긴 입력은 URL 한도(Header overflow)를 넘기므로 POST body 로 전송
+                const askFetch = () =>
+                    fetch("/api/ask", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(Object.fromEntries(params)),
+                    });
 
-                $("reqUrl").textContent = location.origin + url;
+                $("reqUrl").textContent = "POST /api/ask  ·  " + location.origin + url;
                 $("resCard").style.display = "none";
                 if (pollTimer) clearInterval(pollTimer);
 
@@ -469,7 +493,7 @@
                         $("resUrl").removeAttribute("href");
                         renderResult({ status: "waiting" });
                         try {
-                            const r = await fetch(url);
+                            const r = await askFetch();
                             const d = await r.json();
                             renderResult(d);
                         } catch (e) {
@@ -482,7 +506,7 @@
                     $("reqTitle").textContent = "즉시 응답";
                     $("reqResp").textContent = "요청 중…";
                     try {
-                        const r = await fetch(url);
+                        const r = await askFetch();
                         const d = await r.json();
                         $("reqResp").textContent = JSON.stringify(d, null, 2);
                         if (!r.ok && d.status !== "error") return;
@@ -606,5 +630,6 @@
             $("send").addEventListener("click", send);
         </script>
         <script src="/nav.js"></script>
+        <script src="/subnav.js"></script>
     </body>
 </html>

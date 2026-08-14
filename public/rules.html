@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · JSON 결과 관리</title>
+        <style>
+            :root {
+                --bg: #0f1117;
+                --panel: #171a23;
+                --border: #272b38;
+                --text: #e7e9ee;
+                --muted: #9aa3b2;
+                --accent: #6c8cff;
+                --accent-2: #4f6bd6;
+                --ok: #3fb950;
+                --err: #f85149;
+            }
+            * { box-sizing: border-box; }
+            body {
+                margin: 0;
+                font-family: ui-sans-serif, system-ui, "Segoe UI", "Malgun Gothic", sans-serif;
+                background: var(--bg);
+                color: var(--text);
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap { width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+            .wrap > header {
+                flex: 0 0 auto;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 14px 20px;
+                border-bottom: 1px solid var(--border);
+            }
+            .wrap > header h1 { font-size: 17px; margin: 0; }
+            .hdr-desc { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
+            .hdr-desc a { color: var(--accent); text-decoration: none; }
+            .app-main {
+                flex: 1; min-height: 0; overflow: hidden;
+                padding: 16px 20px; display: flex; gap: 16px;
+            }
+            button {
+                background: var(--accent-2); color: #fff; border: 0; border-radius: 8px;
+                padding: 9px 14px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer;
+            }
+            button:hover { background: var(--accent); }
+            button.sm { padding: 5px 9px; font-size: 12px; }
+            button.secondary {
+                background: transparent; color: var(--text); border: 1px solid var(--border);
+            }
+            button.secondary:hover { border-color: var(--accent); color: var(--accent); }
+            button.danger {
+                background: transparent; color: var(--err); border: 1px solid rgba(248, 81, 73, 0.4);
+            }
+            .cols {
+                flex: 0 0 250px; display: flex; flex-direction: column; min-height: 0;
+                background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+            }
+            .cols .hd {
+                padding: 10px 12px; border-bottom: 1px solid var(--border);
+                font-size: 12px; font-weight: 700; color: var(--muted);
+                text-transform: uppercase; letter-spacing: 0.04em;
+            }
+            .cols .list { overflow: auto; padding: 6px; flex: 1; }
+            .col-item {
+                padding: 9px 10px; border-radius: 8px; border: 1px solid transparent; cursor: pointer;
+            }
+            .col-item:hover { background: #12151d; }
+            .col-item.active {
+                background: rgba(108, 140, 255, 0.16);
+                border-color: rgba(108, 140, 255, 0.4);
+            }
+            .col-item .nm { font-size: 13px; font-weight: 600; }
+            .col-item .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+            .pane { flex: 1; min-width: 0; overflow: auto; }
+            .empty { padding: 22px; text-align: center; color: var(--muted); font-size: 13px; }
+            label { display: block; font-size: 12px; font-weight: 600; margin: 12px 0 5px; color: var(--muted); }
+            input[type="text"], textarea {
+                width: 100%; background: #0d0f15; border: 1px solid var(--border);
+                border-radius: 8px; color: var(--text); padding: 9px 11px; font-size: 14px; font-family: inherit;
+            }
+            textarea { min-height: 72px; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+            .hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; line-height: 1.5; }
+            .chk { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; cursor: pointer; }
+            .chk input { width: auto; }
+            .actions { display: flex; gap: 8px; margin-top: 18px; align-items: center; }
+            .msg { font-size: 12px; }
+            .msg.ok { color: var(--ok); }
+            .msg.err { color: var(--err); }
+        </style>
+        <link rel="stylesheet" href="/nav.css" />
+    </head>
+    <body>
+        <div class="wrap">
+            <header>
+                <div>
+                    <h1>JSON 결과 관리</h1>
+                    <p class="hdr-desc">
+                        의도에 맞으면 API가 JSON만 돌려줍니다. 키에 입히기는
+                        <a href="/api-rules.html">API별 JSON 결과 설정</a>에서 합니다.
+                    </p>
+                </div>
+                <button id="newBtn">＋ 새로 만들기</button>
+            </header>
+            <div class="app-main">
+                <aside class="cols">
+                    <div class="hd">JSON 결과</div>
+                    <div class="list" id="list"><div class="empty">불러오는 중…</div></div>
+                </aside>
+                <section class="pane" id="pane">
+                    <div class="empty">왼쪽에서 항목을 선택하거나 새로 만드세요.</div>
+                </section>
+            </div>
+        </div>
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+
+            let rules = [];
+            let selectedId = null;
+            let creating = false;
+
+            async function load() {
+                const d = await (await fetch("/api/rules")).json();
+                rules = d.rules || [];
+                if (selectedId && !rules.some((r) => r.id === selectedId)) selectedId = null;
+                if (!creating && !selectedId && rules.length) selectedId = rules[0].id;
+                renderList();
+                renderPane();
+            }
+
+            function renderList() {
+                const el = $("list");
+                if (!rules.length && !creating) {
+                    el.innerHTML = '<div class="empty">등록된 JSON 결과가 없습니다.</div>';
+                    return;
+                }
+                const draft = creating
+                    ? `<div class="col-item active"><div class="nm">새 JSON 결과</div><div class="meta">작성 중</div></div>`
+                    : "";
+                el.innerHTML =
+                    draft +
+                    rules
+                        .map(
+                            (r) => `<div class="col-item ${!creating && r.id === selectedId ? "active" : ""}" data-id="${esc(r.id)}">
+                            <div class="nm">${esc(r.name)}</div>
+                            <div class="meta">${r.enabled ? "활성" : "비활성"} · 키워드 ${(r.keywords || []).length}개</div>
+                        </div>`,
+                        )
+                        .join("");
+            }
+
+            function current() {
+                if (creating) {
+                    return {
+                        id: "",
+                        name: "",
+                        enabled: true,
+                        keywords: [],
+                        intent: "",
+                        schema: {},
+                        instruction: "",
+                        skipRag: true,
+                    };
+                }
+                return rules.find((r) => r.id === selectedId) || null;
+            }
+
+            function renderPane() {
+                const r = current();
+                const pane = $("pane");
+                if (!r) {
+                    pane.innerHTML = '<div class="empty">왼쪽에서 항목을 선택하거나 새로 만드세요.</div>';
+                    return;
+                }
+                pane.innerHTML = `
+                    <label>이름</label>
+                    <input type="text" id="fName" value="${esc(r.name)}" placeholder="예: 일정등록, 문의접수, 주문상태" />
+                    <label>발동 의도</label>
+                    <p class="hint">키워드가 없어도 이 설명에 맞으면 이 JSON 형식이 적용됩니다. 패턴마다 다르게 적으세요.</p>
+                    <textarea id="fIntent" placeholder="이 형식을 쓸 상황을 설명">${esc(r.intent || "")}</textarea>
+                    <label>확정 키워드 (한 줄에 하나, 선택)</label>
+                    <p class="hint">질문 안에 이 문구가 있으면 분류 없이 바로 적용됩니다. 공백은 무시합니다.</p>
+                    <textarea id="fKw">${esc((r.keywords || []).join("\n"))}</textarea>
+                    <label>JSON 스키마 (예시 객체)</label>
+                    <p class="hint">키 이름이 필드가 됩니다. 값에는 힌트를 적어도 됩니다. 일정·문의·주문 등 원하는 키를 넣으면 됩니다.</p>
+                    <textarea id="fSchema" style="min-height:120px">${esc(JSON.stringify(Object.keys(r.schema || {}).length ? r.schema : { key: "힌트" }, null, 2))}</textarea>
+                    <label>추가 지시 (선택)</label>
+                    <input type="text" id="fInst" value="${esc(r.instruction || "")}" placeholder="이 패턴만의 규칙. 예: 날짜는 YYYY-MM-DD" />
+                    <label class="chk"><input type="checkbox" id="fEn" ${r.enabled !== false ? "checked" : ""} /> 사용함</label>
+                    <label class="chk"><input type="checkbox" id="fSkip" ${r.skipRag !== false ? "checked" : ""} /> 발동 시 기초지식 RAG 생략 (권장)</label>
+                    <div class="actions">
+                        <button id="saveBtn">저장</button>
+                        ${creating ? "" : '<button class="danger" id="delBtn">삭제</button>'}
+                        <div class="msg" id="msg"></div>
+                    </div>
+                `;
+                $("saveBtn").onclick = save;
+                const del = $("delBtn");
+                if (del) del.onclick = remove;
+            }
+
+            async function save() {
+                const name = $("fName").value.trim();
+                const msg = $("msg");
+                if (!name) {
+                    msg.className = "msg err";
+                    msg.textContent = "이름을 입력하세요.";
+                    return;
+                }
+                let schema;
+                try {
+                    schema = JSON.parse($("fSchema").value);
+                } catch {
+                    msg.className = "msg err";
+                    msg.textContent = "스키마 JSON이 올바르지 않습니다.";
+                    return;
+                }
+                const payload = {
+                    name,
+                    enabled: $("fEn").checked,
+                    keywords: $("fKw").value.split("\n"),
+                    intent: $("fIntent").value.trim(),
+                    schema,
+                    instruction: $("fInst").value.trim(),
+                    skipRag: $("fSkip").checked,
+                };
+                $("saveBtn").disabled = true;
+                try {
+                    const url = creating ? "/api/rules" : `/api/rules/${selectedId}`;
+                    const r = await fetch(url, {
+                        method: creating ? "POST" : "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "저장 실패");
+                    creating = false;
+                    if (d.rule) selectedId = d.rule.id;
+                    msg.className = "msg ok";
+                    msg.textContent = "저장됨";
+                    await load();
+                } catch (e) {
+                    msg.className = "msg err";
+                    msg.textContent = e.message;
+                } finally {
+                    $("saveBtn").disabled = false;
+                }
+            }
+
+            async function remove() {
+                if (!confirm("이 JSON 결과를 삭제할까요? 키 바인딩도 해제됩니다.")) return;
+                await fetch(`/api/rules/${selectedId}`, { method: "DELETE" });
+                selectedId = null;
+                await load();
+            }
+
+            $("list").addEventListener("click", (e) => {
+                const item = e.target.closest(".col-item");
+                if (!item) return;
+                creating = false;
+                selectedId = item.dataset.id;
+                renderList();
+                renderPane();
+            });
+            $("newBtn").onclick = () => {
+                creating = true;
+                selectedId = null;
+                renderList();
+                renderPane();
+            };
+            load();
+        </script>
+        <script src="/nav.js"></script>
+    </body>
+</html>

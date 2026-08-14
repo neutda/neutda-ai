@@ -314,8 +314,10 @@ export async function remember(uid, text, meta) {
 export async function recall(uid, query, k = config.rag.topK) {
   const key = safeUid(uid);
   if (!key) return [];
-  const q = String(query || "").trim();
-  if (!q) return [];
+  const qFull = String(query || "").trim();
+  if (!qFull) return [];
+  // llama 임베딩 n_batch(512) 를 넘는 긴 질의는 앞부분만 쓴다.
+  const q = qFull.length > 360 ? qFull.slice(0, 360) : qFull;
   const topK = Math.max(
     1,
     Math.min(config.rag.topKMax, Number(k) || config.rag.topK),
@@ -359,13 +361,26 @@ export async function recall(uid, query, k = config.rag.topK) {
   return bm25Retrieve(entries, q, topK);
 }
 
+const MEMORY_HIT_CHARS = 400;
+const MEMORY_CONTEXT_CHARS = 1200;
+
 /** 프롬프트 주입용 블록 */
 export function formatMemoryContext(hits) {
   if (!hits?.length) return "";
-  const body = hits
-    .map((h, i) => `[기억 ${i + 1}] ${h.text}`)
-    .join("\n\n");
-  return `### 개인 기억\n${body}`;
+  const parts = [];
+  let used = 0;
+  for (let i = 0; i < hits.length; i++) {
+    const raw = String(hits[i].text || "").trim();
+    if (!raw) continue;
+    const clipped =
+      raw.length > MEMORY_HIT_CHARS ? raw.slice(0, MEMORY_HIT_CHARS) + "…" : raw;
+    const block = `[기억 ${i + 1}] ${clipped}`;
+    if (used + block.length > MEMORY_CONTEXT_CHARS) break;
+    parts.push(block);
+    used += block.length;
+  }
+  if (!parts.length) return "";
+  return `### 개인 기억\n${parts.join("\n\n")}`;
 }
 
 /**

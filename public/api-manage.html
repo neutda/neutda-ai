@@ -1,0 +1,1057 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · 외부 API 관리</title>
+        <style>
+            :root {
+                --bg: #0f1117;
+                --panel: #171a23;
+                --border: #272b38;
+                --text: #e7e9ee;
+                --muted: #9aa3b2;
+                --accent: #6c8cff;
+                --accent-2: #4f6bd6;
+                --ok: #3fb950;
+                --err: #f85149;
+                --warn: #d29922;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                font-family:
+                    ui-sans-serif, system-ui, "Segoe UI", "Malgun Gothic",
+                    sans-serif;
+                background: var(--bg);
+                color: var(--text);
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap {
+                width: 100%;
+                flex: 1;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap > header {
+                flex: 0 0 auto;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 14px 20px;
+                border-bottom: 1px solid var(--border);
+            }
+            .wrap > header h1 {
+                font-size: 17px;
+                margin: 0;
+            }
+            .app-main {
+                flex: 1;
+                min-height: 0;
+                overflow: auto;
+                padding: 16px 20px 28px;
+            }
+            p.desc {
+                margin: 0 0 16px;
+                color: var(--muted);
+                font-size: 13px;
+            }
+            button {
+                background: var(--accent-2);
+                color: #fff;
+                border: 0;
+                border-radius: 8px;
+                padding: 9px 14px;
+                font-size: 13px;
+                font-weight: 600;
+                font-family: inherit;
+                cursor: pointer;
+            }
+            button:hover {
+                background: var(--accent);
+            }
+            button.sm {
+                padding: 5px 9px;
+                font-size: 12px;
+            }
+            button.secondary {
+                background: transparent;
+                color: var(--text);
+                border: 1px solid var(--border);
+            }
+            button.secondary:hover {
+                background: #1c2030;
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            button.danger {
+                background: transparent;
+                color: var(--err);
+                border: 1px solid rgba(248, 81, 73, 0.4);
+            }
+            button.danger:hover {
+                background: rgba(248, 81, 73, 0.12);
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 13px;
+            }
+            thead th {
+                text-align: left;
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: var(--muted);
+                font-weight: 600;
+                padding: 8px 10px;
+                border-bottom: 1px solid var(--border);
+                white-space: nowrap;
+            }
+            tbody td {
+                padding: 10px;
+                border-bottom: 1px solid #1e222e;
+                vertical-align: middle;
+            }
+            tbody tr:hover {
+                background: #12151d;
+            }
+            .keycell {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .keytext {
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 12px;
+                color: var(--accent);
+            }
+            .chip.dim {
+                background: rgba(154, 163, 178, 0.14);
+                color: var(--muted);
+            }
+            .bind-cell {
+                max-width: 240px;
+            }
+            .bind-cell .chip {
+                margin: 0 4px 4px 0;
+            }
+            .hint {
+                display: block;
+                font-size: 12px;
+                font-weight: 400;
+                color: var(--muted);
+                margin: 6px 0 0;
+                line-height: 1.45;
+            }
+            .hint code {
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 11px;
+                background: #0d0f15;
+                padding: 1px 5px;
+                border-radius: 4px;
+            }
+            p.desc a {
+                color: var(--accent);
+                text-decoration: none;
+            }
+            .badge {
+                display: inline-block;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 9px;
+                border-radius: 999px;
+            }
+            .b-on {
+                background: rgba(63, 185, 80, 0.18);
+                color: var(--ok);
+            }
+            .b-off {
+                background: rgba(154, 163, 178, 0.18);
+                color: var(--muted);
+            }
+            .gauge {
+                width: 150px;
+            }
+            .gauge .lab {
+                font-size: 12px;
+                color: var(--muted);
+                margin-bottom: 3px;
+                white-space: nowrap;
+            }
+            .gauge .reset-hint {
+                font-size: 11px;
+                color: var(--muted);
+                margin-top: 4px;
+                line-height: 1.3;
+                white-space: normal;
+                word-break: keep-all;
+            }
+            .gauge .bar {
+                height: 6px;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 999px;
+                overflow: hidden;
+            }
+            .gauge .bar > span {
+                display: block;
+                height: 100%;
+                background: var(--accent);
+            }
+            .gauge .bar > span.warn {
+                background: var(--warn);
+            }
+            .gauge .bar > span.over {
+                background: var(--err);
+            }
+            .actions {
+                display: flex;
+                gap: 6px;
+                flex-wrap: wrap;
+                justify-content: flex-end;
+            }
+            .muted {
+                color: var(--muted);
+            }
+            .empty {
+                padding: 24px;
+                text-align: center;
+                color: var(--muted);
+                font-size: 13px;
+            }
+            /* ===== 모달 ===== */
+            .overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(0, 0, 0, 0.55);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                z-index: 500;
+                padding: 20px;
+            }
+            .overlay.show {
+                display: flex;
+            }
+            .modal {
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 14px;
+                width: 100%;
+                max-width: 480px;
+                padding: 20px;
+            }
+            .modal h2 {
+                margin: 0 0 14px;
+                font-size: 16px;
+            }
+            .modal label {
+                display: block;
+                font-size: 13px;
+                font-weight: 600;
+                margin: 14px 0 6px;
+            }
+            .modal input[type="text"],
+            .modal input[type="number"] {
+                width: 100%;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                color: var(--text);
+                padding: 9px 11px;
+                font-size: 14px;
+                font-family: inherit;
+            }
+            .modal input:disabled {
+                opacity: 0.45;
+            }
+            .tiers,
+            .inline {
+                display: flex;
+                gap: 14px;
+                flex-wrap: wrap;
+                align-items: center;
+            }
+            .tiers label,
+            .inline label {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                margin: 0;
+                font-weight: 500;
+                cursor: pointer;
+            }
+            .tiers input,
+            .inline input {
+                width: auto;
+            }
+            .modal-actions {
+                display: flex;
+                justify-content: flex-end;
+                gap: 8px;
+                margin-top: 22px;
+            }
+            .err-msg {
+                color: var(--err);
+                font-size: 12px;
+                margin-top: 10px;
+                min-height: 14px;
+            }
+        </style>
+        <link rel="stylesheet" href="/nav.css" />
+    </head>
+    <body>
+        <div class="wrap">
+            <header>
+                <h1>외부 API 관리</h1>
+                <div style="display: flex; align-items: center; gap: 8px">
+                    <span id="updatedAt" class="hint"></span>
+                    <button class="secondary" id="refreshBtn" title="새로고침">
+                        ↻ 새로고침
+                    </button>
+                    <button id="newBtn">＋ 새 키 발급</button>
+                </div>
+            </header>
+            <div class="app-main">
+                <p class="desc">
+                    외부 API 키를 발급하고 키별 사용 여부 · 허용 티어(모델) ·
+                    토큰 한도 · 적용된 기초지식/JSON 결과를 관리합니다. 호출자
+                    JSON은 우리가 형식을 고르는 게 아니라, 외부 호출이 요청마다
+                    새 JSON 형식을 보내는 것을 수락할지 말지만 정합니다.
+                    지식셋·고정 JSON 결과 매핑은
+                    <a href="/api-knowledge.html">API별 기초지식 설정</a> ·
+                    <a href="/api-rules.html">API별 JSON 결과 설정</a>에서
+                    합니다.
+                </p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>이름</th>
+                            <th>키</th>
+                            <th>상태</th>
+                            <th>허용 티어</th>
+                            <th>기초지식</th>
+                            <th>JSON 결과</th>
+                            <th>호출자 JSON</th>
+                            <th>토큰 사용량</th>
+                            <th>최근 사용</th>
+                            <th style="text-align: right">관리</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rows">
+                        <tr>
+                            <td colspan="10" class="empty">불러오는 중…</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 생성/편집 모달 -->
+        <div class="overlay" id="overlay">
+            <div class="modal">
+                <h2 id="modalTitle">새 키 발급</h2>
+                <input type="hidden" id="editId" />
+                <label>이름</label>
+                <input type="text" id="fName" placeholder="예: 파트너 A" />
+
+                <label>허용 티어 (모델)</label>
+                <div class="tiers">
+                    <label
+                        ><input
+                            type="checkbox"
+                            class="fTier"
+                            value="small"
+                            checked
+                        />
+                        small</label
+                    >
+                    <label
+                        ><input
+                            type="checkbox"
+                            class="fTier"
+                            value="medium"
+                            checked
+                        />
+                        medium</label
+                    >
+                    <label
+                        ><input
+                            type="checkbox"
+                            class="fTier"
+                            value="large"
+                            checked
+                        />
+                        large</label
+                    >
+                </div>
+
+                <label>토큰 한도</label>
+                <div class="inline">
+                    <input
+                        type="number"
+                        id="fLimit"
+                        min="1"
+                        placeholder="예: 1000000"
+                        style="flex: 1"
+                    />
+                    <label
+                        ><input type="checkbox" id="fUnlimited" /> 무한대</label
+                    >
+                </div>
+
+                <label>사용량 초기화</label>
+                <div class="tiers">
+                    <label
+                        ><input
+                            type="radio"
+                            name="fResetMode"
+                            value="manual"
+                            checked
+                        />
+                        수동</label
+                    >
+                    <label
+                        ><input type="radio" name="fResetMode" value="auto" />
+                        자동</label
+                    >
+                </div>
+                <div
+                    id="fResetAuto"
+                    class="inline"
+                    style="margin-top: 8px; display: none"
+                >
+                    <span class="hint">매</span>
+                    <input
+                        type="number"
+                        id="fResetEvery"
+                        min="1"
+                        value="1"
+                        style="width: 72px"
+                    />
+                    <select id="fResetUnit" style="width: auto">
+                        <option value="hour">시간</option>
+                        <option value="day" selected>일</option>
+                        <option value="month">개월</option>
+                    </select>
+                    <span class="hint">마다 0으로 초기화</span>
+                </div>
+                <div
+                    id="fResetInfo"
+                    class="hint"
+                    style="margin-top: 6px"
+                ></div>
+
+                <label>요청 한도·쿼터 <span class="hint">(비우면 무제한)</span></label>
+                <div
+                    style="
+                        display: grid;
+                        grid-template-columns: 1fr 1fr;
+                        gap: 10px;
+                    "
+                >
+                    <div>
+                        <span class="hint">분당 요청(RPM)</span>
+                        <input type="number" id="fRpm" min="1" placeholder="무제한" />
+                    </div>
+                    <div>
+                        <span class="hint">일당 요청(RPD)</span>
+                        <input type="number" id="fRpd" min="1" placeholder="무제한" />
+                    </div>
+                    <div>
+                        <span class="hint">동시 요청</span>
+                        <input type="number" id="fConc" min="1" placeholder="무제한" />
+                    </div>
+                    <div>
+                        <span class="hint">응답 토큰 상한</span>
+                        <input type="number" id="fMaxTok" min="1" placeholder="기본" />
+                    </div>
+                </div>
+                <label>토큰 한도 초과 시</label>
+                <div class="tiers">
+                    <label
+                        ><input
+                            type="radio"
+                            name="fOverAction"
+                            value="reject"
+                            checked
+                        />
+                        요청 거절(429)</label
+                    >
+                    <label
+                        ><input
+                            type="radio"
+                            name="fOverAction"
+                            value="downgrade"
+                        />
+                        최저 티어로 강등</label
+                    >
+                </div>
+
+                <label class="inline" style="margin-top: 14px">
+                    <input type="checkbox" id="fEnabled" checked /> 사용함(활성)
+                </label>
+
+                <label class="inline" style="margin-top: 14px">
+                    <input type="checkbox" id="fCustom" /> 호출자 JSON 형식 수락
+                </label>
+                <span class="hint">
+                    외부 호출이 요청마다 <code>schema</code> 또는
+                    <code>rule</code> 로 새 JSON 형식을 보낼 수 있습니다. 켜면
+                    그 한 건은 보낸 형식으로만 답합니다. JSON 결과 설정에서 고른
+                    항목은 그 요청에 쓰지 않습니다. 끄면 형식을 보내도
+                    거절합니다.
+                </span>
+
+                <div class="err-msg" id="modalErr"></div>
+                <div class="modal-actions">
+                    <button class="secondary" id="cancelBtn">취소</button>
+                    <button id="saveBtn">저장</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 이력·통계 모달 -->
+        <div class="overlay" id="usageOverlay">
+            <div class="modal" style="max-width: 660px">
+                <h2 id="usageTitle">사용 이력·통계</h2>
+                <div id="usageBody" style="max-height: 68vh; overflow: auto">
+                    불러오는 중…
+                </div>
+                <div class="modal-actions">
+                    <button class="secondary" id="usageClose">닫기</button>
+                </div>
+            </div>
+        </div>
+
+        <style>
+            .u-cards {
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+                margin-bottom: 14px;
+            }
+            .u-card {
+                flex: 1 1 120px;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 10px 12px;
+            }
+            .u-card .n {
+                font-size: 20px;
+                font-weight: 700;
+            }
+            .u-card .l {
+                font-size: 11px;
+                color: var(--muted);
+                margin-top: 2px;
+            }
+            .u-sec {
+                font-size: 12px;
+                font-weight: 700;
+                color: var(--muted);
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                margin: 16px 0 8px;
+            }
+            .bars {
+                display: flex;
+                align-items: flex-end;
+                gap: 3px;
+                height: 90px;
+                border-bottom: 1px solid var(--border);
+                padding-bottom: 2px;
+            }
+            .bars .b {
+                flex: 1;
+                min-width: 4px;
+                background: var(--accent);
+                border-radius: 3px 3px 0 0;
+                position: relative;
+            }
+            .bars .b.err {
+                background: var(--err);
+            }
+            .bars-x {
+                display: flex;
+                gap: 3px;
+                margin-top: 3px;
+            }
+            .bars-x span {
+                flex: 1;
+                text-align: center;
+                font-size: 9px;
+                color: var(--muted);
+                overflow: hidden;
+                white-space: nowrap;
+            }
+            .u-tbl {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12.5px;
+            }
+            .u-tbl td,
+            .u-tbl th {
+                padding: 6px 8px;
+                border-bottom: 1px solid #1e222e;
+                text-align: left;
+            }
+            .u-empty {
+                color: var(--muted);
+                font-size: 12.5px;
+                padding: 8px 0;
+            }
+            .ecode {
+                display: inline-block;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 1px 7px;
+                border-radius: 999px;
+                background: rgba(248, 81, 73, 0.16);
+                color: var(--err);
+                margin-right: 6px;
+            }
+        </style>
+
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;");
+            const fmt = (n) => Number(n || 0).toLocaleString("ko-KR");
+            const fmtDt = (iso) =>
+                iso ? new Date(iso).toLocaleString("ko-KR") : "–";
+            const fmtShort = (iso) =>
+                iso
+                    ? new Date(iso).toLocaleString("ko-KR", {
+                          month: "2-digit",
+                          day: "2-digit",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                      })
+                    : "";
+            const UNIT_LABEL = { hour: "시간", day: "일", month: "개월" };
+
+            function resetLine(k) {
+                if (k.reset?.mode !== "auto") return "";
+                const per = `매 ${k.reset.every}${UNIT_LABEL[k.reset.unit] || ""}`;
+                const next = k.reset.nextResetAt
+                    ? ` · 다음 ${fmtShort(k.reset.nextResetAt)}`
+                    : "";
+                return `<div class="reset-hint" title="자동 초기화">↺ ${per}${next}</div>`;
+            }
+
+            function gaugeHtml(k) {
+                if (k.tokenLimit == null) {
+                    return `<div class="gauge"><div class="lab">${fmt(k.tokenUsed)} / 무한대</div>${resetLine(k)}</div>`;
+                }
+                const pct = Math.min(
+                    100,
+                    Math.round((k.tokenUsed / k.tokenLimit) * 100),
+                );
+                const cls = pct >= 100 ? "over" : pct >= 80 ? "warn" : "";
+                const badge =
+                    pct >= 100
+                        ? '<span class="badge b-err" style="margin-left:6px">초과</span>'
+                        : pct >= 80
+                          ? '<span class="badge" style="margin-left:6px;background:rgba(210,153,34,0.18);color:var(--warn)">임박</span>'
+                          : "";
+                return `<div class="gauge">
+                    <div class="lab">${fmt(k.tokenUsed)} / ${fmt(k.tokenLimit)} (${pct}%)${badge}</div>
+                    <div class="bar"><span class="${cls}" style="width:${pct}%"></span></div>
+                    ${resetLine(k)}
+                </div>`;
+            }
+
+            function setResetUI(reset, createdAt) {
+                const mode = reset?.mode === "auto" ? "auto" : "manual";
+                document
+                    .querySelectorAll('input[name="fResetMode"]')
+                    .forEach((r) => (r.checked = r.value === mode));
+                $("fResetUnit").value = reset?.unit || "day";
+                $("fResetEvery").value = reset?.every || 1;
+                $("fResetAuto").style.display = mode === "auto" ? "flex" : "none";
+                const parts = [];
+                if (createdAt) parts.push(`생성: ${fmtDt(createdAt)}`);
+                if (mode === "auto" && reset?.nextResetAt)
+                    parts.push(`다음 초기화: ${fmtDt(reset.nextResetAt)}`);
+                $("fResetInfo").textContent = parts.join(" · ");
+            }
+
+            function setLimitsUI(lim) {
+                const L = lim || {};
+                $("fRpm").value = L.rpm ?? "";
+                $("fRpd").value = L.rpd ?? "";
+                $("fConc").value = L.concurrency ?? "";
+                $("fMaxTok").value = L.maxTokens ?? "";
+                const oa = L.overAction === "downgrade" ? "downgrade" : "reject";
+                document
+                    .querySelectorAll('input[name="fOverAction"]')
+                    .forEach((r) => (r.checked = r.value === oa));
+            }
+
+            function chipsOf(ids, catalog, empty) {
+                if (!ids.length) {
+                    return empty ? `<span class="muted">${empty}</span>` : "";
+                }
+                return ids
+                    .map((id) => {
+                        const it = catalog.find((x) => x.id === id);
+                        return `<span class="chip">${esc(it?.name || id)}</span>`;
+                    })
+                    .join("");
+            }
+
+            function rowHtml(k) {
+                const tiers = (k.allowedTiers || [])
+                    .map((t) => `<span class="chip">${t}</span>`)
+                    .join("");
+                const last = k.lastUsedAt
+                    ? new Date(k.lastUsedAt).toLocaleString("ko-KR")
+                    : "–";
+                const knIds = k.knowledge?.collectionIds || [];
+                const ruIds = k.rules?.ruleIds || [];
+                const custom = k.rules?.allowCustom === true;
+                return `<tr data-id="${esc(k.id)}">
+                    <td>${esc(k.name) || '<span class="muted">(무명)</span>'}</td>
+                    <td>
+                        <div class="keycell">
+                            <span class="keytext" title="${esc(k.key)}">${esc(k.keyMasked)}</span>
+                            <button class="secondary sm" data-act="copy" data-key="${esc(k.key)}">복사</button>
+                        </div>
+                    </td>
+                    <td><span class="badge ${k.enabled ? "b-on" : "b-off"}">${k.enabled ? "활성" : "비활성"}</span></td>
+                    <td>${tiers}</td>
+                    <td class="bind-cell">${chipsOf(knIds, collectionsCache, "미적용")}</td>
+                    <td class="bind-cell">${chipsOf(ruIds, rulesCache, "미적용")}</td>
+                    <td>${custom ? '<span class="badge b-on">수락</span>' : '<span class="badge b-off">거절</span>'}</td>
+                    <td>${gaugeHtml(k)}</td>
+                    <td class="muted" style="white-space:nowrap">${esc(last)}</td>
+                    <td>
+                        <div class="actions">
+                            <button class="secondary sm" data-act="usage">이력·통계</button>
+                            <button class="secondary sm" data-act="edit">편집</button>
+                            <button class="secondary sm" data-act="reset">사용량 초기화</button>
+                            <button class="danger sm" data-act="del">삭제</button>
+                        </div>
+                    </td>
+                </tr>`;
+            }
+
+            let keyCache = [];
+            let collectionsCache = [];
+            let rulesCache = [];
+            async function refresh() {
+                const [kd, cd, rd] = await Promise.all([
+                    fetch("/api/keys").then((r) => r.json()),
+                    fetch("/api/knowledge/collections").then((r) => r.json()),
+                    fetch("/api/rules").then((r) => r.json()),
+                ]);
+                keyCache = kd.keys || [];
+                collectionsCache = cd.collections || [];
+                rulesCache = rd.rules || [];
+                const rows = $("rows");
+                rows.innerHTML = keyCache.length
+                    ? keyCache.map(rowHtml).join("")
+                    : '<tr><td colspan="10" class="empty">발급된 키가 없습니다. “새 키 발급”으로 추가하세요.</td></tr>';
+                const u = $("updatedAt");
+                if (u)
+                    u.textContent =
+                        "갱신 " + new Date().toLocaleTimeString("ko-KR");
+            }
+
+            // ===== 모달 =====
+            function openModal(key) {
+                $("modalErr").textContent = "";
+                if (key) {
+                    $("modalTitle").textContent = "키 편집";
+                    $("editId").value = key.id;
+                    $("fName").value = key.name || "";
+                    document.querySelectorAll(".fTier").forEach((c) => {
+                        c.checked = (key.allowedTiers || []).includes(c.value);
+                    });
+                    const unlimited = key.tokenLimit == null;
+                    $("fUnlimited").checked = unlimited;
+                    $("fLimit").value = unlimited ? "" : key.tokenLimit;
+                    $("fLimit").disabled = unlimited;
+                    $("fEnabled").checked = key.enabled;
+                    $("fCustom").checked = key.rules?.allowCustom === true;
+                    setResetUI(key.reset, key.createdAt);
+                    setLimitsUI(key.limits);
+                } else {
+                    $("modalTitle").textContent = "새 키 발급";
+                    $("editId").value = "";
+                    $("fName").value = "";
+                    document
+                        .querySelectorAll(".fTier")
+                        .forEach((c) => (c.checked = true));
+                    $("fUnlimited").checked = false;
+                    $("fLimit").value = "";
+                    $("fLimit").disabled = false;
+                    $("fEnabled").checked = true;
+                    $("fCustom").checked = false;
+                    setResetUI(null, null);
+                    setLimitsUI(null);
+                }
+                $("overlay").classList.add("show");
+                $("fName").focus();
+            }
+            function closeModal() {
+                $("overlay").classList.remove("show");
+            }
+
+            async function saveModal() {
+                const id = $("editId").value;
+                const allowedTiers = [...document.querySelectorAll(".fTier")]
+                    .filter((c) => c.checked)
+                    .map((c) => c.value);
+                if (!allowedTiers.length) {
+                    $("modalErr").textContent =
+                        "허용 티어를 최소 1개 선택하세요.";
+                    return;
+                }
+                const unlimited = $("fUnlimited").checked;
+                const limitVal = $("fLimit").value.trim();
+                if (!unlimited && (!limitVal || Number(limitVal) <= 0)) {
+                    $("modalErr").textContent =
+                        "토큰 한도를 입력하거나 무한대를 선택하세요.";
+                    return;
+                }
+                const resetMode = document.querySelector(
+                    'input[name="fResetMode"]:checked',
+                ).value;
+                const numOrNull = (id) => {
+                    const v = $(id).value.trim();
+                    const n = Number(v);
+                    return v && Number.isFinite(n) && n >= 1
+                        ? Math.floor(n)
+                        : null;
+                };
+                const payload = {
+                    name: $("fName").value.trim(),
+                    enabled: $("fEnabled").checked,
+                    allowedTiers,
+                    tokenLimit: unlimited ? null : Number(limitVal),
+                    rules: { allowCustom: $("fCustom").checked },
+                    reset: {
+                        mode: resetMode,
+                        unit: $("fResetUnit").value,
+                        every: Math.max(
+                            1,
+                            parseInt($("fResetEvery").value, 10) || 1,
+                        ),
+                    },
+                    limits: {
+                        rpm: numOrNull("fRpm"),
+                        rpd: numOrNull("fRpd"),
+                        concurrency: numOrNull("fConc"),
+                        maxTokens: numOrNull("fMaxTok"),
+                        overAction: document.querySelector(
+                            'input[name="fOverAction"]:checked',
+                        ).value,
+                    },
+                };
+                $("saveBtn").disabled = true;
+                try {
+                    const url = id ? `/api/keys/${id}` : "/api/keys";
+                    const method = id ? "PATCH" : "POST";
+                    const r = await fetch(url, {
+                        method,
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "저장 실패");
+                    closeModal();
+                    await refresh();
+                } catch (e) {
+                    $("modalErr").textContent = e.message;
+                } finally {
+                    $("saveBtn").disabled = false;
+                }
+            }
+
+            // ===== 이력·통계 모달 =====
+            const ufmt = (n) => Number(n || 0).toLocaleString("ko-KR");
+            async function openUsage(key) {
+                $("usageTitle").textContent = `${key.name || "(무명)"} · 사용 이력·통계`;
+                $("usageBody").innerHTML = "불러오는 중…";
+                $("usageOverlay").classList.add("show");
+                try {
+                    const [sd, hd] = await Promise.all([
+                        fetch(`/api/keys/${key.id}/stats`).then((r) => r.json()),
+                        fetch(`/api/keys/${key.id}/history?limit=30`).then((r) =>
+                            r.json(),
+                        ),
+                    ]);
+                    $("usageBody").innerHTML = renderUsage(
+                        sd.stats || {},
+                        hd.items || [],
+                    );
+                } catch (e) {
+                    $("usageBody").innerHTML = `<div class="u-empty">불러오기 실패: ${esc(e.message)}</div>`;
+                }
+            }
+            function renderUsage(st, items) {
+                const t = st.totals || { requests: 0, tokens: 0, errors: 0 };
+                const daily = (st.daily || []).slice(-14);
+                const maxTok = Math.max(1, ...daily.map((d) => d.tok));
+                const bars = daily.length
+                    ? `<div class="bars">${daily
+                          .map((d) => {
+                              const h = Math.round((d.tok / maxTok) * 100);
+                              return `<div class="b${d.err ? " err" : ""}" style="height:${Math.max(3, h)}%" title="${d.day} · ${ufmt(d.tok)} tok · ${d.req} req${d.err ? ` · ${d.err} err` : ""}"></div>`;
+                          })
+                          .join("")}</div><div class="bars-x">${daily
+                          .map((d) => `<span>${d.day.slice(5)}</span>`)
+                          .join("")}</div>`
+                    : `<div class="u-empty">데이터가 없습니다.</div>`;
+                const tiers =
+                    ["small", "medium", "large"]
+                        .map((tier) => {
+                            const v = (st.byTier || {})[tier];
+                            return v
+                                ? `<span class="chip">${tier} ${v.requests}회 · ${ufmt(v.tokens)}tok</span>`
+                                : "";
+                        })
+                        .join("") || '<span class="u-empty">없음</span>';
+                const ecodes = Object.entries(st.errorsByCode || {});
+                const errChips = ecodes.length
+                    ? ecodes
+                          .map(
+                              ([c, n]) =>
+                                  `<span class="ecode">${esc(c)} ×${n}</span>`,
+                          )
+                          .join("")
+                    : '<span class="u-empty">에러 없음</span>';
+                const calls = items.length
+                    ? `<table class="u-tbl"><thead><tr><th>시각</th><th>질문</th><th>티어</th><th>토큰</th></tr></thead><tbody>${items
+                          .map(
+                              (it) => `<tr>
+                        <td style="white-space:nowrap">${it.ts ? new Date(it.ts).toLocaleString("ko-KR") : "-"}</td>
+                        <td>${esc((it.user || "").slice(0, 40))}${(it.user || "").length > 40 ? "…" : ""}${it.rule ? ` <span class="chip">${esc(it.rule.name || "JSON")}</span>` : ""}</td>
+                        <td>${esc(it.tier || "-")}</td>
+                        <td>${it.tokens != null ? ufmt(it.tokens) : "-"}</td>
+                      </tr>`,
+                          )
+                          .join("")}</tbody></table>`
+                    : '<div class="u-empty">호출 이력이 없습니다.</div>';
+                return `
+                    <div class="u-cards">
+                      <div class="u-card"><div class="n">${ufmt(t.requests)}</div><div class="l">총 요청</div></div>
+                      <div class="u-card"><div class="n">${ufmt(t.tokens)}</div><div class="l">총 토큰</div></div>
+                      <div class="u-card"><div class="n" style="color:${t.errors ? "var(--err)" : "inherit"}">${ufmt(t.errors)}</div><div class="l">총 에러</div></div>
+                    </div>
+                    <div class="u-sec">일자별 토큰 추이 (최근 ${daily.length}일)</div>
+                    ${bars}
+                    <div class="u-sec">티어별</div><div>${tiers}</div>
+                    <div class="u-sec">에러</div><div>${errChips}</div>
+                    <div class="u-sec">최근 호출</div>${calls}
+                `;
+            }
+            $("usageClose").addEventListener("click", () =>
+                $("usageOverlay").classList.remove("show"),
+            );
+            $("usageOverlay").addEventListener("click", (e) => {
+                if (e.target === $("usageOverlay"))
+                    $("usageOverlay").classList.remove("show");
+            });
+
+            // ===== 행 액션 =====
+            $("rows").addEventListener("click", async (e) => {
+                const btn = e.target.closest("button[data-act]");
+                if (!btn) return;
+                const act = btn.dataset.act;
+                if (act === "copy") {
+                    try {
+                        await navigator.clipboard.writeText(btn.dataset.key);
+                        btn.textContent = "복사됨";
+                        setTimeout(() => (btn.textContent = "복사"), 1200);
+                    } catch {
+                        alert(btn.dataset.key);
+                    }
+                    return;
+                }
+                const tr = btn.closest("tr");
+                const id = tr?.dataset.id;
+                const key = keyCache.find((k) => k.id === id);
+                if (act === "usage") {
+                    openUsage(key);
+                } else if (act === "edit") {
+                    openModal(key);
+                } else if (act === "reset") {
+                    if (!confirm("이 키의 토큰 사용량을 0으로 초기화할까요?"))
+                        return;
+                    await fetch(`/api/keys/${id}/reset-usage`, {
+                        method: "POST",
+                    });
+                    await refresh();
+                } else if (act === "del") {
+                    if (
+                        !confirm(
+                            `키 "${key?.name || id}" 를 삭제할까요? 이 키로는 더 이상 호출할 수 없습니다.`,
+                        )
+                    )
+                        return;
+                    await fetch(`/api/keys/${id}`, { method: "DELETE" });
+                    await refresh();
+                }
+            });
+
+            $("fUnlimited").addEventListener("change", (e) => {
+                $("fLimit").disabled = e.target.checked;
+                if (e.target.checked) $("fLimit").value = "";
+            });
+            document
+                .querySelectorAll('input[name="fResetMode"]')
+                .forEach((r) =>
+                    r.addEventListener("change", () => {
+                        const auto =
+                            document.querySelector(
+                                'input[name="fResetMode"]:checked',
+                            ).value === "auto";
+                        $("fResetAuto").style.display = auto ? "flex" : "none";
+                    }),
+                );
+            $("newBtn").addEventListener("click", () => openModal(null));
+            $("cancelBtn").addEventListener("click", closeModal);
+            $("saveBtn").addEventListener("click", saveModal);
+            $("overlay").addEventListener("click", (e) => {
+                if (e.target === $("overlay")) closeModal();
+            });
+
+            // 새로고침 버튼: 즉시 갱신
+            $("refreshBtn").addEventListener("click", async () => {
+                const b = $("refreshBtn");
+                b.disabled = true;
+                try {
+                    await refresh();
+                } finally {
+                    b.disabled = false;
+                }
+            });
+
+            // 자동 갱신: 30초마다. 단, 모달(편집·이력)이 열려 있으면 건너뛴다.
+            setInterval(() => {
+                const modalOpen =
+                    $("overlay").classList.contains("show") ||
+                    $("usageOverlay").classList.contains("show");
+                if (!modalOpen) refresh().catch(() => {});
+            }, 30000);
+
+            refresh();
+        </script>
+        <script src="/nav.js"></script>
+        <script src="/subnav.js"></script>
+    </body>
+</html>

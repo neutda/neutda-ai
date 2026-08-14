@@ -32,7 +32,8 @@ const SEC_JUNK_LABEL_RE =
 const SEC_JUNK_PHRASE_RE =
     /general questions|coding help|fiction|research|Stage=|티어 하한|llm-router|PIPELINE|You are|allow\s*=|짧은한국어|SECURITY POLICY|POLICY:|최종 직전|너무\s*짧|짧은\s*답|일반적인\s*대화|인사|greeting|hello|하이|short_label|contains_offensive|inappropriate|violates?\s*policy/i;
 // 욕설·혐오 정책인지, 인용이 실제 금칙어인지, 오히려 무해한 단어인지 판별
-const SEC_ABUSE_POLICY_RE = /욕설|혐오|비하|협박|차별|profanity|abuse|hate|insult|slur/i;
+const SEC_ABUSE_POLICY_RE =
+    /욕설|혐오|비하|협박|차별|profanity|abuse|hate|insult|slur/i;
 const SEC_ABUSE_HIT_RE =
     /씨발|시발|씨빨|병신|좆|지랄|꺼져|닥쳐|미친\s*놈|미친\s*년|개새|쓰레기\s*년|한남충|한녀|느금마|니미|씹|ㅅㅂ|ㅄ|fuck|shit|bitch|asshole|cunt|nigger|faggot/i;
 const SEC_BENIGN_QUOTE_RE =
@@ -50,7 +51,11 @@ function parseSecurityVerdict(raw, policyText, draftOnly) {
     // 첫 JSON 객체 (중첩 최소화 — 모델이 한 줄로 내는 전제)
     const m = String(raw ?? "").match(/\{[\s\S]*?\}/);
     if (!m) {
-        return { allow: true, reason: "보안검증 JSON 없음 → 허용", ambiguous: true };
+        return {
+            allow: true,
+            reason: "보안검증 JSON 없음 → 허용",
+            ambiguous: true,
+        };
     }
     let j;
     try {
@@ -156,7 +161,10 @@ class Backend {
         this.ctx = Number(f.ctx) > 0 ? Number(f.ctx) : config.llamaDefaultCtx;
         this.parallel =
             Number(f.parallel) > 0
-                ? Math.min(config.llamaParallelCap, Math.floor(Number(f.parallel)))
+                ? Math.min(
+                      config.llamaParallelCap,
+                      Math.floor(Number(f.parallel)),
+                  )
                 : Math.max(1, Number(config.llamaParallel) || 4);
         this.vision = Boolean(f.vision);
         this.healthy = false;
@@ -271,10 +279,16 @@ class Pool {
                         security: s.security === true,
                         securityIds: s.securityIds ?? [],
                         securityPolicy: s.securityPolicy ?? "",
-                        ctx: Number(s.ctx) > 0 ? Number(s.ctx) : config.llamaDefaultCtx,
+                        ctx:
+                            Number(s.ctx) > 0
+                                ? Number(s.ctx)
+                                : config.llamaDefaultCtx,
                         parallel:
                             Number(s.parallel) > 0
-                                ? Math.min(config.llamaParallelCap, Math.floor(Number(s.parallel)))
+                                ? Math.min(
+                                      config.llamaParallelCap,
+                                      Math.floor(Number(s.parallel)),
+                                  )
                                 : undefined,
                         vision: Boolean(s.vision || s.mmproj),
                     },
@@ -376,7 +390,8 @@ class Pool {
     /** 백엔드별 parallel 합 (없으면 LLAMA_PARALLEL) */
     backendParallel(b) {
         const p = Number(b?.parallel);
-        if (Number.isFinite(p) && p >= 1) return Math.min(config.llamaParallelCap, Math.floor(p));
+        if (Number.isFinite(p) && p >= 1)
+            return Math.min(config.llamaParallelCap, Math.floor(p));
         return Math.max(1, Number(config.llamaParallel) || 4);
     }
 
@@ -1706,16 +1721,23 @@ class Pool {
      * 역할(특기) 우선 선택. preferredSkill 이 없거나 매칭 백엔드가 없으면 null 을
      * 반환해 호출자가 일반 해결 풀로 폴백하게 한다.
      */
-    _pickBySkill(healthySkill, { preferredSkill, preferredTier, preferredDevice, preferVision }) {
+    _pickBySkill(
+        healthySkill,
+        { preferredSkill, preferredTier, preferredDevice, preferVision },
+    ) {
         if (!preferredSkill) return null;
-        let bySkill = healthySkill.filter((b) => b.skills.includes(preferredSkill));
+        let bySkill = healthySkill.filter((b) =>
+            b.skills.includes(preferredSkill),
+        );
         if (bySkill.length === 0) return null;
         if (preferredTier) {
             const atTier = bySkill.filter((b) => b.tier === preferredTier);
             if (atTier.length > 0) bySkill = atTier;
         }
         if (preferredDevice) {
-            const byDevice = bySkill.filter((b) => b.device === preferredDevice);
+            const byDevice = bySkill.filter(
+                (b) => b.device === preferredDevice,
+            );
             if (byDevice.length > 0) bySkill = byDevice;
         }
         bySkill = this._preferVision(bySkill, preferVision);
@@ -1724,7 +1746,10 @@ class Pool {
     }
 
     /** 일반 해결(solve) 풀에서 티어/장치/비전 선호를 반영해 최소 부하 백엔드 선택. */
-    _pickByTier(healthyChat, { preferredTier, allowOtherTiers, preferredDevice, preferVision }) {
+    _pickByTier(
+        healthyChat,
+        { preferredTier, allowOtherTiers, preferredDevice, preferVision },
+    ) {
         if (healthyChat.length === 0) return null;
         let candidates = preferredTier
             ? healthyChat.filter((b) => b.tier === preferredTier)
@@ -1738,16 +1763,74 @@ class Pool {
                 return r >= want ? r - want : 10 + (want - r);
             };
             let best = Infinity;
-            for (const b of healthyChat) best = Math.min(best, fallbackScore(b));
+            for (const b of healthyChat)
+                best = Math.min(best, fallbackScore(b));
             candidates = healthyChat.filter((b) => fallbackScore(b) === best);
         }
         if (preferredDevice) {
-            const byDevice = candidates.filter((b) => b.device === preferredDevice);
+            const byDevice = candidates.filter(
+                (b) => b.device === preferredDevice,
+            );
             if (byDevice.length > 0) candidates = byDevice;
         }
         candidates = this._preferVision(candidates, preferVision);
         candidates = this._preferFree(candidates);
         return this._leastLoadedRR(candidates);
+    }
+
+    /** 건강한 해결(solve) 백엔드가 있는 티어. 없으면 preferred 그대로. */
+    resolveSolveTier(preferred) {
+        const want = String(preferred || "medium").toLowerCase();
+        const healthy = this.backends.filter((b) => b.healthy && b.canChat);
+        if (!healthy.length) return want;
+        if (healthy.some((b) => b.tier === want)) return want;
+        const w = TIER_RANK[want] ?? 1;
+        let best = want;
+        let bestScore = Infinity;
+        for (const b of healthy) {
+            const r = TIER_RANK[b.tier] ?? 0;
+            const score = r >= w ? r - w : 10 + (w - r);
+            if (score < bestScore) {
+                bestScore = score;
+                best = b.tier;
+            }
+        }
+        return best;
+    }
+
+    /** 디버그용: 해결 풀 한 줄 설명 */
+    solvePoolLabel() {
+        const rows = this.backends.filter((b) => b.canChat);
+        if (!rows.length) {
+            const all = this.backends
+                .map(
+                    (b) =>
+                        `${b.tier}${b.healthy ? "" : "/비정상"}(solve=${b.solveEnabled ? "on" : "off"})`,
+                )
+                .join(", ");
+            return all ? `해결 꺼짐 [${all}]` : "등록된 서버 없음";
+        }
+        return rows
+            .map(
+                (b) =>
+                    `${b.tier}${b.healthy ? "" : "/비정상"}:${b.alias || b.url}`,
+            )
+            .join(", ");
+    }
+
+    _missingBackendError(
+        preferredTier,
+        allowOtherTiers,
+        { stream = false } = {},
+    ) {
+        const want = preferredTier || "임의";
+        const lock = allowOtherTiers ? "" : ", 다른 티어 금지";
+        const head = stream
+            ? "스트리밍 가능한 백엔드를 찾지 못했습니다"
+            : "요청을 처리할 백엔드를 찾지 못했습니다";
+        return new Error(
+            `${head} (요청 티어: ${want}${lock}; 해결 풀: ${this.solvePoolLabel()})`,
+        );
     }
 
     pick(
@@ -2186,7 +2269,8 @@ class Pool {
                 );
             }
             throw (
-                lastErr ?? new Error("요청을 처리할 백엔드를 찾지 못했습니다.")
+                lastErr ??
+                this._missingBackendError(preferredTier, allowOtherTiers)
             );
         } finally {
             this._finishModelJob(jobId, {
@@ -2363,11 +2447,9 @@ class Pool {
             }
             throw (
                 lastErr ??
-                new Error(
-                    preferredTier
-                        ? `스트리밍 가능한 ${preferredTier} 백엔드를 찾지 못했습니다(해결 풀에 해당 티어가 없거나 전용 역할만 켜져 있음).`
-                        : "스트리밍 가능한 백엔드를 찾지 못했습니다.",
-                )
+                this._missingBackendError(preferredTier, allowOtherTiers, {
+                    stream: true,
+                })
             );
         } finally {
             this._finishModelJob(jobId, {
@@ -2484,7 +2566,10 @@ class Pool {
         if (!this.hasActiveRole("security")) {
             return { allow: true, skipped: true, reason: "보안검증 역할 없음" };
         }
-        const snippet = String(text ?? "").slice(0, config.security.inputMaxChars);
+        const snippet = String(text ?? "").slice(
+            0,
+            config.security.inputMaxChars,
+        );
         // 검토 대상은 답변 초안만 (질문·정책 문구를 quote 로 쓰면 허위차단 남발)
         const draftOnly = (() => {
             const m = snippet.match(
@@ -2607,7 +2692,9 @@ ${policy.slice(0, config.security.policyBodyMaxChars)}`;
             }
         }
         const now = Date.now();
-        this.completed = this.completed.filter((t) => now - t < config.poolStatsWindowMs);
+        this.completed = this.completed.filter(
+            (t) => now - t < config.poolStatsWindowMs,
+        );
         return {
             totalBackends: backends.length,
             healthyBackends: backends.filter((b) => {

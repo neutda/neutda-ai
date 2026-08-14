@@ -3,7 +3,11 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
-import { replyLanguageReminder } from "./replyLanguage.js";
+import {
+    replyLanguageReminder,
+    detectReplyLang,
+    looksMostlyChinese,
+} from "./replyLanguage.js";
 import { toImageUrl } from "./image.js";
 import { pool } from "./pool.js";
 import { serverUrl } from "./serverUrl.js";
@@ -29,6 +33,8 @@ import {
     needsLongPipeline,
     runLongContent,
     chunkText,
+    chunkCode,
+    splitAskAndBody,
     estimateTokens,
     isContextOverflowError,
 } from "./longContent.js";
@@ -53,6 +59,7 @@ import {
     ragSystemAddon,
     loadRagForRequest,
     ragRetrieveQuery,
+    isSmallTalk,
 } from "./ragContext.js";
 import { extractText } from "./extract.js";
 import { loadStats, getStats } from "./stats.js";
@@ -104,6 +111,60 @@ import {
     isSecurityEnabledSync,
 } from "./securityPolicies.js";
 import { FIXED_ROLES, isFixedRole } from "./fixedRoles.js";
+import {
+    listKeys,
+    createKey,
+    updateKey,
+    deleteKey,
+    resetUsage,
+    findBySecret,
+    addUsage,
+    isOverLimit,
+    clampTier,
+    unbindCollection,
+    unbindRule,
+    sweepResets,
+} from "./apiKeys.js";
+import {
+    listCollections,
+    createCollection,
+    updateCollection,
+    deleteCollection,
+    getCollection,
+    filterExisting,
+} from "./knowledgeStore.js";
+import {
+    recordKeyStat,
+    getKeyStats,
+    clearKeyStats,
+} from "./keyStats.js";
+import {
+    checkRate,
+    countRate,
+    acquire,
+    release,
+    clearRate,
+} from "./rateLimit.js";
+import {
+    listRules,
+    createRule,
+    updateRule,
+    deleteRule,
+    getRule,
+    filterExistingRules,
+    rulesByIds,
+} from "./rulesStore.js";
+import {
+    matchBoundRule,
+    buildJsonRuleMessages,
+    retryJsonRuleMessages,
+    parseRuleOutput,
+    buildIntentClassifyMessages,
+    parseIntentClassify,
+    isBlankRuleData,
+    parseCallerRule,
+} from "./jsonRule.js";
+import { fillDateFields } from "./koreanDate.js";
 import multer from "multer";
 
 /** 보안 게이트 이벤트 (파이프라인 step 과 분리) */
@@ -251,8 +312,12 @@ async function persistChatMemory(body, question, answer) {
 function shouldRememberUserUtterance(text) {
     const t = String(text || "").trim();
     if (t.length < 4) return false;
+    // 긴 코드/문서 붙여넣기는 개인 사실이 아니다. 통째 저장하면
+    // 다음 요청 시스템 프롬프트가 ctx(4096)를 넘긴다.
+    if (t.length > 800) return false;
     // 순수 인사/감사만이면 저장하지 않음
     if (
+        isSmallTalk(t) ||
         /^(안녕|안녕하세요|하이|헬로|hello|hi|ㅎㅎ+|ㅋ+|네|아니요|ㅇㅇ|ㄱㅅ|고마워|감사)[\s!.~]*$/i.test(
             t,
         )
@@ -264,6 +329,10 @@ function shouldRememberUserUtterance(text) {
 
 async function prepareChatRag(body, { onStatus } = {}) {
     if (!isRagRequest(body)) return { active: false };
+    if (isSmallTalk(ragRetrieveQuery(body))) {
+        logger.info("RAG skip (잡담/인사 — 현재 질문 우선)");
+        return { active: false, skippedSmallTalk: true };
+    }
     onStatus?.({ phase: "retrieve", message: "문서 검색 중…" });
     const pack = await loadRagForRequest(body);
     body._rag = {
@@ -473,8 +542,10 @@ async function buildMessages(body, promptCharBudget = Infinity) {
     );
     if (Array.isArray(history) && history.length > 0) {
         sysParts.push(
-            "Prior conversation turns are included in this request. " +
-                "Use them as context. Do NOT say you cannot remember previous messages or ask the user to paste them again.",
+            "Prior conversation turns are background only. " +
+                "Answer the LATEST user message. Do NOT continue the previous topic unless the latest message is about it. " +
+                "If the latest message is a greeting or small talk, reply to that briefly. " +
+                "Do NOT say you cannot remember previous messages.",
         );
     }
     if (memoryCtx) {
@@ -932,17 +1003,23 @@ app.post("/api/workflow/plan", async (req, res) => {
 
     // 실제 요청은 createPlan 앞에서 긴 입력 파이프라인으로 갈라진다 — 미리보기도 동일하게.
     if (needsLongPipeline(body)) {
-        const chunks = chunkText(q);
+        const split = splitAskAndBody(q);
+        const chunks = split.isCode
+            ? chunkCode(split.body)
+            : chunkText(split.body);
+        const mapRole = split.isCode ? "review" : "extract";
         const steps = [
             ...chunks.map((_, i) => ({
                 tier: config.longMapTier,
-                role: "extract",
-                instruction: `조각 ${i + 1}/${chunks.length} 핵심 추출`,
+                role: mapRole,
+                instruction: `조각 ${i + 1}/${chunks.length} ${split.isCode ? "코드 리뷰" : "핵심 추출"}`,
             })),
             {
                 tier: config.longReduceTier,
                 role: "synthesize",
-                instruction: "부분 결과 종합 → 최종 답",
+                instruction: split.isCode
+                    ? "리뷰 메모 종합 → 최종 리뷰"
+                    : "부분 결과 종합 → 최종 답",
             },
         ];
         return res.json({
@@ -952,15 +1029,18 @@ app.post("/api/workflow/plan", async (req, res) => {
             mode: "workflow",
             tier: config.longReduceTier,
             difficulty: 100,
-            reason: `긴 입력 ${base.inputChars}자/~${estimateTokens(q)}tok (한도 ${config.longTriggerChars}자/${config.longTriggerTokens}tok) → ${chunks.length}청크 맵리듀스`,
+            reason: `긴 입력 ${base.inputChars}자/~${estimateTokens(q)}tok → ${chunks.length}청크 ${split.isCode ? "코드 리뷰" : "맵리듀스"}`,
             router: null,
             long: {
                 chunks: chunks.length,
-                chunkChars: config.longChunkChars,
+                chunkChars: split.isCode
+                    ? config.longCodeChunkChars
+                    : config.longChunkChars,
                 overlap: config.longChunkOverlap,
                 mapTier: config.longMapTier,
                 reduceTier: config.longReduceTier,
                 mapConcurrency: config.longMapConcurrency,
+                kind: split.isCode ? "code" : "doc",
             },
             steps,
         });
@@ -1251,6 +1331,124 @@ app.delete("/api/roles/:id", async (req, res) => {
         await resyncAllPoolRoles();
         logger.info(`공통 역할 삭제 － ${req.params.id}`);
         res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ===== 외부 API 키 관리 (data/apiKeys.json) ===========================
+
+app.get("/api/keys", (_req, res) => {
+    try {
+        res.json({ keys: listKeys() });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/api/keys", (req, res) => {
+    try {
+        const key = createKey({
+            name: req.body?.name,
+            enabled: req.body?.enabled,
+            allowedTiers: req.body?.allowedTiers,
+            tokenLimit: req.body?.tokenLimit,
+            key: req.body?.key,
+            rules: req.body?.rules,
+            reset: req.body?.reset,
+        });
+        logger.info(`외부 API 키 발급 ＋ "${key.name || "(무명)"}" (${key.id})`);
+        res.json({ ok: true, key });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.patch("/api/keys/:id", (req, res) => {
+    try {
+        const patch = {};
+        const has = (k) =>
+            Object.prototype.hasOwnProperty.call(req.body ?? {}, k);
+        if (has("name")) patch.name = req.body.name;
+        if (has("enabled")) patch.enabled = req.body.enabled;
+        if (has("allowedTiers")) patch.allowedTiers = req.body.allowedTiers;
+        if (has("tokenLimit")) patch.tokenLimit = req.body.tokenLimit;
+        if (has("knowledge")) {
+            const kn = req.body.knowledge && typeof req.body.knowledge === "object"
+                ? req.body.knowledge
+                : {};
+            patch.knowledge = {
+                ...kn,
+                collectionIds: filterExisting(kn.collectionIds || []),
+            };
+        }
+        if (has("rules")) {
+            const ru = req.body.rules && typeof req.body.rules === "object"
+                ? req.body.rules
+                : {};
+            const next = { ...ru };
+            if (Object.prototype.hasOwnProperty.call(ru, "ruleIds")) {
+                next.ruleIds = filterExistingRules(ru.ruleIds || []);
+            }
+            patch.rules = next;
+        }
+        if (has("reset")) patch.reset = req.body.reset;
+        if (!Object.keys(patch).length) {
+            return res.status(400).json({
+                error: "수정할 필드가 없습니다. (name, enabled, allowedTiers, tokenLimit, knowledge, rules, reset)",
+            });
+        }
+        const key = updateKey(req.params.id, patch);
+        if (!key) return res.status(404).json({ error: "키를 찾을 수 없습니다." });
+        logger.info(`외부 API 키 수정 ✎ "${key.name || "(무명)"}" (${key.id})`);
+        res.json({ ok: true, key });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.delete("/api/keys/:id", (req, res) => {
+    try {
+        const ok = deleteKey(req.params.id);
+        if (!ok) return res.status(404).json({ error: "키를 찾을 수 없습니다." });
+        clearKeyStats(req.params.id);
+        clearRate(req.params.id);
+        logger.info(`외부 API 키 삭제 － ${req.params.id}`);
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/api/keys/:id/reset-usage", (req, res) => {
+    try {
+        const key = resetUsage(req.params.id);
+        if (!key) return res.status(404).json({ error: "키를 찾을 수 없습니다." });
+        logger.info(`외부 API 키 사용량 초기화 ↺ ${key.id}`);
+        res.json({ ok: true, key });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 키별 사용 통계(시계열·티어·에러)
+app.get("/api/keys/:id/stats", (req, res) => {
+    try {
+        res.json({ stats: getKeyStats(req.params.id) });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 키별 호출 이력 (history 의 ask:<keyId> 채널)
+app.get("/api/keys/:id/history", async (req, res) => {
+    try {
+        const limit = Number(req.query.limit);
+        const items = await readHistory(
+            Number.isFinite(limit) ? limit : 50,
+            `ask:${req.params.id}`,
+        );
+        res.json({ items });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -2362,8 +2560,13 @@ app.post("/api/logs/test-error", async (req, res) => {
 app.get("/api/history", async (req, res) => {
     try {
         const limit = Number(req.query.limit);
+        const channel =
+            typeof req.query.channel === "string" && req.query.channel.trim()
+                ? req.query.channel.trim()
+                : undefined;
         const items = await readHistory(
             Number.isFinite(limit) ? limit : undefined,
+            channel,
         );
         res.json({ items });
     } catch (err) {
@@ -2371,10 +2574,14 @@ app.get("/api/history", async (req, res) => {
     }
 });
 
-// 대화 내역 전체 삭제
-app.delete("/api/history", async (_req, res) => {
+// 대화 내역 삭제 (channel 있으면 그 채널만)
+app.delete("/api/history", async (req, res) => {
     try {
-        await clearHistory();
+        const channel =
+            typeof req.query.channel === "string" && req.query.channel.trim()
+                ? req.query.channel.trim()
+                : undefined;
+        await clearHistory(channel);
         res.json({ ok: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -2427,66 +2634,467 @@ app.delete("/api/memory", async (req, res) => {
     }
 });
 
+// 키워드가 없으면 라우터(또는 small)로 의도를 분류해 법칙을 고른다.
+async function classifyAskRule(question, rules, askId) {
+    const enabled = (rules || []).filter((r) => r && r.enabled !== false);
+    if (!enabled.length) return null;
+    const messages = buildIntentClassifyMessages(question, enabled);
+    const params = { messages, temperature: 0, maxTokens: 80 };
+    try {
+        let out = null;
+        if (pool.hasActiveRouter()) {
+            out = await pool.classify({ ...params, minTier: "small" });
+        }
+        if (!out) {
+            out = await pool.chat({
+                ...params,
+                enableThinking: false,
+                preferredTier: "small",
+            });
+        }
+        const hit = parseIntentClassify(out.result?.content, enabled);
+        logger.info(
+            `JSON 결과 의도 분류 [ask #${askId}] → ${hit ? `"${hit.name}" (${hit.id})` : "해당없음"}`,
+        );
+        return hit;
+    } catch (err) {
+        logger.warn(`JSON 결과 의도 분류 실패 [ask #${askId}]: ${err.message}`);
+        return null;
+    }
+}
+
+// 외부 API: 바인딩된 법칙이 질문에 맞으면 JSON 계약으로 응답한다.
+async function applyAskRule(id, body, ref, keyCtx, rule, started) {
+    const q = String(body.ROLE_USER ?? "");
+    let ragContext = "";
+    if (rule.skipRag === false) {
+        const kn = keyCtx.knowledge;
+        const knIds =
+            kn && Array.isArray(kn.collectionIds)
+                ? filterExisting(kn.collectionIds)
+                : [];
+        if (knIds.length && q.trim()) {
+            await rag.load();
+            const hits = await rag.retrieveAsync(q, kn.topK || 4, {
+                collectionIds: knIds,
+            });
+            if (hits.length) {
+                ragContext = hits
+                    .map((h, i) => `[${i + 1}] (${h.docName})\n${h.text}`)
+                    .join("\n\n");
+            }
+        }
+    }
+    let messages = buildJsonRuleMessages(q, rule, ragContext);
+    const extractTier = keyCtx.allowedTiers
+        ? clampTier("large", keyCtx.allowedTiers)
+        : "large";
+    logger.info(
+        `JSON 결과 [ask #${id}] "${rule.name}" → 추출 tier=${extractTier}`,
+    );
+
+    const run = (msgs, tier = extractTier) =>
+        pool.chat({
+            messages: msgs,
+            temperature: 0,
+            maxTokens: 200,
+            enableThinking: false,
+            preferredTier: tier,
+            allowOtherTiers: true,
+        });
+
+    let chat = await run(messages);
+    let parsed = parseRuleOutput(chat.result.content, rule.schema);
+    const needRetry =
+        !parsed.ok || (isBlankRuleData(parsed.data) && q.trim().length >= 2);
+    if (needRetry) {
+        logger.info(
+            `JSON 결과 재시도 [ask #${id}] "${rule.name}" ` +
+                `(${parsed.ok ? "공란" : "파싱실패"} raw=${String(chat.result.content || "").slice(0, 160)})`,
+        );
+        chat = await run(
+            retryJsonRuleMessages(q, rule, chat.result.content, ragContext),
+            "large",
+        );
+        parsed = parseRuleOutput(chat.result.content, rule.schema);
+    }
+    parsed = {
+        ...parsed,
+        data: fillDateFields(parsed.data, q, rule.schema),
+    };
+
+    const jsonText = JSON.stringify(parsed.data);
+    const { uid, sid } = memoryIds(body);
+    const usedTokens = Number(chat.result.usage?.total_tokens);
+    const data = {
+        status: "done",
+        id,
+        ref,
+        question: q,
+        answer: jsonText,
+        data: parsed.data,
+        rule: {
+            id: rule.id,
+            name: rule.name,
+            ok: parsed.ok,
+            custom: rule.custom === true ? true : undefined,
+        },
+        model: chat.result.raw?.model ?? config.modelName,
+        tier: chat.tier,
+        device: chat.device,
+        backend: chat.backendUrl,
+        tokens: Number.isFinite(usedTokens) ? usedTokens : undefined,
+        dryRun: keyCtx.dryRun || undefined,
+        elapsedMs: Date.now() - started,
+        finishedAt: new Date().toISOString(),
+        U_ID: uid || undefined,
+        S_ID: sid || undefined,
+    };
+    await writeResult(id, data);
+    if (keyCtx.keyId && !keyCtx.dryRun) {
+        addUsage(keyCtx.keyId, usedTokens);
+        recordKeyStat(keyCtx.keyId, {
+            ok: true,
+            tokens: usedTokens,
+            tier: chat.tier,
+        });
+    }
+    await persistChatMemory(body, q, jsonText);
+    appendHistory({
+        id,
+        ts: new Date().toISOString(),
+        user: q,
+        answer: jsonText,
+        model: data.model,
+        tier: chat.tier,
+        device: chat.device,
+        tokens: data.tokens,
+        channel: keyCtx.keyId ? `ask:${keyCtx.keyId}` : "ask",
+        mode: "ask",
+        rule: { id: rule.id, name: rule.name, ok: parsed.ok },
+    }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+    logger.info(
+        `ask 완료 #${id} JSON="${rule.name}" ok=${parsed.ok} ${data.elapsedMs}ms`,
+    );
+    return data;
+}
+
+/** /api/ask 일반(비 JSON 법칙) 성공 결과를 파일·히스토리에 기록한다. */
+async function finishAskChat(id, body, ref, keyCtx, started, out, ragMeta = null) {
+    const { uid, sid } = memoryIds(body);
+    const usedTokens = Number(out.tokens ?? out.usage?.total_tokens);
+    const data = {
+        status: "done",
+        id,
+        ref,
+        question: body.ROLE_USER,
+        answer: out.answer,
+        reasoning: out.reasoning || undefined,
+        model: out.model ?? config.modelName,
+        tier: out.tier,
+        device: out.device,
+        backend: out.backend,
+        tokens: Number.isFinite(usedTokens) ? usedTokens : undefined,
+        rag: ragMeta ? true : undefined,
+        strict: ragMeta ? ragMeta.strict : undefined,
+        sources: ragMeta ? ragMeta.sources : undefined,
+        dryRun: keyCtx.dryRun || undefined,
+        U_ID: uid || undefined,
+        S_ID: sid || undefined,
+        elapsedMs: Date.now() - started,
+        finishedAt: new Date().toISOString(),
+    };
+    await writeResult(id, data);
+    if (keyCtx.keyId && !keyCtx.dryRun) {
+        addUsage(keyCtx.keyId, usedTokens);
+        recordKeyStat(keyCtx.keyId, {
+            ok: true,
+            tokens: usedTokens,
+            tier: out.tier,
+        });
+    }
+    await persistChatMemory(body, body.ROLE_USER, out.answer);
+    appendHistory({
+        id,
+        ts: new Date().toISOString(),
+        user: body.ROLE_USER,
+        answer: out.answer,
+        model: data.model,
+        tier: out.tier,
+        device: out.device,
+        tokens: data.tokens,
+        rag: data.rag,
+        strict: data.strict,
+        sources: data.sources,
+        channel: keyCtx.keyId ? `ask:${keyCtx.keyId}` : "ask",
+        mode: "ask",
+    }).catch((e) => logger.error(`history 저장 실패: ${e.message}`));
+    logger.info(
+        `ask 완료 #${id} tier=${out.tier} device=${out.device ?? "-"} ${Date.now() - started}ms`,
+    );
+    return data;
+}
+
+async function runAskLongContent(id, body, temperature) {
+    const qAsk = String(body.ROLE_USER ?? "");
+    logger.info(
+        `긴 입력 감지 [ask #${id}] ${qAsk.length}자 → 맵리듀스 파이프라인`,
+    );
+    const out = await runLongContent({ body, temperature });
+    return {
+        answer: out.answer,
+        reasoning: out.reasoning,
+        model: out.model ?? config.modelName,
+        tier: out.tier,
+        device: out.device,
+        backend: out.backend,
+        usage: out.usage,
+        tokens: out.tokens ?? Number(out.usage?.total_tokens),
+    };
+}
+
 // 외부 API: 백그라운드에서 답변을 생성해 결과 JSON 파일에 기록한다.
-async function processAsk(id, body, ref) {
+async function processAsk(id, body, ref, keyCtx = {}) {
     const started = Date.now();
     try {
         await prepareChatMemory(body);
-        const route = await chooseRoute(body);
+
+        const qAsk = String(body.ROLE_USER ?? "");
+        if (keyCtx.callerRule) {
+            logger.info(
+                `JSON 결과 커스텀 [ask #${id}] "${keyCtx.callerRule.name}"`,
+            );
+            return await applyAskRule(
+                id,
+                body,
+                ref,
+                keyCtx,
+                keyCtx.callerRule,
+                started,
+            );
+        }
+        const boundRules = rulesByIds(keyCtx.rules?.ruleIds || []);
+        let hitRule = matchBoundRule(qAsk, boundRules);
+        if (hitRule) {
+            logger.info(`JSON 결과 키워드 [ask #${id}] "${hitRule.name}"`);
+        } else if (
+            boundRules.length &&
+            !isSmallTalk(qAsk) &&
+            !needsLongPipeline(body)
+        ) {
+            hitRule = await classifyAskRule(qAsk, boundRules, id);
+        }
+        if (hitRule) {
+            return await applyAskRule(id, body, ref, keyCtx, hitRule, started);
+        }
+
+        const rawTempEarly = Number(body?.TEMPERATURE);
+        const askTemperature = Number.isFinite(rawTempEarly)
+            ? rawTempEarly
+            : config.defaultTemperature;
+
+        // 콘솔 API(/api/ask)도 채팅과 같이 긴 입력을 청크 맵리듀스로 처리한다.
+        // (이전에는 chat 경로만 분할해서, API 키 모드 코드리뷰가 ctx 4096을 그대로 넘겼다)
+        if (needsLongPipeline(body)) {
+            const out = await runAskLongContent(id, body, askTemperature);
+            return await finishAskChat(id, body, ref, keyCtx, started, out);
+        }
+
+        // 키에 기초지식(지식셋)이 바인딩돼 있으면 해당 컬렉션으로 스코프 검색해
+        // RAG 근거를 자동 주입한다. (호출자가 RAG 파라미터를 몰라도 동작)
+        const kn = keyCtx.knowledge;
+        const knIds =
+            kn && Array.isArray(kn.collectionIds)
+                ? filterExisting(kn.collectionIds)
+                : [];
+        const useKnowledge = knIds.length > 0;
+        const skipKnowledgeRag = useKnowledge && isSmallTalk(qAsk);
+
+        let route;
+        let messages;
+        let ragMeta = null;
+        if (skipKnowledgeRag) {
+            logger.info(`기초지식 skip [ask #${id}] 잡담/인사 — 현재 질문 우선`);
+            route = await chooseRoute(body);
+        } else if (useKnowledge) {
+            const q = qAsk;
+            const strict = kn.mode !== "augment";
+            await rag.load();
+            const hits = q.trim()
+                ? await rag.retrieveAsync(q, kn.topK || 4, {
+                      collectionIds: knIds,
+                  })
+                : [];
+            ragMeta = { strict, hits, sources: buildRagSources(hits) };
+            logger.info(
+                `기초지식 [ask #${id}] 지식셋 ${knIds.length}개 → ${hits.length}건 strict=${strict}`,
+            );
+            // strict + 0건: 모델 호출 없이 즉시 거절 (비용 절약)
+            if (strict && hits.length === 0) {
+                const { uid: uid0, sid: sid0 } = memoryIds(body);
+                const data0 = {
+                    status: "done",
+                    id,
+                    ref,
+                    question: body.ROLE_USER,
+                    answer: "문서 내용에 없습니다.",
+                    model: config.modelName,
+                    rag: true,
+                    strict: true,
+                    sources: [],
+                    U_ID: uid0 || undefined,
+                    S_ID: sid0 || undefined,
+                    elapsedMs: Date.now() - started,
+                    finishedAt: new Date().toISOString(),
+                };
+                await writeResult(id, data0);
+                if (keyCtx.keyId && !keyCtx.dryRun)
+                    recordKeyStat(keyCtx.keyId, { ok: true, tokens: 0 });
+                logger.info(`ask 완료 #${id} (기초지식 strict 0건 → 거절)`);
+                return data0;
+            }
+            const rr = await chooseRagRoute({
+                q,
+                hits,
+                questionContent: body.content,
+                body,
+            });
+            route = { tier: rr.tier, device: rr.device, reason: rr.reason };
+            messages = await buildRagMessages({
+                q,
+                hits,
+                strict,
+                questionContent: body.content,
+                system: body.ROLE_SYSTEM,
+                history: body.HISTORY,
+                memoryContext: body._memory?.context,
+            });
+        } else {
+            route = await chooseRoute(body);
+        }
+
+        // 토큰 한도 초과 강등: 최저 허용 티어로 고정
+        if (keyCtx.forceTier) {
+            if (route.tier !== keyCtx.forceTier) {
+                logger.info(
+                    `토큰 한도 강등 [ask #${id}] ${route.tier} → ${keyCtx.forceTier}`,
+                );
+            }
+            route.tier = keyCtx.forceTier;
+        }
+        // 키별 허용 티어로 라우팅 결과를 클램프(강등)
+        if (keyCtx.allowedTiers) {
+            const clamped = clampTier(route.tier, keyCtx.allowedTiers);
+            if (clamped !== route.tier) {
+                logger.info(
+                    `티어 제한 [ask #${id}] ${route.tier} → ${clamped} (키 허용: ${keyCtx.allowedTiers.join("/")})`,
+                );
+                route.tier = clamped;
+            }
+        }
         logger.info(
-            `라우팅 [ask #${id}] → tier=${route.tier} device=${route.device} 난이도=${route.difficulty}${route.routerBackend ? ` router@${route.routerBackend}` : ""} (${route.reason})`,
+            `라우팅 [ask #${id}] → tier=${route.tier} device=${route.device ?? "-"}${route.reason ? ` (${route.reason})` : ""}`,
         );
         const isLarge = route.tier === "large";
         const promptCharBudget = isLarge
             ? config.maxPromptCharsLarge
             : config.maxPromptCharsSmall;
-        const maxTokens = isLarge
+        let maxTokens = isLarge
             ? config.defaultMaxTokens
             : config.maxTokensSmall;
-        const messages = await buildMessages(body, promptCharBudget);
+        // 키별 응답 토큰 상한
+        if (keyCtx.maxTokens) maxTokens = Math.min(maxTokens, keyCtx.maxTokens);
+        if (!messages) messages = await buildMessages(body, promptCharBudget);
 
-        const rawTemp = Number(body?.TEMPERATURE);
-        const temperature = Number.isFinite(rawTemp)
-            ? rawTemp
-            : config.defaultTemperature;
+        const temperature = askTemperature;
 
-        const {
+        let chatOut;
+        try {
+            chatOut = await pool.chat({
+                messages,
+                temperature,
+                maxTokens,
+                enableThinking: config.enableThinking,
+                preferredTier: route.tier,
+                preferredDevice: route.device,
+            });
+        } catch (err) {
+            if (!isContextOverflowError(err)) throw err;
+            logger.warn(
+                `ask 컨텍스트 초과 → 맵리듀스 재시도 [ask #${id}]: ${err.message}`,
+            );
+            const out = await runAskLongContent(id, body, temperature);
+            return await finishAskChat(id, body, ref, keyCtx, started, out, ragMeta);
+        }
+        let {
             result,
             backendUrl,
             tier: usedTier,
             device: usedDevice,
-        } = await pool.chat({
-            messages,
-            temperature,
-            maxTokens,
-            enableThinking: config.enableThinking,
-            preferredTier: route.tier,
-            preferredDevice: route.device,
-        });
+        } = chatOut;
 
-        const { uid, sid } = memoryIds(body);
-        const data = {
-            status: "done",
+        // 언어 이탈 가드: 사용자가 중국어/영어로 쓰지 않았는데 답이 중국어로 새면
+        // 1회 한국어로 재생성 (한국어 우선. 'ㅇㅇㅇ' 등 애매입력 포함)
+        const askLang = detectReplyLang(body.ROLE_USER);
+        if (
+            config.enforceLanguage &&
+            askLang !== "zh" &&
+            askLang !== "en" &&
+            looksMostlyChinese(result.content)
+        ) {
+            logger.warn(`언어 이탈 감지 [ask #${id}] 중국어→ 한국어 재생성`);
+            const retryMessages = [
+                {
+                    role: "system",
+                    content:
+                        "너는 반드시 한국어로만 답한다. 한자(汉字)나 중국어를 한 글자도 쓰지 마라. " +
+                        "직전 답변이 중국어였다면 완전히 버리고, 같은 내용을 순수 한국어로 다시 작성하라.",
+                },
+                ...messages.filter((m) => m.role !== "system"),
+                {
+                    role: "user",
+                    content:
+                        "방금 답변이 중국어였습니다. 같은 질문에 대해 한국어로만 다시 답하세요. (중국어·한자 금지)",
+                },
+            ];
+            try {
+                const retry = await pool.chat({
+                    messages: retryMessages,
+                    temperature,
+                    maxTokens,
+                    enableThinking: config.enableThinking,
+                    preferredTier: usedTier,
+                    preferredDevice: usedDevice,
+                });
+                if (!looksMostlyChinese(retry.result.content)) {
+                    result = retry.result;
+                    backendUrl = retry.backendUrl;
+                    usedTier = retry.tier;
+                    usedDevice = retry.device;
+                }
+            } catch (e) {
+                logger.warn(`언어 재생성 실패 [ask #${id}]: ${e.message}`);
+            }
+        }
+
+        return await finishAskChat(
             id,
+            body,
             ref,
-            question: body.ROLE_USER,
-            answer: result.content,
-            reasoning: result.reasoning || undefined,
-            model: result.raw?.model ?? config.modelName,
-            tier: usedTier,
-            device: usedDevice,
-            backend: backendUrl,
-            U_ID: uid || undefined,
-            S_ID: sid || undefined,
-            elapsedMs: Date.now() - started,
-            finishedAt: new Date().toISOString(),
-        };
-        await writeResult(id, data);
-        await persistChatMemory(body, body.ROLE_USER, result.content);
-        logger.info(
-            `ask 완료 #${id} tier=${usedTier} device=${usedDevice ?? "-"} ${Date.now() - started}ms`,
+            keyCtx,
+            started,
+            {
+                answer: result.content,
+                reasoning: result.reasoning,
+                model: result.raw?.model ?? config.modelName,
+                tier: usedTier,
+                device: usedDevice,
+                backend: backendUrl,
+                usage: result.usage,
+                tokens: Number(result.usage?.total_tokens),
+            },
+            ragMeta,
         );
-        return data;
     } catch (err) {
         const data = {
             status: "error",
@@ -2497,23 +3105,99 @@ async function processAsk(id, body, ref) {
             finishedAt: new Date().toISOString(),
         };
         await writeResult(id, data).catch(() => {});
+        if (keyCtx.keyId && !keyCtx.dryRun)
+            recordKeyStat(keyCtx.keyId, { ok: false, code: 502 });
         logger.error(`ask 실패 #${id}: ${err.message}`);
         return data;
     }
 }
 
 // 외부 API (GET): key + q 를 받아 즉시 "생성중" + 결과 URL 을 반환하고, 답변은 비동기로 파일에 기록한다.
-app.get("/api/ask", async (req, res) => {
-    const key = req.query.key || req.headers["x-api-key"];
-    if (key !== config.apiKey) {
+// GET 은 짧은 질의용(URL). 긴 입력(코드리뷰 등)은 URL/헤더 크기 한도를 넘겨
+// "Header overflow" 가 나므로 POST 로 body 에 담아 보낸다. 두 메서드가 같은
+// 핸들러를 쓰며, POST 는 body 를 query 위에 머지한 뷰를 넘긴다.
+const askHandler = async (req, res) => {
+    const secret = req.query.key || req.headers["x-api-key"];
+    const apiKey = findBySecret(secret);
+    if (!apiKey || !apiKey.enabled) {
         return res.status(401).json({ error: "유효하지 않은 API KEY 입니다." });
+    }
+    // 실제 토큰 사용 여부. USAGE=N 이면 이 요청은 사용량 집계·한도에서 제외한다
+    // (테스트 콘솔의 "실제 토큰 사용" 옵션 OFF). 파라미터가 없으면 실제 집계.
+    const dryRun =
+        String(req.query.USAGE ?? req.query.usage ?? "").toUpperCase() === "N";
+
+    // 통계용 에러 기록(dry-run 제외, 알려진 키만)
+    const statErr = (code) => {
+        if (!dryRun) recordKeyStat(apiKey.id, { ok: false, code });
+    };
+
+    // 토큰 한도 초과: overAction 에 따라 거절(reject) 또는 최저 허용 티어로 강등(downgrade)
+    let forceTier = null;
+    if (!dryRun && isOverLimit(apiKey)) {
+        if (apiKey.limits?.overAction === "downgrade") {
+            forceTier = apiKey.allowedTiers[0] || "small";
+        } else {
+            statErr(429);
+            return res.status(429).json({
+                error: "토큰 사용 한도를 초과했습니다.",
+                tokenUsed: apiKey.tokenUsed,
+                tokenLimit: apiKey.tokenLimit,
+            });
+        }
+    }
+    // 요청 수 한도(RPM/RPD)
+    if (!dryRun) {
+        const rl = checkRate(apiKey.id, apiKey.limits);
+        if (!rl.ok) {
+            statErr(429);
+            res.set("Retry-After", String(rl.retryAfter));
+            return res.status(429).json({
+                error: `요청 수 한도를 초과했습니다 (${rl.scope}).`,
+                retryAfter: rl.retryAfter,
+            });
+        }
+    }
+    // 티어(모델) 제한: 명시적으로 요청한 티어가 비허용이면 거절
+    const reqTier =
+        typeof req.query.tier === "string"
+            ? req.query.tier.toLowerCase()
+            : null;
+    if (
+        reqTier &&
+        TIERS.includes(reqTier) &&
+        !apiKey.allowedTiers.includes(reqTier)
+    ) {
+        statErr(403);
+        return res.status(403).json({
+            error: `이 키는 '${reqTier}' 티어를 사용할 수 없습니다.`,
+            allowedTiers: apiKey.allowedTiers,
+        });
     }
 
     const q = req.query.q ?? req.query.content ?? req.query.ROLE_USER;
     if (typeof q !== "string" || q.trim() === "") {
+        statErr(400);
         return res
             .status(400)
             .json({ error: "q (질문) 파라미터가 필요합니다." });
+    }
+
+    const rawRule = req.query.rule ?? req.query.schema;
+    let callerRule = null;
+    if (typeof rawRule === "string" && rawRule.trim()) {
+        if (apiKey.rules?.allowCustom !== true) {
+            statErr(403);
+            return res.status(403).json({
+                error: "이 키는 호출자 JSON 형식을 수락하지 않습니다.",
+            });
+        }
+        try {
+            callerRule = parseCallerRule(rawRule);
+        } catch (err) {
+            statErr(400);
+            return res.status(400).json({ error: err.message });
+        }
     }
 
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -2556,16 +3240,49 @@ app.get("/api/ask", async (req, res) => {
     const wait = String(req.query.WAIT ?? req.query.wait ?? "N").toUpperCase() === "Y";
     const resultUrl = `/results/${id}.json`;
 
+    // 동시 요청 슬롯 확보 + 요청 수 카운트 (dry-run 제외)
+    if (!dryRun) {
+        if (!acquire(apiKey.id, apiKey.limits?.concurrency)) {
+            statErr(429);
+            return res.status(429).json({
+                error: "동시 요청 한도를 초과했습니다.",
+                concurrency: apiKey.limits.concurrency,
+            });
+        }
+        countRate(apiKey.id);
+    }
+    // 슬롯 반납은 처리 완료 후 (WAIT 여부 무관)
+    const releaseSlot = () => {
+        if (!dryRun) release(apiKey.id);
+    };
+
+    const keyCtx = {
+        keyId: apiKey.id,
+        allowedTiers: apiKey.allowedTiers,
+        knowledge: apiKey.knowledge,
+        rules: apiKey.rules,
+        callerRule,
+        dryRun,
+        forceTier, // 토큰 한도 초과 시 강등 대상(없으면 null)
+        maxTokens: apiKey.limits?.maxTokens || null,
+    };
+
     // WAIT=Y: 완료까지 기다렸다가 결과를 바로 반환
     if (wait) {
         logger.info(`ask 접수 #${id} ref=${ref ?? "-"} (WAIT=Y, 동기 대기): "${q.slice(0, 50)}"`);
-        const data = await processAsk(id, body, ref);
-        return res.status(data.status === "error" ? 502 : 200).json({ ...data, resultUrl });
+        try {
+            const data = await processAsk(id, body, ref, keyCtx);
+            return res
+                .status(data.status === "error" ? 502 : 200)
+                .json({ ...data, resultUrl });
+        } finally {
+            releaseSlot();
+        }
     }
 
     // WAIT=N(기본): 즉시 "생성중" 응답 + 결과 URL, 답변은 백그라운드로 파일에 기록
     logger.info(`ask 접수 #${id} ref=${ref ?? "-"} (WAIT=N, 비동기): "${q.slice(0, 50)}"`);
-    processAsk(id, body, ref);
+    processAsk(id, body, ref, keyCtx).finally(releaseSlot);
     res.json({
         status: "generating",
         message: "답변을 생성중입니다",
@@ -2573,6 +3290,14 @@ app.get("/api/ask", async (req, res) => {
         ref,
         resultUrl,
     });
+};
+
+app.get("/api/ask", askHandler);
+// POST /api/ask — 긴 입력용. JSON body(또는 form)를 query 위에 머지해 동일 처리.
+app.post("/api/ask", (req, res) => {
+    const merged = { ...(req.query || {}), ...(req.body || {}) };
+    const view = Object.create(req, { query: { value: merged } });
+    return askHandler(view, res);
 });
 
 // 스트리밍(SSE) 채팅: 토큰을 실시간 전송하고, 마지막에 TTFT/tokens-per-sec 지표를 보낸다.
@@ -3019,6 +3744,60 @@ app.post("/api/chat/stream", async (req, res) => {
                     model: guarded.model,
                     usage: guarded.usage,
                 };
+            }
+
+            // 언어 이탈 가드: 사용자가 중국어/영어로 쓰지 않았는데 답이 중국어로
+            // 새면 한국어로 재생성해 교체 (한국어 우선. 자모 'ㅇㅇㅇ' 등 애매입력 포함)
+            const qLang = detectReplyLang(q);
+            if (
+                config.enforceLanguage &&
+                qLang !== "zh" &&
+                qLang !== "en" &&
+                looksMostlyChinese(out.content)
+            ) {
+                logger.warn("stream 중국어 이탈 → 한국어 재생성으로 교체");
+                try {
+                    const koMessages = [
+                        {
+                            role: "system",
+                            content:
+                                "너는 반드시 한국어로만 답한다. 한자(汉字)·중국어를 한 글자도 쓰지 마라. " +
+                                "직전 답변이 중국어였다면 완전히 버리고 순수 한국어로 다시 작성하라.",
+                        },
+                        ...messages.filter((m) => m.role !== "system"),
+                        {
+                            role: "user",
+                            content:
+                                "방금 답변이 중국어였습니다. 같은 질문에 한국어로만 다시 답하세요. (중국어·한자 금지)",
+                        },
+                    ];
+                    const ko = await chatWithEchoGuard({
+                        body,
+                        messages: koMessages,
+                        temperature,
+                        maxTokens,
+                        enableThinking: false,
+                        preferredTier: out.tier || directTier,
+                        preferredDevice: directDevice,
+                        preferredSkill: null,
+                        allowOtherTiers: true,
+                    });
+                    if (ko?.content && !looksMostlyChinese(ko.content)) {
+                        out = {
+                            ...out,
+                            content: ko.content,
+                            reasoning: ko.reasoning,
+                            tier: ko.tier,
+                            device: ko.device,
+                            alias: ko.alias,
+                            backendUrl: ko.backendUrl,
+                            model: ko.model,
+                            usage: ko.usage,
+                        };
+                    }
+                } catch (e) {
+                    logger.warn(`stream 언어 재생성 실패: ${e.message}`);
+                }
             }
         }
 
@@ -4231,23 +5010,26 @@ function ragSystemPrompt(strict, withVision, userSystem, question = "") {
 }
 
 async function buildRagUserContent(q, context, hits, questionContent, history, memoryContext) {
-    let text = context
-        ? `참고 문서:\n${context}\n\n질문: ${q}`
-        : q;
+    let text = context ? `참고 문서:\n${context}` : "";
     const mem =
         typeof memoryContext === "string" && memoryContext.trim()
             ? memoryContext.trim()
             : "";
     if (mem) {
-        text = `${mem}\n\n${text}`;
+        text = text ? `${mem}\n\n${text}` : mem;
     }
     if (Array.isArray(history) && history.length) {
         const hist = formatHistorySnippet(history, {
             maxTurns: 4,
-            perTurnMax: 280,
+            perTurnMax: 180,
         });
-        if (hist) text = `최근 대화:\n${hist}\n\n${text}`;
+        if (hist) {
+            text =
+                `이전 대화(참고용. 지금 질문과 관련될 때만 반영하고, 다른 주제면 이어가지 마라):\n${hist}\n\n` +
+                text;
+        }
     }
+    text = `${text}\n\n지금 질문(이것에만 답하라): ${q}`;
 
     const imageFiles = new Set();
     for (const h of hits || []) {
@@ -4509,7 +5291,7 @@ async function attachDocInsights(docId, name, text) {
 app.get("/api/rag/docs", async (_req, res) => {
     try {
         await rag.load();
-        res.json({ docs: rag.listDocuments(), stats: rag.stats() });
+        res.json({ docs: rag.listDocuments(null), stats: rag.stats(null) });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -4552,7 +5334,7 @@ app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
                 ...info,
                 ...(insights ?? {}),
                 chars: description.length,
-                stats: rag.stats(),
+                stats: rag.stats(null),
             });
         }
 
@@ -4572,7 +5354,7 @@ app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
             ...info,
             ...(insights ?? {}),
             chars: text.length,
-            stats: rag.stats(),
+            stats: rag.stats(null),
         });
     } catch (err) {
         logger.warn(`RAG 업로드 실패: ${err.message}`);
@@ -4584,7 +5366,7 @@ app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
 app.get("/api/rag/images/:docId", async (req, res) => {
     try {
         await rag.load();
-        const doc = rag.listDocuments().find((d) => d.id === req.params.docId);
+        const doc = rag.getDocument(req.params.docId);
         if (!doc?.imageFile) {
             return res.status(404).json({ error: "이미지 문서를 찾을 수 없습니다." });
         }
@@ -4606,19 +5388,242 @@ app.post("/api/rag/docs", async (req, res) => {
             `RAG 문서 추가: "${info.name}" (청크 ${info.chunkCount}개)`,
         );
         const insights = await attachDocInsights(info.id, info.name, text);
-        res.json({ ok: true, ...info, ...(insights ?? {}), stats: rag.stats() });
+        res.json({ ok: true, ...info, ...(insights ?? {}), stats: rag.stats(null) });
     } catch (err) {
         logger.warn(`RAG 문서 추가 실패: ${err.message}`);
         res.status(400).json({ error: err.message });
     }
 });
 
-// 문서 삭제
+// 문서 삭제 (테스트 콘솔 전역 문서만 — 지식셋 문서는 건드리지 않음)
 app.delete("/api/rag/docs/:id", async (req, res) => {
     try {
-        const r = await rag.deleteDocument(req.params.id);
+        const r = await rag.deleteDocument(req.params.id, { collectionId: null });
         logger.info(`RAG 문서 삭제: ${req.params.id}`);
-        res.json({ ok: true, ...r, stats: rag.stats() });
+        res.json({ ok: true, ...r, stats: rag.stats(null) });
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
+    }
+});
+
+// ===== 기초지식 지식셋(컬렉션) 관리 ==================================
+
+// 지식셋 목록
+app.get("/api/knowledge/collections", async (_req, res) => {
+    try {
+        res.json({ collections: await listCollections() });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 지식셋 생성
+app.post("/api/knowledge/collections", (req, res) => {
+    try {
+        const col = createCollection({
+            name: req.body?.name,
+            description: req.body?.description,
+        });
+        logger.info(`지식셋 생성 ＋ "${col.name}" (${col.id})`);
+        res.json({ ok: true, collection: col });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// 지식셋 수정
+app.patch("/api/knowledge/collections/:id", (req, res) => {
+    try {
+        const patch = {};
+        const has = (k) =>
+            Object.prototype.hasOwnProperty.call(req.body ?? {}, k);
+        if (has("name")) patch.name = req.body.name;
+        if (has("description")) patch.description = req.body.description;
+        if (!Object.keys(patch).length) {
+            return res
+                .status(400)
+                .json({ error: "수정할 필드가 없습니다. (name, description)" });
+        }
+        const col = updateCollection(req.params.id, patch);
+        if (!col) return res.status(404).json({ error: "지식셋을 찾을 수 없습니다." });
+        logger.info(`지식셋 수정 ✎ "${col.name}" (${col.id})`);
+        res.json({ ok: true, collection: col });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// 지식셋 삭제 (소속 문서도 함께 삭제)
+app.delete("/api/knowledge/collections/:id", async (req, res) => {
+    try {
+        const ok = await deleteCollection(req.params.id);
+        if (!ok) return res.status(404).json({ error: "지식셋을 찾을 수 없습니다." });
+        const unbound = unbindCollection(req.params.id);
+        logger.info(
+            `지식셋 삭제 － ${req.params.id}` +
+                (unbound ? ` (키 바인딩 ${unbound}건 해제)` : ""),
+        );
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 지식셋 문서 목록
+app.get("/api/knowledge/collections/:id/docs", async (req, res) => {
+    try {
+        if (!getCollection(req.params.id)) {
+            return res.status(404).json({ error: "지식셋을 찾을 수 없습니다." });
+        }
+        await rag.load();
+        res.json({ docs: rag.listDocuments(req.params.id) });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 지식셋 문서 추가 ({ name, text })
+app.post("/api/knowledge/collections/:id/docs", async (req, res) => {
+    try {
+        if (!getCollection(req.params.id)) {
+            return res.status(404).json({ error: "지식셋을 찾을 수 없습니다." });
+        }
+        const { name, text } = req.body ?? {};
+        const info = await rag.addDocument(name, text, {
+            collectionId: req.params.id,
+        });
+        logger.info(
+            `지식셋 문서 추가: "${info.name}" → ${req.params.id} (청크 ${info.chunkCount}개)`,
+        );
+        res.json({ ok: true, ...info });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// 지식셋 파일 업로드 (문서/이미지)
+app.post(
+    "/api/knowledge/collections/:id/upload",
+    upload.single("file"),
+    async (req, res) => {
+        try {
+            if (!getCollection(req.params.id)) {
+                return res.status(404).json({ error: "지식셋을 찾을 수 없습니다." });
+            }
+            if (!req.file) {
+                return res.status(400).json({ error: "파일이 필요합니다." });
+            }
+            const collectionId = req.params.id;
+            const original = Buffer.from(
+                req.file.originalname,
+                "latin1",
+            ).toString("utf8");
+            const name =
+                (req.body?.name && String(req.body.name).trim()) ||
+                original.replace(/\.[^.]+$/, "");
+
+            if (isRagImageFile(original)) {
+                const ext = path.extname(original).toLowerCase();
+                const dataUrl = bufferToDataUrl(req.file.buffer, ext);
+                logger.info(`지식셋 이미지 분석 중: "${original}"`);
+                const description = await describeImageForRag(dataUrl);
+                const info = await rag.addImageDocument(
+                    name,
+                    req.file.buffer,
+                    ext,
+                    description,
+                    { collectionId },
+                );
+                return res.json({
+                    ok: true,
+                    ...info,
+                    chars: description.length,
+                });
+            }
+
+            const text = await extractText(original, req.file.buffer);
+            if (!text || !text.trim()) {
+                throw new Error(
+                    "문서에서 텍스트를 추출하지 못했습니다. (스캔 PDF는 이미지로 업로드하세요)",
+                );
+            }
+            const info = await rag.addDocument(name, text, { collectionId });
+            logger.info(
+                `지식셋 업로드: "${info.name}" → ${collectionId} (${text.length}자, 청크 ${info.chunkCount}개)`,
+            );
+            res.json({ ok: true, ...info, chars: text.length });
+        } catch (err) {
+            logger.warn(`지식셋 업로드 실패: ${err.message}`);
+            res.status(400).json({ error: err.message });
+        }
+    },
+);
+
+// 지식셋 문서 삭제 (콘솔 전역 문서는 삭제 불가)
+app.delete("/api/knowledge/docs/:docId", async (req, res) => {
+    try {
+        await rag.load();
+        const doc = rag.getDocument(req.params.docId);
+        if (!doc) {
+            return res.status(404).json({ error: "문서를 찾을 수 없습니다." });
+        }
+        if (!doc.collectionId) {
+            return res.status(403).json({
+                error: "테스트 콘솔 문서는 지식셋에서 삭제할 수 없습니다.",
+            });
+        }
+        const r = await rag.deleteDocument(req.params.docId, {
+            collectionId: doc.collectionId,
+        });
+        logger.info(`지식셋 문서 삭제: ${req.params.docId}`);
+        res.json({ ok: true, ...r });
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
+    }
+});
+
+// ===== API 법칙 ========================================================
+
+app.get("/api/rules", (_req, res) => {
+    try {
+        res.json({ rules: listRules() });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/api/rules", (req, res) => {
+    try {
+        const rule = createRule(req.body ?? {});
+        logger.info(`JSON 결과 생성 ＋ "${rule.name}" (${rule.id})`);
+        res.json({ ok: true, rule });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.patch("/api/rules/:id", (req, res) => {
+    try {
+        const rule = updateRule(req.params.id, req.body ?? {});
+        if (!rule) return res.status(404).json({ error: "JSON 결과를 찾을 수 없습니다." });
+        logger.info(`JSON 결과 수정 ✎ "${rule.name}" (${rule.id})`);
+        res.json({ ok: true, rule });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.delete("/api/rules/:id", (req, res) => {
+    try {
+        const rec = getRule(req.params.id);
+        if (!rec) return res.status(404).json({ error: "JSON 결과를 찾을 수 없습니다." });
+        deleteRule(req.params.id);
+        const unbound = unbindRule(req.params.id);
+        logger.info(
+            `JSON 결과 삭제 － ${req.params.id}` +
+                (unbound ? ` (키 바인딩 ${unbound}건 해제)` : ""),
+        );
+        res.json({ ok: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -4654,15 +5659,18 @@ app.post("/api/rag/ask", async (req, res) => {
             ROLE_USER: q,
             HISTORY: req.body?.HISTORY,
         });
-        const hits = await rag.retrieveAsync(retrieveQ, topK);
+        const hits = isSmallTalk(q)
+            ? []
+            : await rag.retrieveAsync(retrieveQ, topK);
         logger.info(
             `RAG 질문 "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색` +
+                (isSmallTalk(q) ? " (잡담 skip)" : "") +
                 (retrieveQ !== q ? ` (검색질의 보강 ${retrieveQ.length}자)` : ""),
         );
 
-        // 관련 문서가 없을 때
+        // 관련 문서가 없을 때 (인사는 거절하지 않고 일반 답변)
         if (!hits.length) {
-            if (strict) {
+            if (strict && !isSmallTalk(q)) {
                 const payload = {
                     answer: "문서 내용에 없습니다.",
                     sources: [],
@@ -4783,21 +5791,24 @@ app.post("/api/rag/ask/stream", async (req, res) => {
         // 보안 게이트가 켜져 있으면 검사 통과 전까지 토큰을 감춘다
         const securityHold = hasSecurityWorkflow() && Boolean(q.trim());
 
-        const hits = await rag.retrieveAsync(
-            ragRetrieveQuery({ ROLE_USER: q, HISTORY: req.body?.HISTORY }),
-            topK,
-        );
+        const hits = isSmallTalk(q)
+            ? []
+            : await rag.retrieveAsync(
+                  ragRetrieveQuery({ ROLE_USER: q, HISTORY: req.body?.HISTORY }),
+                  topK,
+              );
         const sources = ragSources(hits);
         logger.info(
-            `RAG 질문(stream) "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색`,
+            `RAG 질문(stream) "${q.slice(0, 50)}" (strict=${strict}) → 관련 청크 ${hits.length}개 검색` +
+                (isSmallTalk(q) ? " (잡담 skip)" : ""),
         );
 
         // 검색된 출처를 생성 시작 전에 먼저 보여준다.
         send("meta", { strict, sources });
         send("status", { phase: "generate", message: "답변 생성 중…" });
 
-        // strict 모드에서 관련 문서가 없으면 즉시 종료
-        if (!hits.length && strict) {
+        // strict 모드에서 관련 문서가 없으면 즉시 종료 (인사는 제외)
+        if (!hits.length && strict && !isSmallTalk(q)) {
             const payload = {
                 answer: "문서 내용에 없습니다.",
                 sources: [],
@@ -4922,6 +5933,19 @@ const httpServer = app.listen(config.port, () => {
     );
 });
 hardenHttpServer(httpServer, { port: config.port });
+
+// 토큰 한도 자동 초기화: 예정 시각이 지난 키를 주기적으로 초기화(트래픽 없어도 반영).
+// 조회(GET /api/keys)·요청(/api/ask) 시에도 지연 초기화가 적용되지만, 표시 정확도를
+// 위해 1분마다 스윕한다.
+const resetSweepTimer = setInterval(() => {
+    try {
+        const n = sweepResets();
+        if (n) logger.info(`토큰 한도 자동 초기화 ↺ ${n}개 키`);
+    } catch (e) {
+        logger.warn(`토큰 자동 초기화 스윕 실패: ${e.message}`);
+    }
+}, 60 * 1000);
+if (resetSweepTimer.unref) resetSweepTimer.unref();
 
 function onShutdownSignal(sig) {
     logger.info(`관리서버 종료 신호 ${sig}`);

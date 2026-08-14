@@ -529,6 +529,22 @@
                 background: rgba(45, 212, 191, 0.16);
                 color: #2dd4bf;
             }
+            .tier-rule {
+                background: rgba(188, 140, 255, 0.18);
+                color: #c4b5fd;
+            }
+            .json-out {
+                margin: 0;
+                padding: 12px 14px;
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 13px;
+                line-height: 1.5;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
             .dev-badge {
                 font-size: 10px;
                 font-weight: 700;
@@ -945,6 +961,100 @@
                 white-space: pre-wrap;
                 line-height: 1.5;
             }
+            .left-tabs {
+                display: flex;
+                gap: 6px;
+                margin: -4px 0 14px;
+                padding-bottom: 12px;
+                border-bottom: 1px solid var(--border);
+            }
+            .left-tab {
+                flex: 1;
+                background: transparent;
+                border: 1px solid var(--border);
+                color: var(--muted);
+                border-radius: 8px;
+                padding: 8px 10px;
+                font-size: 13px;
+                font-weight: 600;
+                font-family: inherit;
+                cursor: pointer;
+            }
+            .left-tab:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .left-tab.on {
+                border-color: var(--accent);
+                color: var(--accent);
+                background: rgba(108, 140, 255, 0.14);
+            }
+            .mode-pill {
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 8px;
+                border-radius: 999px;
+                background: rgba(154, 163, 178, 0.18);
+                color: var(--muted);
+            }
+            .mode-pill.ask {
+                background: rgba(108, 140, 255, 0.18);
+                color: #a9c0ff;
+            }
+            body.mode-apikey .chat-head-actions label:has(#stream),
+            body.mode-apikey .chat-head-actions label:has(#workflow),
+            body.mode-apikey .chat-head-actions label:has(#stress),
+            body.mode-apikey #stressOpts {
+                display: none;
+            }
+            select#askKey {
+                width: 100%;
+                background: #0d0f15;
+                color: var(--text);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 10px 12px;
+                font-size: 14px;
+                font-family: inherit;
+            }
+            .ask-card {
+                margin-top: 12px;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 12px;
+                background: #0f1220;
+                font-size: 13px;
+            }
+            .ask-card .row {
+                display: flex;
+                justify-content: space-between;
+                gap: 8px;
+                margin: 6px 0;
+            }
+            .ask-card .k {
+                color: var(--muted);
+                flex-shrink: 0;
+            }
+            .ask-card .v {
+                text-align: right;
+                word-break: break-all;
+            }
+            .ask-chip {
+                display: inline-block;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 2px 8px;
+                border-radius: 999px;
+                background: rgba(108, 140, 255, 0.16);
+                color: #a9c0ff;
+                margin: 0 0 4px 4px;
+            }
+            .ask-empty {
+                color: var(--muted);
+                font-size: 13px;
+                padding: 12px 0;
+                line-height: 1.55;
+            }
         </style>
     </head>
     <body>
@@ -959,6 +1069,16 @@
         <div class="wrap">
             <div class="grid">
                 <section class="panel">
+                    <div class="left-tabs" role="tablist">
+                        <button type="button" class="left-tab on" data-left="console">
+                            콘솔
+                        </button>
+                        <button type="button" class="left-tab" data-left="apikey">
+                            API 키 테스트
+                        </button>
+                    </div>
+
+                    <div id="leftConsole">
                     <label for="system"
                         >ROLE_SYSTEM
                         <span class="hint">(시스템 지시문, 선택)</span></label
@@ -1073,11 +1193,51 @@
                             <div id="ragList" class="rag-list"></div>
                         </div>
                     </details>
+                    </div>
+
+                    <div id="leftApiKey" hidden>
+                        <label for="askKey">API 키</label>
+                        <select id="askKey">
+                            <option value="">불러오는 중…</option>
+                        </select>
+                        <div id="askKeyInfo"></div>
+                        <label
+                            style="
+                                display: flex;
+                                align-items: center;
+                                gap: 8px;
+                                margin-top: 10px;
+                                font-weight: 400;
+                                cursor: pointer;
+                            "
+                        >
+                            <input
+                                type="checkbox"
+                                id="askRealUsage"
+                                style="width: auto"
+                            />
+                            <span
+                                >실제 토큰 사용
+                                <span style="color: var(--muted)"
+                                    >(해제 시 이 키의 사용량·한도 미반영)</span
+                                ></span
+                            >
+                        </label>
+                        <div id="askCustomWrap" hidden>
+                            <label for="askSchema">JSON 형식</label>
+                            <textarea
+                                id="askSchema"
+                                rows="4"
+                                placeholder='{"title":"","desc":""}'
+                            ></textarea>
+                        </div>
+                    </div>
                 </section>
 
                 <section class="panel chat-panel">
                     <div class="chat-head">
                         <span class="t">대화</span>
+                        <span class="mode-pill" id="chatModePill">콘솔</span>
                         <div class="chat-head-actions">
                             <label
                                 style="
@@ -1305,6 +1465,93 @@
             const log = $("log");
             // 현재 대화(메모리 전송용): [{role:'user'|'assistant', content}]
             let convo = [];
+            const CHAT_STORE_PREFIX = "neutda.chat.v1.";
+            const CHAT_STORE_MAX = 80;
+            let activeChannel = null;
+            let channelItems = [];
+
+            function currentChannelId() {
+                if (
+                    typeof isApiKeyMode === "function" &&
+                    isApiKeyMode()
+                ) {
+                    const id = $("askKey") && $("askKey").value;
+                    return id ? `ask:${id}` : "ask";
+                }
+                return "console";
+            }
+
+            function loadChannelItems(ch) {
+                try {
+                    const raw = localStorage.getItem(CHAT_STORE_PREFIX + ch);
+                    const arr = JSON.parse(raw);
+                    return Array.isArray(arr) ? arr : [];
+                } catch {
+                    return [];
+                }
+            }
+
+            function saveChannelItems(ch, items) {
+                if (!ch) return;
+                try {
+                    localStorage.setItem(
+                        CHAT_STORE_PREFIX + ch,
+                        JSON.stringify((items || []).slice(-CHAT_STORE_MAX)),
+                    );
+                } catch {
+                    /* quota */
+                }
+            }
+
+            function uidSidKeys(ch) {
+                if (!ch || ch === "console") {
+                    return { uid: "neutda.console.uid", sid: "neutda.console.sid" };
+                }
+                return {
+                    uid: "neutda.console.uid." + ch,
+                    sid: "neutda.console.sid." + ch,
+                };
+            }
+
+            function rememberTurn(user, data, extra = {}) {
+                const item = {
+                    user,
+                    answer: (data && data.answer) || extra.answer || "",
+                    reasoning: data && data.reasoning,
+                    model: data && data.model,
+                    tier: data && data.tier,
+                    device: data && data.device,
+                    alias: data && data.alias,
+                    difficulty: data && data.difficulty,
+                    routeReason: data && data.routeReason,
+                    deviceReason: data && data.deviceReason,
+                    usage: data && data.usage,
+                    mode: extra.mode || (data && data.mode),
+                    rag: Boolean((data && data.rag) || extra.rag),
+                    strict: data && data.strict,
+                    sources: data && data.sources,
+                    workflowSteps: data && data.workflowSteps,
+                    workflowTrace: data && data.workflowTrace,
+                    routerBackend: data && data.routerBackend,
+                    routerTier: data && data.routerTier,
+                    routerAlias: data && data.routerAlias,
+                    routerDevice: data && data.routerDevice,
+                    routerModel: data && data.routerModel,
+                    tokens: data && data.tokens,
+                    ms: (data && data.ms) ?? extra.ms,
+                    dryRun: data && data.dryRun,
+                    counted: data && data.counted,
+                    count: extra.count,
+                    results: extra.results,
+                    summary: extra.summary,
+                    ts: Date.now(),
+                };
+                channelItems.push(item);
+                if (channelItems.length > CHAT_STORE_MAX) {
+                    channelItems = channelItems.slice(-CHAT_STORE_MAX);
+                }
+                saveChannelItems(activeChannel || currentChannelId(), channelItems);
+            }
 
             const esc = (s) =>
                 String(s ?? "").replace(
@@ -1570,6 +1817,9 @@
                         ? '<span class="tier-badge tier-small">문서만</span>'
                         : '<span class="tier-badge tier-medium">문서기반</span>'
                     : "";
+                const ruleBadge = data.rule
+                    ? `<span class="tier-badge tier-rule">JSON ${data.rule.custom ? "커스텀 " : ""}${esc(data.rule.name || "")}</span>`
+                    : "";
                 const routerAlias =
                     data.routerAlias ||
                     trace?.find((n) => n.kind === "router")?.routerAlias ||
@@ -1602,9 +1852,17 @@
                           ? `tokens: ${data.tokens}`
                           : null,
                     ms != null ? `${ms} ms` : null,
+                    data.dryRun
+                        ? "🧪 사용량 미집계"
+                        : data.counted
+                          ? "✅ 사용량 집계"
+                          : null,
                 ].filter(Boolean);
 
-                let html = renderMd(data.answer || "(빈 응답)");
+                let html =
+                    data.rule && data.data && typeof data.data === "object"
+                        ? `<pre class="json-out">${esc(JSON.stringify(data.data, null, 2))}</pre>`
+                        : renderMd(data.answer || "(빈 응답)");
                 if (data.reasoning) {
                     html += `<details><summary>추론 과정 보기</summary><div class="reason">${renderMd(data.reasoning)}</div></details>`;
                 }
@@ -1619,7 +1877,7 @@
                             .join("") +
                         "</div></details>";
                 }
-                html += `<div class="msg-meta">${modeBadge}${ragBadge}${tier}${dev}${why}<span>${metaParts.join(" · ")}</span></div>`;
+                html += `<div class="msg-meta">${modeBadge}${ruleBadge}${ragBadge}${tier}${dev}${why}<span>${metaParts.join(" · ")}</span></div>`;
 
                 // 라우터 도착 → 각 모델 → 결과 경로를 항상 아코디언으로
                 // (단일 모델이든 파이프라인이든 거쳐간 경로를 보여준다)
@@ -1635,6 +1893,9 @@
                         pathBits.push(
                             `RAG ${(ragNode?.hits ?? data.sources?.length) != null ? `${ragNode?.hits ?? data.sources?.length}건` : ""}`.trim(),
                         );
+                    }
+                    if (data.rule) {
+                        pathBits.push(`JSON ${data.rule.name || ""}`.trim());
                     }
                     if (routerNode || routerTier) {
                         pathBits.push(
@@ -1755,101 +2016,141 @@
                 scrollDown();
             }
 
-            // 서버 저장 히스토리 로드 → 화면/메모리 복원
-            async function loadHistory() {
-                try {
-                    const r = await fetch("/api/history");
-                    const j = await r.json();
-                    const items = j.items || [];
-                    if (items.length === 0) return;
-                    clearEmpty();
-                    for (const it of items) {
-                        addUser(it.user, it.hasImage ? null : null);
-                        if (it.mode === "stress") {
-                            renderStoredStress(it);
-                            // 스트레스는 모델 부하 테스트 — 대화 컨텍스트에는 요약만
-                            convo.push({ role: "user", content: it.user });
-                            convo.push({
-                                role: "assistant",
-                                content: it.answer || "[스트레스 테스트]",
-                            });
-                            continue;
-                        }
-                        const el = addAssistant();
-                        if (it.rag && it.mode === "workflow") {
-                            fillAssistant(
-                                el,
-                                {
-                                    answer: it.answer,
-                                    reasoning: it.reasoning,
-                                    model: it.model,
-                                    tier: it.tier,
-                                    device: it.device,
-                                    alias: it.alias,
-                                    difficulty: it.difficulty,
-                                    routeReason: it.routeReason,
-                                    mode: it.mode,
-                                    routerBackend: it.routerBackend,
-                                    routerTier: it.routerTier,
-                                    routerAlias: it.routerAlias,
-                                    routerDevice: it.routerDevice,
-                                    routerModel: it.routerModel,
-                                    workflowSteps: it.workflowSteps,
-                                    workflowTrace: it.workflowTrace,
-                                    rag: true,
-                                    strict: it.strict,
-                                    sources: it.sources || [],
-                                },
-                                null,
-                            );
-                        } else if (it.rag) {
-                            fillRag(
-                                el,
-                                {
-                                    answer: it.answer,
-                                    strict: it.strict,
-                                    sources: it.sources || [],
-                                    model: it.model,
-                                    tier: it.tier,
-                                    device: it.device,
-                                    alias: it.alias,
-                                },
-                                null,
-                            );
-                        } else {
-                            fillAssistant(
-                                el,
-                                {
-                                    answer: it.answer,
-                                    reasoning: it.reasoning,
-                                    model: it.model,
-                                    tier: it.tier,
-                                    device: it.device,
-                                    alias: it.alias,
-                                    difficulty: it.difficulty,
-                                    routeReason: it.routeReason,
-                                    deviceReason: it.deviceReason,
-                                    usage: it.usage,
-                                    mode: it.mode,
-                                    routerBackend: it.routerBackend,
-                                    routerTier: it.routerTier,
-                                    routerAlias: it.routerAlias,
-                                    routerDevice: it.routerDevice,
-                                    routerModel: it.routerModel,
-                                    workflowSteps: it.workflowSteps,
-                                    workflowTrace: it.workflowTrace,
-                                },
-                                null,
-                            );
-                        }
+            // 저장된 대화 내역을 화면에 복원
+            function paintHistoryItems(items) {
+                resetConvoUi();
+                if (!items || !items.length) return;
+                for (const it of items) {
+                    addUser(it.user, it.hasImage ? null : null);
+                    if (it.mode === "stress") {
+                        renderStoredStress(it);
                         convo.push({ role: "user", content: it.user });
-                        convo.push({ role: "assistant", content: it.answer });
+                        convo.push({
+                            role: "assistant",
+                            content: it.answer || "[스트레스 테스트]",
+                        });
+                        continue;
                     }
-                } catch {
-                    /* 무시 */
+                    const el = addAssistant();
+                    if (it.rag && it.mode === "workflow") {
+                        fillAssistant(
+                            el,
+                            {
+                                answer: it.answer,
+                                reasoning: it.reasoning,
+                                model: it.model,
+                                tier: it.tier,
+                                device: it.device,
+                                alias: it.alias,
+                                difficulty: it.difficulty,
+                                routeReason: it.routeReason,
+                                mode: it.mode,
+                                routerBackend: it.routerBackend,
+                                routerTier: it.routerTier,
+                                routerAlias: it.routerAlias,
+                                routerDevice: it.routerDevice,
+                                routerModel: it.routerModel,
+                                workflowSteps: it.workflowSteps,
+                                workflowTrace: it.workflowTrace,
+                                rag: true,
+                                strict: it.strict,
+                                sources: it.sources || [],
+                            },
+                            null,
+                        );
+                    } else if (it.rag) {
+                        fillRag(
+                            el,
+                            {
+                                answer: it.answer,
+                                strict: it.strict,
+                                sources: it.sources || [],
+                                model: it.model,
+                                tier: it.tier,
+                                device: it.device,
+                                alias: it.alias,
+                                tokens: it.tokens,
+                                dryRun: it.dryRun,
+                                counted: it.counted,
+                            },
+                            it.ms ?? null,
+                        );
+                    } else {
+                        fillAssistant(
+                            el,
+                            {
+                                answer: it.answer,
+                                reasoning: it.reasoning,
+                                model: it.model,
+                                tier: it.tier,
+                                device: it.device,
+                                alias: it.alias,
+                                difficulty: it.difficulty,
+                                routeReason: it.routeReason,
+                                deviceReason: it.deviceReason,
+                                usage: it.usage,
+                                mode: it.mode,
+                                routerBackend: it.routerBackend,
+                                routerTier: it.routerTier,
+                                routerAlias: it.routerAlias,
+                                routerDevice: it.routerDevice,
+                                routerModel: it.routerModel,
+                                workflowSteps: it.workflowSteps,
+                                workflowTrace: it.workflowTrace,
+                                rag: it.rag,
+                                strict: it.strict,
+                                sources: it.sources,
+                                tokens: it.tokens,
+                                dryRun: it.dryRun,
+                                counted: it.counted,
+                            },
+                            it.ms ?? null,
+                        );
+                    }
+                    convo.push({ role: "user", content: it.user });
+                    convo.push({ role: "assistant", content: it.answer });
                 }
+                scrollDown();
             }
-            loadHistory();
+
+            async function switchChannel(next) {
+                const ch = next || currentChannelId();
+                if (activeChannel === ch) return;
+                if (activeChannel && activeChannel !== ch) {
+                    saveChannelItems(activeChannel, channelItems);
+                    const prevKeys = uidSidKeys(activeChannel);
+                    localStorage.setItem(prevKeys.uid, $("uid").value.trim());
+                    localStorage.setItem(prevKeys.sid, $("sid").value.trim());
+                }
+                activeChannel = ch;
+                channelItems = loadChannelItems(ch);
+                const keys = uidSidKeys(ch);
+                let uid = localStorage.getItem(keys.uid) || "";
+                let sid = localStorage.getItem(keys.sid) || "";
+                if (!uid) uid = newMemId("user-");
+                if (!sid) sid = newMemId("sess-");
+                $("uid").value = uid;
+                $("sid").value = sid;
+                localStorage.setItem(keys.uid, uid);
+                localStorage.setItem(keys.sid, sid);
+
+                if (!channelItems.length) {
+                    try {
+                        const r = await fetch(
+                            "/api/history?channel=" + encodeURIComponent(ch),
+                        );
+                        const j = await r.json();
+                        const items = j.items || [];
+                        if (items.length) {
+                            channelItems = items;
+                            saveChannelItems(ch, items);
+                        }
+                    } catch {
+                        /* 서버 기록 없으면 빈 대화 */
+                    }
+                }
+                paintHistoryItems(channelItems);
+            }
 
             /** 저장된 스트레스 테스트 결과를 채팅 카드로 복원 */
             function renderStoredStress(it) {
@@ -2018,13 +2319,17 @@
             }
 
             function saveMemIds() {
-                localStorage.setItem(LS_UID, $("uid").value.trim());
-                localStorage.setItem(LS_SID, $("sid").value.trim());
+                const ch = activeChannel || currentChannelId();
+                const k = uidSidKeys(ch);
+                localStorage.setItem(k.uid, $("uid").value.trim());
+                localStorage.setItem(k.sid, $("sid").value.trim());
             }
 
             function loadMemIds() {
-                let uid = localStorage.getItem(LS_UID) || "";
-                let sid = localStorage.getItem(LS_SID) || "";
+                const ch = activeChannel || currentChannelId();
+                const k = uidSidKeys(ch);
+                let uid = localStorage.getItem(k.uid) || "";
+                let sid = localStorage.getItem(k.sid) || "";
                 if (!uid) uid = newMemId("user-");
                 if (!sid) sid = newMemId("sess-");
                 $("uid").value = uid;
@@ -2076,10 +2381,16 @@
             loadMemIds();
 
             $("clearConvo").addEventListener("click", async () => {
-                if (!confirm("대화 내용만 초기화할까요?\n(서버 기억 U_ID/S_ID는 유지됩니다)"))
+                if (!confirm("이 화면의 대화 내용만 초기화할까요?\n(서버 기억 U_ID/S_ID는 유지됩니다)"))
                     return;
+                const ch = activeChannel || currentChannelId();
+                channelItems = [];
+                saveChannelItems(ch, []);
                 try {
-                    await fetch("/api/history", { method: "DELETE" });
+                    await fetch(
+                        "/api/history?channel=" + encodeURIComponent(ch),
+                        { method: "DELETE" },
+                    );
                 } catch {}
                 resetConvoUi();
             });
@@ -2102,12 +2413,18 @@
             $("clearAll").addEventListener("click", async () => {
                 if (
                     !confirm(
-                        "대화 내용과 서버 기억을 모두 초기화할까요?",
+                        "이 화면의 대화 내용과 서버 기억을 모두 초기화할까요?",
                     )
                 )
                     return;
+                const ch = activeChannel || currentChannelId();
+                channelItems = [];
+                saveChannelItems(ch, []);
                 try {
-                    await fetch("/api/history", { method: "DELETE" });
+                    await fetch(
+                        "/api/history?channel=" + encodeURIComponent(ch),
+                        { method: "DELETE" },
+                    );
                 } catch {}
                 try {
                     await clearServerMemory();
@@ -2443,11 +2760,276 @@
                 scrollDown();
             }
 
+            const LS_LEFT = "neutda.console.leftMode";
+            const LS_ASK_KEY = "neutda.console.apiKeyId";
+            let apiKeysCache = [];
+            let collectionsCache = [];
+            let rulesCache = [];
+
+            function isApiKeyMode() {
+                return document.body.classList.contains("mode-apikey");
+            }
+
+            function knOf(k) {
+                return (
+                    k?.knowledge || {
+                        collectionIds: [],
+                        mode: "strict",
+                        topK: 4,
+                    }
+                );
+            }
+
+            function renderAskKeyInfo() {
+                const pane = $("askKeyInfo");
+                const id = $("askKey").value;
+                const key = apiKeysCache.find((k) => k.id === id);
+                if (!key) {
+                    pane.innerHTML =
+                        '<div class="ask-empty">키를 선택하면 허용 티어·기초지식 바인딩이 표시됩니다.</div>';
+                    const wrap0 = $("askCustomWrap");
+                    if (wrap0) wrap0.hidden = true;
+                    return;
+                }
+                const kn = knOf(key);
+                const ru = key.rules || { ruleIds: [] };
+                const bound = kn.collectionIds
+                    .map((cid) => collectionsCache.find((c) => c.id === cid))
+                    .filter(Boolean);
+                const boundRules = (ru.ruleIds || [])
+                    .map((rid) => rulesCache.find((r) => r.id === rid))
+                    .filter(Boolean);
+                const chips = bound.length
+                    ? bound
+                          .map(
+                              (c) =>
+                                  `<span class="ask-chip">${esc(c.name)} · ${c.docCount}건</span>`,
+                          )
+                          .join("")
+                    : '<span style="color:var(--muted)">미적용 (일반 답변)</span>';
+                const ruleChips = boundRules.length
+                    ? boundRules
+                          .map(
+                              (r) =>
+                                  `<span class="ask-chip">${esc(r.name)} · ${(r.keywords || []).slice(0, 2).join(", ")}</span>`,
+                          )
+                          .join("")
+                    : '<span style="color:var(--muted)">미적용</span>';
+                const customOn = key.rules?.allowCustom === true;
+                const wrap = $("askCustomWrap");
+                if (wrap) wrap.hidden = !customOn;
+                pane.innerHTML = `
+                    <div class="ask-card">
+                        <div class="row"><span class="k">이름</span><span class="v">${esc(key.name) || "(무명)"}</span></div>
+                        <div class="row"><span class="k">키</span><span class="v" style="font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--accent)">${esc(key.keyMasked)}</span></div>
+                        <div class="row"><span class="k">상태</span><span class="v">${key.enabled ? "활성" : "비활성"}</span></div>
+                        <div class="row"><span class="k">허용 티어</span><span class="v">${esc((key.allowedTiers || []).join(", ") || "–")}</span></div>
+                        <div class="row"><span class="k">기초지식</span><span class="v">${chips}</span></div>
+                        <div class="row"><span class="k">JSON 결과</span><span class="v">${ruleChips}</span></div>
+                        <div class="row"><span class="k">호출자 JSON</span><span class="v">${customOn ? "수락" : "거절"}</span></div>
+                        <div class="row"><span class="k">모드</span><span class="v">${kn.mode === "augment" ? "보강 (augment)" : "문서만 (strict)"}</span></div>
+                        <div class="row"><span class="k">topK</span><span class="v">${esc(kn.topK)}</span></div>
+                    </div>
+                `;
+            }
+
+            async function loadApiKeys() {
+                try {
+                    const [kd, cd, rd] = await Promise.all([
+                        fetch("/api/keys").then((r) => r.json()),
+                        fetch("/api/knowledge/collections").then((r) =>
+                            r.json(),
+                        ),
+                        fetch("/api/rules").then((r) => r.json()),
+                    ]);
+                    apiKeysCache = kd.keys || [];
+                    collectionsCache = cd.collections || [];
+                    rulesCache = rd.rules || [];
+                } catch {
+                    apiKeysCache = [];
+                    collectionsCache = [];
+                    rulesCache = [];
+                }
+                const sel = $("askKey");
+                const saved = localStorage.getItem(LS_ASK_KEY) || "";
+                const pick =
+                    (saved && apiKeysCache.some((k) => k.id === saved)
+                        ? saved
+                        : "") ||
+                    (apiKeysCache[0] && apiKeysCache[0].id) ||
+                    "";
+                sel.innerHTML = apiKeysCache.length
+                    ? `<option value="">키를 선택하세요</option>` +
+                      apiKeysCache
+                          .map(
+                              (k) =>
+                                  `<option value="${esc(k.id)}" ${k.id === pick ? "selected" : ""}>${esc(k.name) || "(무명)"} · ${esc(k.keyMasked)}${k.enabled ? "" : " (비활성)"}</option>`,
+                          )
+                          .join("")
+                    : `<option value="">발급된 키가 없습니다</option>`;
+                if (pick) {
+                    sel.value = pick;
+                    localStorage.setItem(LS_ASK_KEY, pick);
+                }
+                renderAskKeyInfo();
+            }
+
+            function setLeftMode(mode) {
+                const api = mode === "apikey";
+                document.body.classList.toggle("mode-apikey", api);
+                $("leftConsole").hidden = api;
+                $("leftApiKey").hidden = !api;
+                document.querySelectorAll(".left-tab").forEach((b) => {
+                    b.classList.toggle("on", b.dataset.left === mode);
+                });
+                const pill = $("chatModePill");
+                if (api) {
+                    const key = apiKeysCache.find(
+                        (k) => k.id === $("askKey").value,
+                    );
+                    pill.textContent = key
+                        ? `API 키 · ${key.name || "무명"}`
+                        : "API 키";
+                    pill.classList.add("ask");
+                } else {
+                    pill.textContent = "콘솔";
+                    pill.classList.remove("ask");
+                }
+                localStorage.setItem(LS_LEFT, api ? "apikey" : "console");
+                switchChannel(currentChannelId());
+            }
+
+            document.querySelector(".left-tabs").addEventListener("click", (e) => {
+                const btn = e.target.closest(".left-tab");
+                if (!btn) return;
+                setLeftMode(btn.dataset.left);
+            });
+            $("askKey").addEventListener("change", () => {
+                localStorage.setItem(LS_ASK_KEY, $("askKey").value);
+                renderAskKeyInfo();
+                if (isApiKeyMode()) setLeftMode("apikey");
+            });
+            // 실제 토큰 사용 옵션 상태 복원·저장
+            const LS_ASK_USAGE = "neutda.console.realUsage";
+            if ($("askRealUsage")) {
+                $("askRealUsage").checked =
+                    localStorage.getItem(LS_ASK_USAGE) === "1";
+                $("askRealUsage").addEventListener("change", (e) => {
+                    localStorage.setItem(LS_ASK_USAGE, e.target.checked ? "1" : "0");
+                });
+            }
+
+            async function sendApiAsk(el, user, t0) {
+                const key = apiKeysCache.find((k) => k.id === $("askKey").value);
+                if (!key) {
+                    fillError(el, "API 키를 선택하세요.");
+                    return;
+                }
+                if (!key.enabled) {
+                    fillError(el, "비활성 키입니다. 외부 API 관리에서 켜 주세요.");
+                    return;
+                }
+                const params = new URLSearchParams({
+                    key: key.key,
+                    q: user,
+                    WAIT: "Y",
+                    ref: "console-" + Date.now().toString(36),
+                });
+                // 실제 토큰 사용 옵션: 해제 시 USAGE=N(집계·한도 제외)
+                params.set(
+                    "USAGE",
+                    $("askRealUsage") && $("askRealUsage").checked ? "Y" : "N",
+                );
+                if ($("memory").checked) {
+                    const uid = $("uid").value.trim();
+                    const sid = $("sid").value.trim();
+                    if (uid) params.set("U_ID", uid);
+                    if (sid) params.set("S_ID", sid);
+                }
+                if (key.rules?.allowCustom === true) {
+                    const schemaEl = $("askSchema");
+                    const schemaRaw = schemaEl && schemaEl.value.trim();
+                    if (schemaRaw) params.set("schema", schemaRaw);
+                }
+                // 긴 입력(코드리뷰 등)은 URL 한도를 넘겨 Header overflow 가 나므로
+                // POST body 로 보낸다. (짧은 요청도 동일 처리)
+                const r = await fetch("/api/ask", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(Object.fromEntries(params)),
+                });
+                const j = await r.json().catch(() => ({}));
+                const ms = Math.round(performance.now() - t0);
+                if (!r.ok || j.status === "error") {
+                    fillError(
+                        el,
+                        j.error || j.message || `HTTP ${r.status}`,
+                    );
+                    return;
+                }
+                fillAssistant(
+                    el,
+                    {
+                        answer: j.answer,
+                        reasoning: j.reasoning,
+                        model: j.model,
+                        tier: j.tier,
+                        device: j.device,
+                        tokens: j.tokens,
+                        rag: j.rag,
+                        strict: j.strict,
+                        sources: j.sources,
+                        data: j.data,
+                        rule: j.rule,
+                        dryRun: j.dryRun,
+                        counted: !j.dryRun && j.tokens != null,
+                    },
+                    ms,
+                );
+                convo.push({ role: "user", content: user });
+                convo.push({
+                    role: "assistant",
+                    content: j.answer || "",
+                });
+                rememberTurn(user, {
+                    answer: j.answer,
+                    reasoning: j.reasoning,
+                    model: j.model,
+                    tier: j.tier,
+                    device: j.device,
+                    tokens: j.tokens,
+                    ms,
+                    dryRun: j.dryRun,
+                    counted: !j.dryRun && j.tokens != null,
+                    rag: j.rag,
+                    strict: j.strict,
+                    sources: j.sources,
+                    mode: "ask",
+                });
+            }
+
             $("send").addEventListener("click", async () => {
                 const btn = $("send");
                 const user = $("user").value.trim();
                 if (!user) {
                     alert("ROLE_USER 는 필수입니다.");
+                    return;
+                }
+
+                if (isApiKeyMode()) {
+                    addUser(user, $("content").value.trim());
+                    const el = addAssistant();
+                    btn.disabled = true;
+                    $("user").value = "";
+                    $("user").style.height = "auto";
+                    const t0 = performance.now();
+                    try {
+                        await sendApiAsk(el, user, t0);
+                    } catch (err) {
+                        fillError(el, err.message);
+                    } finally {
+                        btn.disabled = false;
+                    }
                     return;
                 }
 
@@ -2501,6 +3083,7 @@
                                 role: "assistant",
                                 content: j.answer || "",
                             });
+                            rememberTurn(user, j);
                         }
                     }
                 } catch (err) {
@@ -2780,9 +3363,35 @@
                         role: "assistant",
                         content: done.answer || answer,
                     });
+                    rememberTurn(user, {
+                        answer: done.answer || answer,
+                        reasoning: done.reasoning,
+                        model: done.model,
+                        tier: done.tier,
+                        device: done.device,
+                        alias: done.alias || meta.alias,
+                        difficulty: done.difficulty,
+                        routeReason: done.routeReason || meta.reason,
+                        deviceReason: meta.deviceReason,
+                        tokens: done.tokens,
+                        usage: done.usage,
+                        ms,
+                        mode: done.mode || meta.mode,
+                        routerBackend: done.routerBackend || meta.routerBackend,
+                        routerTier: done.routerTier || meta.routerTier,
+                        routerAlias: done.routerAlias || meta.routerAlias,
+                        routerDevice: done.routerDevice || meta.routerDevice,
+                        routerModel: done.routerModel || meta.routerModel,
+                        workflowSteps: done.workflowSteps,
+                        workflowTrace: done.workflowTrace,
+                        rag: done.rag || meta.rag || Boolean(body.RAG),
+                        strict: done.strict ?? meta.strict ?? body.strict,
+                        sources: done.sources || meta.sources,
+                    });
                 } else if (answer) {
                     convo.push({ role: "user", content: user });
                     convo.push({ role: "assistant", content: answer });
+                    rememberTurn(user, { answer });
                 }
             }
 
@@ -2824,6 +3433,7 @@
                     fillRag(el, j, ms);
                     convo.push({ role: "user", content: user });
                     convo.push({ role: "assistant", content: j.answer || "" });
+                    rememberTurn(user, j, { rag: true });
                     return;
                 }
 
@@ -2877,9 +3487,11 @@
                         role: "assistant",
                         content: done.answer || answer,
                     });
+                    rememberTurn(user, done, { rag: true, answer: done.answer || answer });
                 } else if (answer) {
                     convo.push({ role: "user", content: user });
                     convo.push({ role: "assistant", content: answer });
+                    rememberTurn(user, { answer }, { rag: true });
                 }
             }
 
@@ -2899,7 +3511,13 @@
                     : '<span class="tier-badge tier-medium">문서기반</span>';
                 const metaParts = [
                     data.model ? `model: ${esc(data.model)}` : null,
+                    data.tokens != null ? `tokens: ${data.tokens}` : null,
                     ms != null ? `${ms} ms` : null,
+                    data.dryRun
+                        ? "🧪 사용량 미집계"
+                        : data.counted
+                          ? "✅ 사용량 집계"
+                          : null,
                 ].filter(Boolean);
                 const cleanAnswer = (data.answer || "(빈 응답)")
                     .replace(/\s*\[출처[^\]]*\]/g, "")
@@ -3036,6 +3654,10 @@
             });
 
             loadRagDocs();
+            loadApiKeys().then(() => {
+                const saved = localStorage.getItem(LS_LEFT);
+                setLeftMode(saved === "apikey" ? "apikey" : "console");
+            });
         </script>
         <script src="/nav.js"></script>
     </body>

@@ -1,4 +1,4 @@
-import { appendFile, readFile, mkdir, rm } from "node:fs/promises";
+import { appendFile, readFile, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,14 +10,22 @@ async function ensureDir() {
   await mkdir(DATA_DIR, { recursive: true });
 }
 
+function channelOf(entry) {
+  const c = entry && typeof entry.channel === "string" ? entry.channel.trim() : "";
+  return c || "console";
+}
+
 /** 대화 1건을 history.jsonl 에 한 줄(JSON)로 추가 */
 export async function appendHistory(entry) {
   await ensureDir();
-  await appendFile(HISTORY_FILE, JSON.stringify(entry) + "\n", "utf8");
+  const row =
+    entry && typeof entry === "object"
+      ? { ...entry, channel: channelOf(entry) }
+      : entry;
+  await appendFile(HISTORY_FILE, JSON.stringify(row) + "\n", "utf8");
 }
 
-/** 저장된 대화 내역을 배열로 반환 (limit 지정 시 최근 limit 건) */
-export async function readHistory(limit) {
+async function readAll() {
   try {
     const text = await readFile(HISTORY_FILE, "utf8");
     const lines = text.split("\n").filter((l) => l.trim() !== "");
@@ -29,14 +37,37 @@ export async function readHistory(limit) {
         // 손상된 줄은 건너뜀
       }
     }
-    return limit && limit > 0 ? items.slice(-limit) : items;
+    return items;
   } catch (err) {
     if (err.code === "ENOENT") return [];
     throw err;
   }
 }
 
-/** 대화 내역 전체 삭제 */
-export async function clearHistory() {
-  await rm(HISTORY_FILE, { force: true });
+/** 저장된 대화 내역. channel 을 주면 그 채널만 (console | ask:<keyId>). */
+export async function readHistory(limit, channel) {
+  let items = await readAll();
+  if (channel) {
+    items = items.filter((it) => channelOf(it) === channel);
+  }
+  return limit && limit > 0 ? items.slice(-limit) : items;
+}
+
+/** 대화 내역 삭제. channel 생략 시 전체, 있으면 해당 채널만. */
+export async function clearHistory(channel) {
+  if (!channel) {
+    await rm(HISTORY_FILE, { force: true });
+    return;
+  }
+  const kept = (await readAll()).filter((it) => channelOf(it) !== channel);
+  if (!kept.length) {
+    await rm(HISTORY_FILE, { force: true });
+    return;
+  }
+  await ensureDir();
+  await writeFile(
+    HISTORY_FILE,
+    kept.map((it) => JSON.stringify(it) + "\n").join(""),
+    "utf8",
+  );
 }

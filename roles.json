@@ -20,6 +20,13 @@
             "description": "긴 문서·회의록 압축, 핵심만 빠짐없이. 맵리듀스·파이프라인 extract 단계에 선호됩니다.",
             "createdAt": "2026-07-29T01:42:00.000Z",
             "updatedAt": null
+        },
+        {
+            "id": "r_mss8wsbnnzk3wz",
+            "name": "일정등록",
+            "description": "만약 내용에 일정등록 내용이 있다면 간단한 json만 return 한다. 다른 내용은 return 하지 않는데. { title:'', desc:'' }",
+            "createdAt": "2026-08-14T01:05:35.075Z",
+            "updatedAt": null
         }
     ]
 }

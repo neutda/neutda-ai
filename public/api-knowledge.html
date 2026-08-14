@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>neutda-ai · API별 기초지식 설정</title>
+        <style>
+            :root {
+                --bg: #0f1117;
+                --panel: #171a23;
+                --border: #272b38;
+                --text: #e7e9ee;
+                --muted: #9aa3b2;
+                --accent: #6c8cff;
+                --accent-2: #4f6bd6;
+                --ok: #3fb950;
+                --err: #f85149;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                font-family:
+                    ui-sans-serif, system-ui, "Segoe UI", "Malgun Gothic",
+                    sans-serif;
+                background: var(--bg);
+                color: var(--text);
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap {
+                width: 100%;
+                flex: 1;
+                min-height: 0;
+                display: flex;
+                flex-direction: column;
+            }
+            .wrap > header {
+                flex: 0 0 auto;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 14px 20px;
+                border-bottom: 1px solid var(--border);
+            }
+            .wrap > header h1 {
+                font-size: 17px;
+                margin: 0;
+            }
+            .app-main {
+                flex: 1;
+                min-height: 0;
+                overflow: auto;
+                padding: 16px 20px 28px;
+            }
+            p.desc {
+                margin: 0 0 16px;
+                color: var(--muted);
+                font-size: 13px;
+                line-height: 1.55;
+            }
+            p.desc a {
+                color: var(--accent);
+                text-decoration: none;
+            }
+            p.desc a:hover {
+                text-decoration: underline;
+            }
+            p.desc code {
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 12px;
+                background: #12151d;
+                padding: 1px 6px;
+                border-radius: 4px;
+            }
+            button {
+                background: var(--accent-2);
+                color: #fff;
+                border: 0;
+                border-radius: 8px;
+                padding: 9px 14px;
+                font-size: 13px;
+                font-weight: 600;
+                font-family: inherit;
+                cursor: pointer;
+            }
+            button:hover {
+                background: var(--accent);
+            }
+            button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            button.sm {
+                padding: 5px 9px;
+                font-size: 12px;
+            }
+            button.secondary {
+                background: transparent;
+                color: var(--text);
+                border: 1px solid var(--border);
+            }
+            button.secondary:hover {
+                background: #1c2030;
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .bind {
+                display: flex;
+                gap: 16px;
+                align-items: stretch;
+                min-height: 440px;
+            }
+            .keys {
+                flex: 0 0 280px;
+                display: flex;
+                flex-direction: column;
+                min-height: 0;
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                overflow: hidden;
+            }
+            .keys .hd {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 10px 12px;
+                border-bottom: 1px solid var(--border);
+                font-size: 12px;
+                font-weight: 700;
+                color: var(--muted);
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .keys .list {
+                overflow: auto;
+                padding: 6px;
+                flex: 1;
+            }
+            .key-item {
+                padding: 10px;
+                border-radius: 8px;
+                border: 1px solid transparent;
+                cursor: pointer;
+            }
+            .key-item:hover {
+                background: #12151d;
+            }
+            .key-item.active {
+                background: rgba(108, 140, 255, 0.16);
+                border-color: rgba(108, 140, 255, 0.4);
+            }
+            .key-item .nm {
+                font-size: 13px;
+                font-weight: 600;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .key-item .meta {
+                margin-top: 4px;
+                font-size: 11px;
+                color: var(--muted);
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+            .badge {
+                display: inline-block;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 8px;
+                border-radius: 999px;
+            }
+            .b-on {
+                background: rgba(63, 185, 80, 0.18);
+                color: var(--ok);
+            }
+            .b-off {
+                background: rgba(154, 163, 178, 0.18);
+                color: var(--muted);
+            }
+            .chip {
+                display: inline-block;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 2px 8px;
+                border-radius: 999px;
+                background: rgba(108, 140, 255, 0.16);
+                color: #a9c0ff;
+            }
+            .editor {
+                flex: 1;
+                min-width: 0;
+                background: var(--panel);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 18px 20px;
+            }
+            .editor h2 {
+                margin: 0 0 4px;
+                font-size: 16px;
+            }
+            .editor .keytext {
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 12px;
+                color: var(--accent);
+            }
+            .section {
+                margin-top: 18px;
+            }
+            .section h3 {
+                margin: 0 0 8px;
+                font-size: 13px;
+            }
+            .hint {
+                color: var(--muted);
+                font-size: 12.5px;
+                margin: 0 0 10px;
+                line-height: 1.5;
+            }
+            .col-list {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+            .col-opt {
+                display: flex;
+                align-items: flex-start;
+                gap: 10px;
+                padding: 10px 12px;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                cursor: pointer;
+                background: #12151d;
+            }
+            .col-opt:hover {
+                border-color: var(--accent);
+            }
+            .col-opt input {
+                margin-top: 3px;
+            }
+            .col-opt .cnm {
+                font-size: 13px;
+                font-weight: 600;
+            }
+            .col-opt .cdsc {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 2px;
+            }
+            .modes {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .modes label {
+                display: flex;
+                align-items: flex-start;
+                gap: 10px;
+                padding: 10px 12px;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                cursor: pointer;
+                background: #12151d;
+                font-size: 13px;
+            }
+            .modes label:hover {
+                border-color: var(--accent);
+            }
+            .modes input {
+                margin-top: 3px;
+            }
+            .modes .md {
+                font-weight: 600;
+            }
+            .modes .mh {
+                color: var(--muted);
+                font-size: 12px;
+                margin-top: 2px;
+                font-weight: 400;
+            }
+            .topk {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            select {
+                background: #0d0f15;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                color: var(--text);
+                padding: 8px 10px;
+                font-size: 13px;
+                font-family: inherit;
+            }
+            .actions {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-top: 22px;
+            }
+            .msg {
+                font-size: 12px;
+                min-height: 14px;
+            }
+            .msg.err {
+                color: var(--err);
+            }
+            .msg.ok {
+                color: var(--ok);
+            }
+            .empty {
+                padding: 22px;
+                text-align: center;
+                color: var(--muted);
+                font-size: 13px;
+                line-height: 1.6;
+            }
+            .empty a {
+                color: var(--accent);
+                text-decoration: none;
+            }
+            .muted {
+                color: var(--muted);
+            }
+            @media (max-width: 900px) {
+                .bind {
+                    flex-direction: column;
+                }
+                .keys {
+                    flex: 0 0 auto;
+                    max-height: 220px;
+                }
+            }
+        </style>
+        <link rel="stylesheet" href="/nav.css" />
+    </head>
+    <body>
+        <div class="wrap">
+            <header>
+                <h1>API별 기초지식 설정</h1>
+            </header>
+            <div class="app-main">
+                <p class="desc">
+                    API 키마다 참조할 지식셋을 고릅니다. 지식셋이 입혀진 키는
+                    <code>/api/ask</code> 호출 시 자동으로 그 문서만 검색합니다.
+                    지식셋 문서 추가는
+                    <a href="/knowledge.html">기초 지식 관리</a>에서 합니다.
+                </p>
+                <div class="bind">
+                    <aside class="keys">
+                        <div class="hd"><span>API 키</span></div>
+                        <div class="list" id="keyList">
+                            <div class="empty">불러오는 중…</div>
+                        </div>
+                    </aside>
+                    <section class="editor" id="editor">
+                        <div class="empty">왼쪽에서 API 키를 선택하세요.</div>
+                    </section>
+                </div>
+            </div>
+        </div>
+        <script>
+            const $ = (id) => document.getElementById(id);
+            const esc = (s) =>
+                String(s ?? "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;");
+
+            let keys = [];
+            let collections = [];
+            let selectedId = null;
+            let dirty = false;
+
+            function knOf(k) {
+                return k?.knowledge || { collectionIds: [], mode: "strict", topK: 4 };
+            }
+
+            async function loadAll() {
+                const [kd, cd] = await Promise.all([
+                    fetch("/api/keys").then((r) => r.json()),
+                    fetch("/api/knowledge/collections").then((r) => r.json()),
+                ]);
+                keys = kd.keys || [];
+                collections = cd.collections || [];
+                if (selectedId && !keys.some((k) => k.id === selectedId))
+                    selectedId = null;
+                if (!selectedId && keys.length) selectedId = keys[0].id;
+                renderKeyList();
+                renderEditor();
+            }
+
+            function renderKeyList() {
+                const el = $("keyList");
+                if (!keys.length) {
+                    el.innerHTML =
+                        '<div class="empty">발급된 키가 없습니다.<br /><a href="/api-manage.html">외부 API 관리</a>에서 키를 발급하세요.</div>';
+                    return;
+                }
+                el.innerHTML = keys
+                    .map((k) => {
+                        const n = knOf(k).collectionIds.length;
+                        return `<div class="key-item ${k.id === selectedId ? "active" : ""}" data-id="${esc(k.id)}">
+                            <div class="nm">${esc(k.name) || '<span class="muted">(무명)</span>'}</div>
+                            <div class="meta">
+                                <span class="badge ${k.enabled ? "b-on" : "b-off"}">${k.enabled ? "활성" : "비활성"}</span>
+                                <span>${n ? `지식셋 ${n}개` : "미적용"}</span>
+                            </div>
+                        </div>`;
+                    })
+                    .join("");
+            }
+
+            function renderEditor() {
+                const pane = $("editor");
+                if (!selectedId) {
+                    pane.innerHTML =
+                        '<div class="empty">왼쪽에서 API 키를 선택하세요.</div>';
+                    return;
+                }
+                const key = keys.find((k) => k.id === selectedId);
+                if (!key) return;
+                const kn = knOf(key);
+                const bound = new Set(kn.collectionIds);
+
+                const colHtml = collections.length
+                    ? collections
+                          .map(
+                              (c) => `<label class="col-opt">
+                            <input type="checkbox" class="fCol" value="${esc(c.id)}" ${bound.has(c.id) ? "checked" : ""} />
+                            <div>
+                                <div class="cnm">${esc(c.name)} <span class="muted">· ${c.docCount}건</span></div>
+                                ${c.description ? `<div class="cdsc">${esc(c.description)}</div>` : ""}
+                            </div>
+                        </label>`,
+                          )
+                          .join("")
+                    : `<div class="empty">지식셋이 없습니다.<br /><a href="/knowledge.html">기초 지식 관리</a>에서 먼저 만드세요.</div>`;
+
+                pane.innerHTML = `
+                    <h2>${esc(key.name) || "(무명)"}</h2>
+                    <div class="keytext">${esc(key.keyMasked)}</div>
+                    <div class="section">
+                        <h3>지식셋 구독</h3>
+                        <p class="hint">여러 개를 고를 수 있습니다. 비우면 이 키는 기초지식 없이 일반 답변만 합니다.</p>
+                        <div class="col-list">${colHtml}</div>
+                    </div>
+                    <div class="section">
+                        <h3>근거 사용 모드</h3>
+                        <div class="modes">
+                            <label>
+                                <input type="radio" name="mode" value="strict" ${kn.mode !== "augment" ? "checked" : ""} />
+                                <div>
+                                    <div class="md">문서만 (strict)</div>
+                                    <div class="mh">선택한 지식셋에 없는 내용은 “문서 내용에 없습니다”로 답합니다. 권장.</div>
+                                </div>
+                            </label>
+                            <label>
+                                <input type="radio" name="mode" value="augment" ${kn.mode === "augment" ? "checked" : ""} />
+                                <div>
+                                    <div class="md">보강 (augment)</div>
+                                    <div class="mh">문서를 우선 참고하되, 없는 내용은 모델 일반 지식으로 채울 수 있습니다.</div>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="section">
+                        <h3>검색 건수 (topK)</h3>
+                        <p class="hint">질문당 프롬프트에 넣을 문서 조각 수입니다. 많을수록 근거는 늘지만 토큰을 더 씁니다.</p>
+                        <div class="topk">
+                            <select id="fTopK">
+                                ${[1, 2, 3, 4, 5, 6, 7, 8]
+                                    .map(
+                                        (n) =>
+                                            `<option value="${n}" ${Number(kn.topK) === n ? "selected" : ""}>${n}</option>`,
+                                    )
+                                    .join("")}
+                            </select>
+                            <span class="muted">기본 4</span>
+                        </div>
+                    </div>
+                    <div class="actions">
+                        <button id="saveBtn">저장</button>
+                        <div class="msg" id="saveMsg"></div>
+                    </div>
+                `;
+                dirty = false;
+                pane.querySelectorAll("input, select").forEach((el) => {
+                    el.addEventListener("change", () => {
+                        dirty = true;
+                        const msg = $("saveMsg");
+                        if (msg) {
+                            msg.className = "msg";
+                            msg.textContent = "";
+                        }
+                    });
+                });
+                $("saveBtn").onclick = saveBinding;
+            }
+
+            function readForm() {
+                const collectionIds = [...document.querySelectorAll(".fCol")]
+                    .filter((c) => c.checked)
+                    .map((c) => c.value);
+                const modeEl = document.querySelector('input[name="mode"]:checked');
+                return {
+                    collectionIds,
+                    mode: modeEl ? modeEl.value : "strict",
+                    topK: Number($("fTopK").value) || 4,
+                };
+            }
+
+            async function saveBinding() {
+                const key = keys.find((k) => k.id === selectedId);
+                if (!key) return;
+                const knowledge = readForm();
+                const btn = $("saveBtn");
+                const msg = $("saveMsg");
+                btn.disabled = true;
+                msg.className = "msg";
+                msg.textContent = "저장 중…";
+                try {
+                    const r = await fetch(`/api/keys/${key.id}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ knowledge }),
+                    });
+                    const d = await r.json();
+                    if (!r.ok) throw new Error(d.error || "저장 실패");
+                    const i = keys.findIndex((k) => k.id === key.id);
+                    if (i >= 0 && d.key) keys[i] = d.key;
+                    dirty = false;
+                    renderKeyList();
+                    msg.className = "msg ok";
+                    const n = knowledge.collectionIds.length;
+                    msg.textContent = n
+                        ? `저장됨 · 지식셋 ${n}개 적용`
+                        : "저장됨 · 기초지식 미적용";
+                } catch (e) {
+                    msg.className = "msg err";
+                    msg.textContent = e.message;
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            $("keyList").addEventListener("click", (e) => {
+                const item = e.target.closest(".key-item");
+                if (!item) return;
+                if (item.dataset.id === selectedId) return;
+                if (dirty && !confirm("저장하지 않은 변경이 있습니다. 이동할까요?"))
+                    return;
+                selectedId = item.dataset.id;
+                renderKeyList();
+                renderEditor();
+            });
+
+            loadAll();
+        </script>
+        <script src="/nav.js"></script>
+        <script src="/subnav.js"></script>
+    </body>
+</html>

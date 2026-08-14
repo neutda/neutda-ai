@@ -1188,7 +1188,7 @@ function buildStepMessages({
           "너는 사용자 질문에 직접 답하는 어시스턴트다.",
           sysUser ? `사용자 지시: ${step.instruction}` : `지시: ${step.instruction}`,
           historyBlock
-            ? "이전 대화가 있으면 맥락을 이어서 답하라. 기억 못한다고 말하지 마라."
+            ? "지금 사용자 질문이 과제다. 이전 대화는 참고만 하라. 지금 질문이 이전 주제와 무관하면 이전 주제를 이어가지 마라. 인사·잡담이면 짧게 그에 답하라."
             : "",
           hasRag ? ragSystemAddon(ragState.strict !== false, hasVision, userQ) : "",
           hasMemory
@@ -1208,7 +1208,7 @@ function buildStepMessages({
             : "",
           "목표는 원본 사용자 요청에 답하는 것이다. 질문에 붙은 코드/문서는 분석·리뷰 대상일 뿐, 그 함수/로직을 실행하거나 JSON 결과를 흉내 내지 마라.",
           historyBlock
-            ? "이전 대화가 있으면 이어서 답하라. 맥락을 모른다고 말하지 마라."
+            ? "지금 사용자 질문이 과제다. 이전 대화는 참고만 하라. 지금 질문이 이전 주제와 무관하면 이전 주제를 이어가지 마라."
             : "",
           hasRag ? ragSystemAddon(ragState.strict !== false, hasVision, userQ) : "",
           hasMemory

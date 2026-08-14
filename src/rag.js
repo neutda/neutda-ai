@@ -143,6 +143,7 @@ async function persist() {
             text: c.text,
             kind: c.kind || "text",
             imageFile: c.imageFile || null,
+            collectionId: c.collectionId ?? null,
             embedding: Array.isArray(c.embedding) ? c.embedding : undefined,
         })),
     };
@@ -218,18 +219,42 @@ export async function load() {
 }
 
 // ---- 공개 API -----------------------------------------------------------
-export function listDocuments() {
+/**
+ * 문서 목록.
+ * collectionId 생략/null = 테스트 콘솔(전역)만.
+ * 문자열 = 해당 지식셋만. 콘솔과 지식셋은 절대 섞지 않는다.
+ */
+export function listDocuments(collectionId) {
+    const scope = collectionId ?? null;
     return docs
+        .filter((d) => (d.collectionId ?? null) === scope)
         .map((d) => ({ ...d }))
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
-export function stats() {
+export function getDocument(id) {
+    return docs.find((d) => d.id === id) || null;
+}
+
+/** 지식셋 스코프 필터 — ids 없으면 전역(콘솔) 청크만. */
+function inCollections(c, ids) {
+    if (!Array.isArray(ids) || !ids.length) {
+        return (c.collectionId ?? null) === null;
+    }
+    return ids.includes(c.collectionId ?? null);
+}
+
+export function stats(collectionId) {
+    const scope = collectionId === undefined ? null : collectionId;
+    const ds = docs.filter((d) => (d.collectionId ?? null) === scope);
+    const cs = chunks.filter((c) => (c.collectionId ?? null) === scope);
+    let total = 0;
+    for (const c of cs) total += c.len || 0;
     return {
-        documents: docs.length,
-        chunks: chunks.length,
+        documents: ds.length,
+        chunks: cs.length,
         terms: df.size,
-        avgChunkTokens: Math.round(avgdl),
+        avgChunkTokens: cs.length ? Math.round(total / cs.length) : 0,
     };
 }
 
@@ -245,6 +270,8 @@ export async function addDocument(name, text, opts = {}) {
     const createdAt = new Date().toISOString();
     const kind = opts.kind === "image" ? "image" : "text";
     const imageFile = opts.imageFile || null;
+    // 지식셋(컬렉션) 스코프. null = 전역(기존 콘솔/채팅 문서)
+    const collectionId = opts.collectionId ?? null;
 
     parts.forEach((chunkText, idx) => {
         chunks.push({
@@ -255,6 +282,7 @@ export async function addDocument(name, text, opts = {}) {
             text: chunkText,
             kind,
             imageFile: idx === 0 ? imageFile : null,
+            collectionId,
         });
     });
     docs.push({
@@ -264,6 +292,7 @@ export async function addDocument(name, text, opts = {}) {
         chunkCount: parts.length,
         kind,
         imageFile,
+        collectionId,
     });
 
     rebuildStats();
@@ -279,14 +308,18 @@ export async function addDocument(name, text, opts = {}) {
 }
 
 /** 이미지 바이너리 저장 + 검색용 텍스트(비전 추출)로 문서 등록 */
-export async function addImageDocument(name, buffer, ext, description) {
+export async function addImageDocument(name, buffer, ext, description, opts = {}) {
     await ensureDir();
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
     const docName = (name && String(name).trim()) || `이미지-${id}`;
     const safeExt = IMAGE_EXT.has(ext.toLowerCase()) ? ext.toLowerCase() : ".png";
     const imageFile = `${id}${safeExt}`;
     await writeFile(imagePath(imageFile), buffer);
-    return addDocument(docName, description, { kind: "image", imageFile });
+    return addDocument(docName, description, {
+        kind: "image",
+        imageFile,
+        collectionId: opts.collectionId ?? null,
+    });
 }
 
 /** 문서 부가정보(요약·예상 질문 등)를 갱신해 저장한다 */
@@ -299,9 +332,31 @@ export async function updateDocumentMeta(id, meta) {
     return true;
 }
 
-export async function deleteDocument(id) {
+/**
+ * 문서 삭제.
+ * opts.collectionId 를 주면 그 스코프의 문서만 지운다.
+ * (콘솔 삭제에 지식셋이 따라가지 않도록)
+ */
+export async function deleteDocument(id, opts = {}) {
     await load();
     const doc = docs.find((d) => d.id === id);
+    if (!doc) {
+        const err = new Error("문서를 찾을 수 없습니다.");
+        err.status = 404;
+        throw err;
+    }
+    if (Object.prototype.hasOwnProperty.call(opts, "collectionId")) {
+        const expected = opts.collectionId ?? null;
+        if ((doc.collectionId ?? null) !== expected) {
+            const err = new Error(
+                expected == null
+                    ? "지식셋 문서는 테스트 콘솔에서 삭제할 수 없습니다."
+                    : "테스트 콘솔 문서는 지식셋에서 삭제할 수 없습니다.",
+            );
+            err.status = 403;
+            throw err;
+        }
+    }
     const before = docs.length;
     docs = docs.filter((d) => d.id !== id);
     chunks = chunks.filter((c) => c.docId !== id);
@@ -328,14 +383,16 @@ function hitFrom(c, score, mode) {
 }
 
 // BM25 검색: 질의와 가장 관련성 높은 청크 topK 반환
-export function retrieve(query, k = config.rag.topK) {
+// opts.collectionIds 를 주면 해당 지식셋 청크만 대상으로 한다.
+export function retrieve(query, k = config.rag.topK, opts = {}) {
     if (!chunks.length) return [];
     const k1 = config.bm25.k1;
     const b = config.bm25.b;
     const N = chunks.length;
     const qTokens = [...new Set(tokenize(query))];
 
-    const scored = chunks.map((c) => {
+    const pool = chunks.filter((c) => inCollections(c, opts.collectionIds));
+    const scored = pool.map((c) => {
         let score = 0;
         for (const term of qTokens) {
             const tf = c.tokens.get(term);
@@ -359,20 +416,26 @@ export function retrieve(query, k = config.rag.topK) {
  * 임베딩이 충분히 준비된 청크만 의미 검색, 아니면 즉시 BM25.
  * 요청마다 전체 코퍼스 임베딩을 await 하지 않는다 (스트리밍 TTFT 보호).
  */
-export async function retrieveAsync(query, k = config.rag.topK) {
+export async function retrieveAsync(query, k = config.rag.topK, opts = {}) {
     await load();
     if (!chunks.length) return [];
-    const embedded = chunks.filter((c) => Array.isArray(c.embedding));
-    const coverage = chunks.length ? embedded.length / chunks.length : 0;
+    const pool = chunks.filter((c) => inCollections(c, opts.collectionIds));
+    if (!pool.length) return [];
+    const embedded = pool.filter((c) => Array.isArray(c.embedding));
+    const coverage = pool.length ? embedded.length / pool.length : 0;
 
     // 벡터 커버리지 낮으면 BM25 즉시.
     // 요청 경로에서 임베딩/워밍을 돌리지 않음 — 같은 GPU large 와 스트리밍이 경합함.
     if (!embedBatch || coverage < config.rag.vectorCoverageMin || !embedded.length) {
-        return retrieve(query, k);
+        return retrieve(query, k, opts);
     }
 
     try {
-        const qVecs = await embedBatch([String(query)]);
+        const qEmbed =
+            String(query).length > 360
+                ? String(query).slice(0, 360)
+                : String(query);
+        const qVecs = await embedBatch([qEmbed]);
         const qv = qVecs?.[0];
         if (Array.isArray(qv)) {
             const scored = embedded
@@ -382,9 +445,11 @@ export async function retrieveAsync(query, k = config.rag.topK) {
                 .slice(0, k)
                 .map((s) => hitFrom(s.c, s.score, "embedding"));
             if (scored.length) return scored;
+            // 임베딩은 돌았으나 유사도가 낮음 → 무관 질의. BM25 폴백하지 않음.
+            return [];
         }
     } catch {
         /* BM25 폴백 */
     }
-    return retrieve(query, k);
+    return retrieve(query, k, opts);
 }

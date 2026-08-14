@@ -23,14 +23,6 @@ import {
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const LONGDOC_DIR = path.join(ROOT, "data", "longdocs");
 
-/** 역할 관리의 «요약» 특기가 있으면 맵리듀스에서 선호 */
-function summarizeSkill() {
-  const hit = pool
-    .skillOptions()
-    .find((s) => /요약|summar/i.test(String(s?.skill ?? "")));
-  return hit?.skill ?? null;
-}
-
 function truncate(s, max) {
   const t = String(s ?? "");
   return t.length <= max ? t : t.slice(0, max) + "…";
@@ -152,7 +144,92 @@ export function chunkText(
   return chunks;
 }
 
-const MAP_SYSTEM = [
+const CODE_UNIT_RE =
+  /\n(?=(?:export\s+)?(?:async\s+)?(?:function\s+\w+|class\s+\w+|const\s+\w+\s*=\s*(?:async\s*)?(?:\(|function))| {2,8}(?:async\s+)?(?:static\s+)?[A-Za-z_][\w]*\s*\()/;
+
+/** 함수/클래스 경계를 우선해 코드를 묶는다. 한 함수가 목표를 넘으면 일반 청크. */
+export function chunkCode(
+  text,
+  targetChars = config.longCodeChunkChars,
+  overlap = config.longChunkOverlap,
+) {
+  const clean = String(text ?? "").replace(/\r\n/g, "\n").trim();
+  if (!clean) return [];
+  const parts = clean
+    .split(CODE_UNIT_RE)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length <= 1) return chunkText(clean, targetChars, overlap);
+  const chunks = [];
+  let buf = "";
+  const flush = () => {
+    const t = buf.trim();
+    if (t) chunks.push(t);
+    buf = "";
+  };
+  for (const p of parts) {
+    if (p.length > targetChars) {
+      flush();
+      chunks.push(...chunkText(p, targetChars, overlap));
+      continue;
+    }
+    if (buf && buf.length + p.length + 2 > targetChars) flush();
+    buf = buf ? `${buf}\n\n${p}` : p;
+  }
+  flush();
+  for (let i = chunks.length - 1; i > 0; i--) {
+    if (chunks[i].length >= 200) continue;
+    chunks[i - 1] = `${chunks[i - 1]}\n\n${chunks[i]}`;
+    chunks.splice(i, 1);
+  }
+  return chunks;
+}
+
+export function looksLikeCode(text) {
+  const s = String(text ?? "");
+  if (s.length < 400) return false;
+  let n = 0;
+  if (/```/.test(s)) n += 2;
+  if (/\b(?:import|export)\s+/.test(s)) n += 1;
+  if (/\bfunction\s+\w+\s*\(/.test(s)) n += 1;
+  if (/\bclass\s+\w+/.test(s)) n += 1;
+  if (/\bconst\s+\w+\s*=/.test(s)) n += 1;
+  return n >= 2;
+}
+
+const CODE_REVIEW_ASK =
+  "이 소스 코드를 리뷰하라. 버그·동시성·예외처리·설계·성능 문제를 함수/모듈 이름을 들어 구체적으로 지적하라. 일반론·칭찬만으로 끝내지 마라.";
+
+/** 앞의 짧은 요청과 뒤에 붙은 코드/본문을 분리한다. */
+export function splitAskAndBody(userQ) {
+  const full = String(userQ ?? "");
+  const isCode = looksLikeCode(full);
+  if (!isCode) {
+    return { ask: truncate(full, 800), body: full, isCode: false };
+  }
+  const fence = full.search(/```/);
+  const codeStart = full.search(
+    /^(?:import\s+|export\s+|package\s+|from\s+\w+|using\s+|#include\b)/m,
+  );
+  let cut = -1;
+  if (fence >= 0 && fence < 500) cut = fence;
+  if (codeStart >= 0 && codeStart < 500 && (cut < 0 || codeStart < cut)) {
+    cut = codeStart;
+  }
+  if (cut > 8) {
+    const head = full.slice(0, cut).trim();
+    const body = full.slice(cut).trim();
+    const looksAsk = /리뷰|검토|review|개선|분석|품질|버그|피드백/i.test(head);
+    return {
+      ask: looksAsk ? `${head}\n${CODE_REVIEW_ASK}` : CODE_REVIEW_ASK,
+      body: body || full,
+      isCode: true,
+    };
+  }
+  return { ask: CODE_REVIEW_ASK, body: full, isCode: true };
+}
+
+const MAP_SYSTEM_DOC = [
   "너는 긴 문서를 나눠 처리하는 파이프라인의 '추출' 단계다.",
   "주어진 문서 '일부'에서 사용자 요청과 관련된 사실을 하나도 빠짐없이 뽑아라.",
   "특히 숫자·금액·날짜·비율, 사람/조직/부서/제품 등 고유명사는 원문 표현 그대로 반드시 포함하라.",
@@ -161,50 +238,79 @@ const MAP_SYSTEM = [
   "관련 사실이 전혀 없을 때에만 정확히 '(핵심 없음)' 이라고만 답하라.",
 ].join("\n");
 
-// 지시문은 짧게만 넣는다. 긴 본문(userQ 전체)을 청크마다 재삽입하면 ctx 를 초과한다.
-const TASK_HINT_CHARS = 600;
+const MAP_SYSTEM_CODE = [
+  "너는 코드 리뷰 파이프라인의 '조각 검토' 단계다. 이 파일의 일부만 본다.",
+  "이 조각에서 발견한 문제만 적어라: 버그, 예외 누락, 레이스/동시성, 자원 누수, 잘못된 분기, 보안, API 오용.",
+  "각 항목에 함수/메서드/식별자 이름을 반드시 넣고 한 줄 근거를 붙여라.",
+  "치명적 문제가 없으면 '역할: (이 조각이 하는 일 한 줄). 이 조각에서 치명적 문제 없음' 만 출력하라.",
+  "'(핵심 없음)'이라고 하지 마라. 코드 조각은 항상 리뷰 대상이다.",
+  "파일 전체 결론·칭찬·일반론은 쓰지 마라(다음 단계가 종합).",
+].join("\n");
 
-function buildMapUser(userQ, sysText, chunk, idx, total) {
+function buildMapUser({ ask, sysText, chunk, idx, total, isCode }) {
   return [
     sysText ? `사용자 시스템 지시:\n${truncate(sysText, 400)}` : "",
-    `사용자 요청(지시):\n${truncate(userQ, TASK_HINT_CHARS)}`,
-    `문서 조각 ${idx + 1}/${total}:\n${chunk}`,
-    "이 조각에서 요청 수행에 필요한 내용만 추출:",
-    replyLanguageReminder(userQ, { pipeline: true }),
+    `사용자 요청:\n${truncate(ask, 500)}`,
+    `${isCode ? "코드" : "문서"} 조각 ${idx + 1}/${total}:\n${chunk}`,
+    isCode
+      ? "이 조각만 검토한 이슈 목록:"
+      : "이 조각에서 요청 수행에 필요한 내용만 추출:",
+    replyLanguageReminder(ask, { pipeline: true }),
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
-function buildReduceMessages({ userQ, sysText, partials, isFinal }) {
+function buildReduceMessages({ ask, sysText, partials, isFinal, isCode }) {
   const joined = partials
-    .map((p, i) => `--- 조각 ${p.i ?? i + 1} 추출 ---\n${p.text}`)
+    .map((p, i) => `--- 조각 ${p.i ?? i + 1} ${isCode ? "리뷰" : "추출"} ---\n${p.text}`)
     .join("\n\n");
-  const langLine = replyLanguageSystemLine(userQ);
+  const langLine = replyLanguageSystemLine(ask);
   const system = isFinal
-    ? [
-        "너는 긴 문서 파이프라인의 '종합' 단계다.",
-        "아래는 문서 각 부분에서 뽑은 내용이다. 이를 근거로 사용자 요청에 대한 최종 답을 작성하라.",
-        sysText ? `사용자 시스템 지시도 반드시 반영: ${sysText}` : "",
-        "중복은 합치고 누락 없이 종합하되, 조각 라벨·메타는 답에 쓰지 마라. 완성된 답 본문만 출력하라.",
-        langLine,
-        "부분 추출 언어가 달라도 최종 답은 사용자 질문과 같은 언어로.",
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : [
-        "너는 긴 문서 파이프라인의 '부분 병합' 단계다.",
-        "아래 여러 조각 추출들을 사용자 요청 관점에서 중복 없이 하나로 합쳐라.",
-        "정보 손실 없이 요약·정리만 하고, 최종 결론은 만들지 마라(다음 단계가 종합).",
-        langLine,
-      ]
-        .filter(Boolean)
-        .join("\n");
-  const langHint = replyLanguageReminder(userQ, { pipeline: true });
+    ? isCode
+      ? [
+          "너는 시니어 엔지니어다. 아래는 한 파일을 나눠 검토한 메모다.",
+          "사용자 요청(코드 리뷰)에 대한 최종 리뷰만 작성하라.",
+          "심각도 높은 이슈부터. 함수/모듈 이름을 유지하고 중복은 합쳐라.",
+          "파일 구조에 대한 짧은 평가 뒤에, 실행 가능한 지적만 남겨라.",
+          "일반론·빈 칭찬·조각 번호는 쓰지 마라.",
+          sysText ? `사용자 시스템 지시: ${sysText}` : "",
+          langLine,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : [
+          "너는 긴 문서 파이프라인의 '종합' 단계다.",
+          "아래는 문서 각 부분에서 뽑은 내용이다. 이를 근거로 사용자 요청에 대한 최종 답을 작성하라.",
+          sysText ? `사용자 시스템 지시도 반드시 반영: ${sysText}` : "",
+          "중복은 합치고 누락 없이 종합하되, 조각 라벨·메타는 답에 쓰지 마라. 완성된 답 본문만 출력하라.",
+          langLine,
+          "부분 추출 언어가 달라도 최종 답은 사용자 질문과 같은 언어로.",
+        ]
+          .filter(Boolean)
+          .join("\n")
+    : isCode
+      ? [
+          "너는 코드 리뷰 메모를 병합하는 단계다.",
+          "이슈를 함수/모듈 이름 기준으로 중복 없이 합쳐라. 심각도 힌트를 유지하라.",
+          "최종 총평은 쓰지 마라(다음 단계가 종합).",
+          langLine,
+        ].join("\n")
+      : [
+          "너는 긴 문서 파이프라인의 '부분 병합' 단계다.",
+          "아래 여러 조각 추출들을 사용자 요청 관점에서 중복 없이 하나로 합쳐라.",
+          "정보 손실 없이 요약·정리만 하고, 최종 결론은 만들지 마라(다음 단계가 종합).",
+          langLine,
+        ].join("\n");
+  const langHint = replyLanguageReminder(ask, { pipeline: true });
   const user = [
-    `사용자 요청:\n${truncate(userQ, 2000)}`,
+    `사용자 요청:\n${truncate(ask, 700)}`,
     joined,
-    isFinal ? "위 추출을 종합한 최종 답:" : "위 추출들을 하나로 병합:",
+    isFinal
+      ? isCode
+        ? "위 메모를 종합한 최종 코드 리뷰:"
+        : "위 추출을 종합한 최종 답:"
+      : "위 메모들을 하나로 병합:",
     langHint,
   ]
     .filter(Boolean)
@@ -244,40 +350,56 @@ function groupPartials(partials, maxChars) {
  * 1) 물리 파일 저장 + 청크 분할 + 단계 계획(stepsPlan) 수립.
  * plan 이벤트를 방출하고 { saved, chunks, stepsPlan, flowLabel, trace } 반환.
  */
-async function prepareLongRun({ userQ, sysText, mapTier, reduceTier, onEvent }) {
-  const saved = await saveLongContent(userQ, {
-    chars: userQ.length,
+async function prepareLongRun({
+  ask,
+  bodyText,
+  sysText,
+  isCode,
+  mapTier,
+  reduceTier,
+  onEvent,
+}) {
+  const saved = await saveLongContent(bodyText, {
+    chars: bodyText.length,
+    ask: truncate(ask, 120),
+    kind: isCode ? "code" : "doc",
     system: sysText ? truncate(sysText, 120) : undefined,
   });
-  const chunks = chunkText(userQ);
+  const chunks = isCode
+    ? chunkCode(bodyText)
+    : chunkText(bodyText);
   logger.info(
-    `긴 입력 파이프라인: ${userQ.length}자 → ${chunks.length}청크 저장 ${saved.file}`,
+    `긴 입력 파이프라인: ${bodyText.length}자 ${isCode ? "코드" : "문서"} → ${chunks.length}청크 저장 ${saved.file}`,
   );
 
+  const mapRole = isCode ? "review" : "extract";
+  const mapInstr = isCode ? "조각 코드 리뷰" : "핵심 추출";
   const stepsPlan = [
     ...chunks.map((_, i) => ({
       i: i + 1,
       tier: mapTier,
-      role: "extract",
-      instruction: `조각 ${i + 1}/${chunks.length} 핵심 추출`,
+      role: mapRole,
+      instruction: `조각 ${i + 1}/${chunks.length} ${mapInstr}`,
     })),
     {
       i: chunks.length + 1,
       tier: reduceTier,
       role: "synthesize",
-      instruction: "부분 결과 종합 → 최종 답",
+      instruction: isCode ? "리뷰 메모 종합 → 최종 리뷰" : "부분 결과 종합 → 최종 답",
     },
   ];
-  const flowLabel = `${chunks.length}×${mapTier}(추출) → ${reduceTier}(종합)`;
+  const flowLabel = isCode
+    ? `${chunks.length}×${mapTier}(조각리뷰) → ${reduceTier}(최종리뷰)`
+    : `${chunks.length}×${mapTier}(추출) → ${reduceTier}(종합)`;
 
   const trace = [
     {
       kind: "router",
       title: "긴 입력 처리 계획",
-      planner: `긴 입력 자동 분할 (${userQ.length}자/~${estimateTokens(userQ)}tok, 한도 ${config.longTriggerChars}자/${config.longTriggerTokens}tok)`,
+      planner: `긴 입력 자동 분할 (${bodyText.length}자/~${estimateTokens(bodyText)}tok, ${isCode ? "코드 리뷰" : "문서"} )`,
       routerTier: null,
       reason: `컨텍스트 초과 방지: ${chunks.length}개 청크로 나눠 맵리듀스 (파일 저장: ${path.basename(saved.file)})`,
-      decision: "청크 맵리듀스",
+      decision: isCode ? "코드 리뷰 맵리듀스" : "청크 맵리듀스",
       flow: flowLabel,
       stepsPlan,
     },
@@ -286,7 +408,7 @@ async function prepareLongRun({ userQ, sysText, mapTier, reduceTier, onEvent }) 
   onEvent?.({
     type: "plan",
     mode: "workflow",
-    reason: `긴 입력 → ${chunks.length}청크 맵리듀스`,
+    reason: `긴 입력 → ${chunks.length}청크 ${isCode ? "코드 리뷰" : "맵리듀스"}`,
     flow: flowLabel,
     steps: stepsPlan.map((s, i) => ({
       i,
@@ -304,10 +426,20 @@ async function prepareLongRun({ userQ, sysText, mapTier, reduceTier, onEvent }) 
  *    (순차 실행 시 청크가 많으면 전체 시간이 과도해져 타임아웃 위험)
  * 청크 인덱스 순서대로 채워진 stepRecs 배열을 반환.
  */
-async function runMapPhase({ userQ, sysText, chunks, mapTier, temperature, onEvent }) {
+async function runMapPhase({
+  ask,
+  sysText,
+  chunks,
+  mapTier,
+  temperature,
+  isCode,
+  onEvent,
+}) {
   const stepRecs = new Array(chunks.length);
   let cursor = 0;
   const concurrency = Math.max(1, Math.min(config.longMapConcurrency, chunks.length));
+  const mapRole = isCode ? "review" : "extract";
+  const mapInstr = isCode ? "조각 코드 리뷰" : "추출";
 
   async function mapWorker() {
     while (true) {
@@ -317,10 +449,10 @@ async function runMapPhase({ userQ, sysText, chunks, mapTier, temperature, onEve
         type: "step_start",
         i,
         tier: mapTier,
-        role: "extract",
-        instruction: `조각 ${i + 1}/${chunks.length} 추출`,
+        role: mapRole,
+        instruction: `조각 ${i + 1}/${chunks.length} ${mapInstr}`,
         receivedFrom: {
-          label: `문서 조각 ${i + 1}/${chunks.length}`,
+          label: `${isCode ? "코드" : "문서"} 조각 ${i + 1}/${chunks.length}`,
           preview: truncate(chunks[i], 240),
         },
       });
@@ -332,32 +464,42 @@ async function runMapPhase({ userQ, sysText, chunks, mapTier, temperature, onEve
             {
               role: "system",
               content: [
-                MAP_SYSTEM,
-                replyLanguageSystemLine(userQ),
-                "추출 결과도 사용자 질문과 같은 언어로.",
+                isCode ? MAP_SYSTEM_CODE : MAP_SYSTEM_DOC,
+                replyLanguageSystemLine(ask),
+                isCode
+                  ? "리뷰 메모도 사용자 질문과 같은 언어로."
+                  : "추출 결과도 사용자 질문과 같은 언어로.",
               ]
                 .filter(Boolean)
                 .join("\n"),
             },
             {
               role: "user",
-              content: buildMapUser(userQ, sysText, chunks[i], i, chunks.length),
+              content: buildMapUser({
+                ask,
+                sysText,
+                chunk: chunks[i],
+                idx: i,
+                total: chunks.length,
+                isCode,
+              }),
             },
           ],
           temperature: Math.min(temperature ?? 0.3, 0.3),
-          maxTokens: config.maxTokensSmall,
+          maxTokens: isCode ? Math.max(config.maxTokensSmall, 768) : config.maxTokensSmall,
           preferredTier: mapTier,
-          allowOtherTiers: config.escalateTier,
-          preferredSkill: summarizeSkill(),
+          // 맵은 지정 티어에 고정 — large 로 새면 27B 타임아웃이 청크마다 난다
+          allowOtherTiers: false,
         });
         const text = String(result.content || "").trim();
-        const relevant =
-          text && !/^\(?\s*핵심\s*없음\s*\)?[.!\s]*$/.test(text);
+        const relevant = isCode
+          ? Boolean(text)
+          : text && !/^\(?\s*핵심\s*없음\s*\)?[.!\s]*$/.test(text);
         stepRec = {
           kind: "model",
           i: i + 1,
-          role: "extract",
-          instruction: `조각 ${i + 1}/${chunks.length} 추출`,
+          role: mapRole,
+          instruction: `조각 ${i + 1}/${chunks.length} ${mapInstr}`,
           tier,
           device,
           alias,
@@ -366,7 +508,7 @@ async function runMapPhase({ userQ, sysText, chunks, mapTier, temperature, onEve
           ms: Date.now() - t0,
           receivedFrom: {
             kind: "doc",
-            label: `문서 조각 ${i + 1}/${chunks.length}`,
+            label: `${isCode ? "코드" : "문서"} 조각 ${i + 1}/${chunks.length}`,
             text: truncate(chunks[i], 2000),
           },
           output: relevant ? text : "관련 없음 (건너뜀)",
@@ -375,18 +517,17 @@ async function runMapPhase({ userQ, sysText, chunks, mapTier, temperature, onEve
           _text: text,
         };
       } catch (err) {
-        // 개별 청크 실패는 전체를 막지 않는다 (누락은 로그로 남김)
         logger.warn(`긴 입력 MAP ${i + 1}/${chunks.length} 실패: ${err.message}`);
         stepRec = {
           kind: "model",
           i: i + 1,
-          role: "extract",
-          instruction: `조각 ${i + 1}/${chunks.length} 추출`,
+          role: mapRole,
+          instruction: `조각 ${i + 1}/${chunks.length} ${mapInstr}`,
           tier: mapTier,
           ms: Date.now() - t0,
           receivedFrom: {
             kind: "doc",
-            label: `문서 조각 ${i + 1}/${chunks.length}`,
+            label: `${isCode ? "코드" : "문서"} 조각 ${i + 1}/${chunks.length}`,
             text: truncate(chunks[i], 2000),
           },
           output: `추출 실패: ${err.message}`,
@@ -400,7 +541,7 @@ async function runMapPhase({ userQ, sysText, chunks, mapTier, temperature, onEve
         type: "step_done",
         i,
         tier: stepRec.tier,
-        role: "extract",
+        role: mapRole,
         device: stepRec.device,
         alias: stepRec.alias,
         backend: stepRec.backend,
@@ -425,7 +566,7 @@ async function runMapPhase({ userQ, sysText, chunks, mapTier, temperature, onEve
  * (병렬이라 완료 순서가 섞였을 수 있어 인덱스 순으로 재구성)
  * 전 조각이 '관련 없음'이면 원문 앞부분으로 최소 1건을 만든다.
  */
-function collectPartials(stepRecs, chunks, trace, userQ) {
+function collectPartials(stepRecs, chunks, trace, fallbackText, isCode) {
   const partials = [];
   for (let i = 0; i < chunks.length; i++) {
     const rec = stepRecs[i];
@@ -436,45 +577,49 @@ function collectPartials(stepRecs, chunks, trace, userQ) {
     delete rec._text;
   }
   if (!partials.length) {
-    // 전 조각이 '관련 없음' — 그래도 최종 단계는 원문 앞부분으로 답을 시도
-    partials.push({ i: 1, text: truncate(userQ, config.longReduceInputChars) });
+    partials.push({
+      i: 1,
+      text: truncate(fallbackText, config.longReduceInputChars),
+    });
   }
   return partials;
 }
 
-/**
- * 3) REDUCE: 부분 추출 합계가 상한을 넘으면 그룹 단위로 계층 병합.
- * 최종 종합에 넣을 level(부분 결과 목록)을 반환.
- */
-async function runReducePhase({ userQ, sysText, partials, reduceTier }) {
+async function runReducePhase({ ask, sysText, partials, reduceTier, isCode }) {
+  const maxChars = isCode
+    ? config.longCodeReduceInputChars
+    : config.longReduceInputChars;
+  // 중간 병합은 medium 고정 — 27B 에 여러 번 넣으면 타임아웃 후 7B 로 떨어진다
+  const mergeWanted = isCode ? "medium" : reduceTier;
+  const mergeTier = pool.resolveSolveTier(mergeWanted);
   let level = partials;
   let round = 0;
   while (
-    level.map((p) => p.text).join("\n").length > config.longReduceInputChars &&
+    level.map((p) => p.text).join("\n").length > maxChars &&
     level.length > 1
   ) {
     round++;
-    const groups = groupPartials(level, config.longReduceInputChars);
-    if (groups.length >= level.length) break; // 더 못 줄이면 중단
+    const groups = groupPartials(level, maxChars);
+    if (groups.length >= level.length) break;
     const merged = [];
     for (let g = 0; g < groups.length; g++) {
       const { result } = await pool.chat({
         messages: buildReduceMessages({
-          userQ,
+          ask,
           sysText,
           partials: groups[g],
           isFinal: false,
+          isCode,
         }),
         temperature: 0.3,
         maxTokens: config.defaultMaxTokens,
-        preferredTier: reduceTier,
-        allowOtherTiers: config.escalateTier,
-        preferredSkill: summarizeSkill(),
+        preferredTier: mergeTier,
+        allowOtherTiers: false,
       });
       merged.push({ i: g + 1, text: String(result.content || "").trim() });
     }
     logger.info(
-      `긴 입력 REDUCE 라운드 ${round}: ${level.length}→${merged.length} 그룹 병합`,
+      `긴 입력 REDUCE 라운드 ${round}: ${level.length}→${merged.length} 그룹 병합 @${mergeTier}`,
     );
     level = merged;
   }
@@ -485,12 +630,33 @@ async function runReducePhase({ userQ, sysText, partials, reduceTier }) {
  * 4) 최종 종합 (onEvent 있으면 스트리밍, 없으면 단발).
  * { last, finalIdx } 반환.
  */
-async function runFinalSynthesis({ userQ, sysText, level, reduceTier, temperature, stepsPlan, onEvent }) {
+async function runFinalSynthesis({
+  ask,
+  sysText,
+  level,
+  reduceTier,
+  temperature,
+  stepsPlan,
+  isCode,
+  onEvent,
+}) {
+  const cap = isCode ? 3500 : config.longReduceInputChars;
+  let notes = level;
+  const joinedLen = notes.map((p) => p.text).join("\n").length;
+  if (joinedLen > cap && notes.length) {
+    const per = Math.max(400, Math.floor(cap / notes.length));
+    notes = notes.map((p) => ({ ...p, text: truncate(p.text, per) }));
+    logger.info(
+      `긴 입력 최종 입력 축소: ${joinedLen}자 → 조각당 ${per}자 (${notes.length}개)`,
+    );
+  }
+
   const reduceMessages = buildReduceMessages({
-    userQ,
+    ask,
     sysText,
-    partials: level,
+    partials: notes,
     isFinal: true,
+    isCode,
   });
   const finalIdx = stepsPlan.length - 1;
   onEvent?.({
@@ -498,50 +664,51 @@ async function runFinalSynthesis({ userQ, sysText, level, reduceTier, temperatur
     i: finalIdx,
     tier: reduceTier,
     role: "synthesize",
-    instruction: "부분 결과 종합 → 최종 답",
+    instruction: isCode ? "리뷰 메모 종합 → 최종 리뷰" : "부분 결과 종합 → 최종 답",
     receivedFrom: {
-      label: `부분 추출 ${level.length}개`,
-      preview: truncate(level.map((p) => p.text).join(" / "), 240),
+      label: `부분 ${isCode ? "리뷰" : "추출"} ${notes.length}개`,
+      preview: truncate(notes.map((p) => p.text).join(" / "), 240),
     },
   });
 
   const t0 = Date.now();
-  let last;
-  if (onEvent) {
-    const out = await pool.chatStream({
-      messages: reduceMessages,
-      temperature: Math.min(temperature ?? 0.5, 0.5),
-      maxTokens: config.defaultMaxTokens,
-      enableThinking: false,
-      preferredTier: reduceTier,
-      allowOtherTiers: config.escalateTier,
-      preferredSkill: summarizeSkill(),
-      onMeta: (m) => onEvent({ type: "step_meta", i: finalIdx, ...m }),
-      onToken: (t) => onEvent({ type: "token", text: t, i: finalIdx }),
-    });
-    last = {
-      content: out.content,
-      reasoning: out.reasoning,
-      tier: out.tier,
-      device: out.device,
-      alias: out.alias,
-      backend: out.backendUrl,
-      model: out.model,
-      usage: out.usage,
-      ttftMs: out.ttftMs,
-      totalMs: out.totalMs,
-      tokenCount: out.tokenCount,
-    };
-  } else {
+  const common = {
+    messages: reduceMessages,
+    temperature: Math.min(temperature ?? 0.5, 0.5),
+    maxTokens: isCode ? Math.min(config.defaultMaxTokens, 1536) : config.defaultMaxTokens,
+    enableThinking: false,
+    preferredTier: reduceTier,
+    allowOtherTiers: false,
+    timeoutMs: 180000,
+  };
+
+  async function runOnce(msgs) {
+    if (onEvent) {
+      const out = await pool.chatStream({
+        ...common,
+        messages: msgs,
+        onMeta: (m) => onEvent({ type: "step_meta", i: finalIdx, ...m }),
+        onToken: (t) => onEvent({ type: "token", text: t, i: finalIdx }),
+      });
+      return {
+        content: out.content,
+        reasoning: out.reasoning,
+        tier: out.tier,
+        device: out.device,
+        alias: out.alias,
+        backend: out.backendUrl,
+        model: out.model,
+        usage: out.usage,
+        ttftMs: out.ttftMs,
+        totalMs: out.totalMs,
+        tokenCount: out.tokenCount,
+      };
+    }
     const { result, backendUrl, tier, device, alias } = await pool.chat({
-      messages: reduceMessages,
-      temperature: Math.min(temperature ?? 0.5, 0.5),
-      maxTokens: config.defaultMaxTokens,
-      preferredTier: reduceTier,
-      allowOtherTiers: config.escalateTier,
-      preferredSkill: summarizeSkill(),
+      ...common,
+      messages: msgs,
     });
-    last = {
+    return {
       content: result.content,
       reasoning: result.reasoning,
       tier,
@@ -554,7 +721,24 @@ async function runFinalSynthesis({ userQ, sysText, level, reduceTier, temperatur
     };
   }
 
-  return { last, finalIdx };
+  let last;
+  try {
+    last = await runOnce(reduceMessages);
+  } catch (err) {
+    logger.warn(`긴 입력 최종 @${reduceTier} 실패 → 입력 축소 재시도: ${err.message}`);
+    const tighter = notes.map((p) => ({ ...p, text: truncate(p.text, 400) }));
+    last = await runOnce(
+      buildReduceMessages({
+        ask,
+        sysText,
+        partials: tighter,
+        isFinal: true,
+        isCode,
+      }),
+    );
+  }
+
+  return { last, finalIdx, notes };
 }
 
 /**
@@ -569,45 +753,73 @@ export async function runLongContent({ body, temperature, onEvent }) {
     typeof body?.ROLE_SYSTEM === "string" && body.ROLE_SYSTEM.trim()
       ? body.ROLE_SYSTEM.trim()
       : "";
-  const mapTier = config.longMapTier;
-  const reduceTier = config.longReduceTier;
+  const { ask, body: bodyText, isCode } = splitAskAndBody(userQ);
+  const mapWanted = config.longMapTier;
+  const reduceWanted = config.longReduceTier;
+  const mapTier = pool.resolveSolveTier(mapWanted);
+  const reduceTier = pool.resolveSolveTier(reduceWanted);
+  if (mapTier !== mapWanted) {
+    logger.info(
+      `긴 입력 맵 티어 ${mapWanted} → ${mapTier} (해결 풀: ${pool.solvePoolLabel()})`,
+    );
+  }
+  if (reduceTier !== reduceWanted) {
+    logger.info(
+      `긴 입력 종합 티어 ${reduceWanted} → ${reduceTier} (해결 풀: ${pool.solvePoolLabel()})`,
+    );
+  }
 
   const { saved, chunks, stepsPlan, trace } = await prepareLongRun({
-    userQ,
+    ask,
+    bodyText,
     sysText,
+    isCode,
     mapTier,
     reduceTier,
     onEvent,
   });
 
   const stepRecs = await runMapPhase({
-    userQ,
+    ask,
     sysText,
     chunks,
     mapTier,
     temperature,
+    isCode,
     onEvent,
   });
-  const partials = collectPartials(stepRecs, chunks, trace, userQ);
+  const partials = collectPartials(
+    stepRecs,
+    chunks,
+    trace,
+    isCode ? ask : userQ,
+    isCode,
+  );
 
-  const level = await runReducePhase({ userQ, sysText, partials, reduceTier });
+  const level = await runReducePhase({
+    ask,
+    sysText,
+    partials,
+    reduceTier,
+    isCode,
+  });
 
-  const { last, finalIdx } = await runFinalSynthesis({
-    userQ,
+  const { last, finalIdx, notes } = await runFinalSynthesis({
+    ask,
     sysText,
     level,
     reduceTier,
     temperature,
     stepsPlan,
+    isCode,
     onEvent,
   });
 
-  // 5) 최종 결과 조립 (finalRec trace 추가 + step_done + plan + 반환)
   const finalRec = {
     kind: "model",
     i: stepsPlan.length,
     role: "synthesize",
-    instruction: "부분 결과 종합 → 최종 답",
+    instruction: isCode ? "리뷰 메모 종합 → 최종 리뷰" : "부분 결과 종합 → 최종 답",
     tier: last.tier,
     device: last.device,
     alias: last.alias,
@@ -616,8 +828,8 @@ export async function runLongContent({ body, temperature, onEvent }) {
     ms: last.totalMs,
     receivedFrom: {
       kind: "model",
-      label: `부분 추출 ${level.length}개`,
-      text: truncate(level.map((p) => p.text).join("\n\n"), 2000),
+      label: `부분 ${isCode ? "리뷰" : "추출"} ${(notes || level).length}개`,
+      text: truncate((notes || level).map((p) => p.text).join("\n\n"), 2000),
     },
     output: last.content,
     isLast: true,
@@ -641,9 +853,9 @@ export async function runLongContent({ body, temperature, onEvent }) {
 
   const plan = {
     mode: "workflow",
-    tier: reduceTier,
+    tier: last.tier || reduceTier,
     difficulty: 100,
-    reason: `긴 입력 → ${chunks.length}청크 맵리듀스`,
+    reason: `긴 입력 → ${chunks.length}청크 ${isCode ? "코드 리뷰" : "맵리듀스"}`,
     steps: stepsPlan.map((s) => ({
       tier: s.tier,
       role: s.role,
@@ -654,7 +866,7 @@ export async function runLongContent({ body, temperature, onEvent }) {
   };
 
   logger.info(
-    `긴 입력 파이프라인 완료: ${chunks.length}청크 → 최종 @${last.tier}/${last.device ?? "-"} ${Date.now() - started}ms`,
+    `긴 입력 파이프라인 완료: ${chunks.length}청크 ${isCode ? "코드리뷰" : ""} → 최종 @${last.tier}/${last.device ?? "-"} ${Date.now() - started}ms`,
   );
 
   return {
