@@ -480,6 +480,20 @@
                 flex-wrap: wrap;
                 gap: 6px;
             }
+            .gate-note {
+                margin-top: 8px;
+                padding: 7px 10px;
+                border-radius: 8px;
+                border: 1px solid rgba(210, 153, 34, 0.4);
+                background: rgba(210, 153, 34, 0.1);
+                color: var(--muted, #9aa4b2);
+                font-size: 12px;
+                line-height: 1.5;
+            }
+            .gate-note::before {
+                content: "⚠ ";
+                color: #d29922;
+            }
             .fixed-card {
                 display: inline-flex;
                 align-items: center;
@@ -722,6 +736,7 @@
                 ["planner", "설계", "복잡한 작업을 단계로 나눕니다"],
                 ["embedding", "임베딩", "검색·RAG용 벡터 임베딩을 만듭니다"],
                 ["security", "보안검증", "응답·입력을 보안 정책으로 검사합니다"],
+                ["quality", "답변품질검증", "최종 답 직전, 질문과 답변의 맥락 일치를 점검합니다"],
             ];
 
             // 상태
@@ -1191,6 +1206,11 @@
                 const rows =
                     (n.servers || []).map((s) => serverRow(n.id, s)).join("") ||
                     `<tr><td colspan="6" class="muted">관리 중인 모델 서버가 없습니다.</td></tr>`;
+                // 이 노드에 보안검증·답변품질검증이 하나라도 켜져 있으면 안내 표시
+                const gateOn = (n.servers || []).some((s) => {
+                    const r = backByUrl.get(s.url)?.roles || {};
+                    return r.security || r.quality;
+                });
                 return `<div class="ov-node" data-node="${escAttr(n.id)}">
                     <div class="node-head" style="margin-bottom:6px">
                         <div>
@@ -1208,6 +1228,7 @@
                         <thead><tr><th>모델 서버</th><th>티어</th><th>장치</th><th>상태</th><th>역할</th><th class="acts">제어</th></tr></thead>
                         <tbody>${rows}</tbody>
                     </table>
+                    ${gateOn ? `<div class="gate-note">보안검증·답변품질검증이 켜져 있어, 답변 생성 후 아래쪽에서 결과를 다시 한번 검증합니다. 답변 속도에 영향을 줄 수 있습니다.</div>` : ""}
                 </div>`;
             }
 

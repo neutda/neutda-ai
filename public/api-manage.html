@@ -98,8 +98,14 @@
             button.danger:hover {
                 background: rgba(248, 81, 73, 0.12);
             }
+            /* 컬럼이 많아 좁으면 셀이 줄바꿈되므로, 가로 스크롤로 감싸고
+               테이블은 최소 너비를 확보해 각 셀이 한 줄로 유지되게 한다. */
+            .table-wrap {
+                overflow-x: auto;
+            }
             table {
                 width: 100%;
+                min-width: 1040px;
                 border-collapse: collapse;
                 font-size: 13px;
             }
@@ -118,6 +124,11 @@
                 padding: 10px;
                 border-bottom: 1px solid #1e222e;
                 vertical-align: middle;
+                white-space: nowrap; /* 셀이 줄바꿈되지 않게 — 컬럼은 내용 크기대로 */
+            }
+            /* 칩이 여러 개 들어가는 바인딩 셀만 예외적으로 줄바꿈 허용(폭 제한) */
+            .bind-cell {
+                white-space: normal;
             }
             tbody tr:hover {
                 background: #12151d;
@@ -214,8 +225,26 @@
             .actions {
                 display: flex;
                 gap: 6px;
-                flex-wrap: wrap;
+                flex-wrap: nowrap;
                 justify-content: flex-end;
+            }
+            .actions .sm {
+                white-space: nowrap;
+            }
+            /* 허용 티어 칩이 줄바꿈되지 않도록 + 칩 사이 간격 */
+            .tiers-cell {
+                white-space: nowrap;
+            }
+            .tiers-cell .chip {
+                margin-right: 5px;
+            }
+            .tiers-cell .chip:last-child {
+                margin-right: 0;
+            }
+            /* 칩·뱃지 글자는 내부에서 쪼개지지 않게 (예: "활성"→"활/성", "회사 규정"→"회사 규/정") */
+            .chip,
+            .badge {
+                white-space: nowrap;
             }
             .muted {
                 color: var(--muted);
@@ -330,27 +359,29 @@
                     <a href="/api-rules.html">API별 JSON 결과 설정</a>에서
                     합니다.
                 </p>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>이름</th>
-                            <th>키</th>
-                            <th>상태</th>
-                            <th>허용 티어</th>
-                            <th>기초지식</th>
-                            <th>JSON 결과</th>
-                            <th>호출자 JSON</th>
-                            <th>토큰 사용량</th>
-                            <th>최근 사용</th>
-                            <th style="text-align: right">관리</th>
-                        </tr>
-                    </thead>
-                    <tbody id="rows">
-                        <tr>
-                            <td colspan="10" class="empty">불러오는 중…</td>
-                        </tr>
-                    </tbody>
-                </table>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>이름</th>
+                                <th>키</th>
+                                <th>상태</th>
+                                <th>허용 티어</th>
+                                <th>기초지식</th>
+                                <th>JSON 결과</th>
+                                <th>호출자 JSON</th>
+                                <th>토큰 사용량</th>
+                                <th>최근 사용</th>
+                                <th style="text-align: right">관리</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rows">
+                            <tr>
+                                <td colspan="10" class="empty">불러오는 중…</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -731,7 +762,7 @@
                         </div>
                     </td>
                     <td><span class="badge ${k.enabled ? "b-on" : "b-off"}">${k.enabled ? "활성" : "비활성"}</span></td>
-                    <td>${tiers}</td>
+                    <td class="tiers-cell">${tiers}</td>
                     <td class="bind-cell">${chipsOf(knIds, collectionsCache, "미적용")}</td>
                     <td class="bind-cell">${chipsOf(ruIds, rulesCache, "미적용")}</td>
                     <td>${custom ? '<span class="badge b-on">수락</span>' : '<span class="badge b-off">거절</span>'}</td>
@@ -739,10 +770,10 @@
                     <td class="muted" style="white-space:nowrap">${esc(last)}</td>
                     <td>
                         <div class="actions">
-                            <button class="secondary sm" data-act="usage">이력·통계</button>
-                            <button class="secondary sm" data-act="edit">편집</button>
-                            <button class="secondary sm" data-act="reset">사용량 초기화</button>
-                            <button class="danger sm" data-act="del">삭제</button>
+                            <button class="secondary sm" data-act="usage" title="이력·통계">이력</button>
+                            <button class="secondary sm" data-act="edit" title="편집">편집</button>
+                            <button class="secondary sm" data-act="reset" title="사용량 초기화">초기화</button>
+                            <button class="danger sm" data-act="del" title="삭제">삭제</button>
                         </div>
                     </td>
                 </tr>`;

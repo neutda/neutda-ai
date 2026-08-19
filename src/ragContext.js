@@ -3,7 +3,14 @@
  * chat/파이프라인 경로와 /api/rag/* 가 같은 포맷·옵션을 쓴다.
  */
 import * as rag from "./rag.js";
+import { config } from "./config.js";
 import { replyLanguageSystemLine } from "./replyLanguage.js";
+
+// 인사·잡담 패턴은 config(.env)에서 온다 — 소스에 정규식을 박지 않는다.
+const SMALL_TALK_RE = new RegExp(
+  `^(${config.smallTalkPattern})[\\s!.~]*$`,
+  "i",
+);
 
 export function isRagRequest(body) {
   const v = body?.RAG ?? body?.rag;
@@ -17,9 +24,7 @@ export function isSmallTalk(text) {
   const t = String(text || "").trim();
   if (!t) return false;
   if (t.length > 40) return false;
-  return /^(안녕(하세요|하신가|히\s*가세요)?|하이|헬로|hello|hi|hey|ㅎㅇ|ㅎㅎ+|ㅋ+|네+|아니요|아니|응+|ㅇㅇ|ㄱㅅ|고마워|감사합니다?|고맙습니다|수고(하세요|했어)?|잘\s*가|바이|bye)[\s!.~]*$/i.test(
-    t,
-  );
+  return SMALL_TALK_RE.test(t);
 }
 
 export function ragOptions(body) {

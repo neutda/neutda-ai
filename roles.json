@@ -3,30 +3,84 @@
         {
             "id": "r_ms5efylr85h28d",
             "name": "보고서 작성",
-            "description": "1. 개요 2. 참여자 3. 본문 4. 결과",
+            "description": "회의 대화·댓글·업무 로그·메모를 붙여넣은 경우 포함. '보고서 작성해줘'가 없어도 기록을 문서화·정리하는 요청. 인사·잡담만이면 해당 없음.",
+            "instruction": "다음 네 섹션으로만 작성하라.\n1. 개요\n2. 참여자\n3. 본문\n4. 결과\n사견·인사·군말 금지. 없는 사실은 만들지 마라. 원문이 이번 메시지 또는 직전 대화에 있으면 그걸로 바로 작성하고, 다시 보내 달라는 안내·라우터/특기 설명은 쓰지 마라.",
+            "outputSchema": {},
+            "examples": [],
+            "params": {
+                "temperature": 0.3,
+                "maxTokens": null,
+                "thinking": null,
+                "language": "ko"
+            },
             "createdAt": "2026-07-29T01:21:45.711Z",
-            "updatedAt": null
+            "updatedAt": "2026-08-18T02:18:00.000Z"
         },
         {
             "id": "r_ms5emhdfsj7jcf",
             "name": "간단한 인사",
             "description": "메시지 전체가 '안녕/안녕하세요/hi' 같은 순수 인사말 한 마디일 때만. 질문·요청·서술·감정표현(덥다 등)·맞장구(그래·응·ok)나 다른 내용이 조금이라도 섞이면 이 역할 아님.",
+            "instruction": "한 줄로 짧게 인사에만 답하라. 질문으로 이어가거나 도움을 제안하지 마라.",
+            "outputSchema": {},
+            "examples": [
+                {
+                    "input": "안녕",
+                    "output": "안녕하세요."
+                },
+                {
+                    "input": "hi",
+                    "output": "Hi."
+                }
+            ],
+            "params": {
+                "temperature": 0.4,
+                "maxTokens": 64,
+                "thinking": null,
+                "language": null
+            },
             "createdAt": "2026-07-29T01:26:49.971Z",
-            "updatedAt": "2026-08-10T07:00:31.293Z"
+            "updatedAt": "2026-08-18T01:30:00.000Z"
         },
         {
             "id": "r_summary_default",
             "name": "요약",
             "description": "긴 문서·회의록 압축, 핵심만 빠짐없이. 맵리듀스·파이프라인 extract 단계에 선호됩니다.",
+            "instruction": "핵심을 빠짐없이 불릿으로 압축하라. 사견·인사·군말 금지. 원문의 숫자·고유명사·결론은 유지하라.",
+            "outputSchema": {},
+            "examples": [],
+            "params": {
+                "temperature": 0.2,
+                "maxTokens": 512,
+                "thinking": null,
+                "language": null
+            },
             "createdAt": "2026-07-29T01:42:00.000Z",
-            "updatedAt": null
+            "updatedAt": "2026-08-18T01:30:00.000Z"
         },
         {
             "id": "r_mss8wsbnnzk3wz",
             "name": "일정등록",
-            "description": "만약 내용에 일정등록 내용이 있다면 간단한 json만 return 한다. 다른 내용은 return 하지 않는데. { title:'', desc:'' }",
+            "description": "일정 등록·캘린더 추가·회의/약속 잡기 요청. 제목·일시·내용을 뽑아 저장하려는 말.",
+            "instruction": "사용자 말에서 일정 정보만 추출하라. 설명·인사·마크다운 없이 JSON 객체 하나만 출력한다.",
+            "outputSchema": {},
+            "examples": [
+                {
+                    "input": "내일 3시 회의",
+                    "output": "{\"title\":\"회의\",\"desc\":\"내일 15:00\"}"
+                },
+                {
+                    "input": "금요일 점심 김과장과 미팅",
+                    "output": "{\"title\":\"김과장 미팅\",\"desc\":\"금요일 점심\"}"
+                }
+            ],
+            "params": {
+                "temperature": 0,
+                "maxTokens": 200,
+                "thinking": null,
+                "language": "ko"
+            },
             "createdAt": "2026-08-14T01:05:35.075Z",
-            "updatedAt": null
+            "updatedAt": "2026-08-18T02:06:51.130Z"
         }
     ]
 }

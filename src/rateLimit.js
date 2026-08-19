@@ -70,3 +70,28 @@ export function release(keyId) {
 export function clearRate(keyId) {
     state.delete(keyId);
 }
+
+/**
+ * 현재 요청수 사용량 조회 (증가 없음, 만료된 창은 0으로 간주).
+ * @returns {{rpmUsed, rpmResetInSec, rpdUsed, rpdResetInSec, inflight}}
+ */
+export function rateUsage(keyId) {
+    const now = Date.now();
+    const s = state.get(keyId);
+    if (!s) {
+        return { rpmUsed: 0, rpmResetInSec: 60, rpdUsed: 0, rpdResetInSec: 86400, inflight: 0 };
+    }
+    const minExpired = now - s.minStart >= MIN_MS;
+    const dayExpired = now - s.dayStart >= DAY_MS;
+    return {
+        rpmUsed: minExpired ? 0 : s.minCount,
+        rpmResetInSec: minExpired
+            ? 60
+            : Math.max(0, Math.ceil((s.minStart + MIN_MS - now) / 1000)),
+        rpdUsed: dayExpired ? 0 : s.dayCount,
+        rpdResetInSec: dayExpired
+            ? 86400
+            : Math.max(0, Math.ceil((s.dayStart + DAY_MS - now) / 1000)),
+        inflight: s.inflight,
+    };
+}

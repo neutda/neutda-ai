@@ -1,13 +1,10 @@
 // 티어 라우팅 효과 집계.
 // 채팅 요청을 티어별로 누적하고, "전부 large 로 처리했다면" 대비 절감된
 // 연산량(모델 파라미터 수 비례 근사)을 계산한다. data/stats.json 에 영속.
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { docStore } from "./storage/index.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "data");
-const STATS_FILE = path.join(DATA_DIR, "stats.json");
+// 영속: 단일 문서 저장소 (파일→DB 이행은 storage 계층에서 처리)
+const backing = docStore("stats.json", { debounceMs: 3000 });
 
 // 티어별 상대 연산 비용 (large 27B = 1 기준, 파라미터 수 비례 근사)
 // small 0.5B, medium 3B, large 27B
@@ -22,42 +19,23 @@ const emptyTiers = () => ({
 let byTier = emptyTiers();
 let since = new Date().toISOString();
 let loaded = false;
-let saveTimer = null;
 
 export async function loadStats() {
     if (loaded) return;
     loaded = true;
-    try {
-        const raw = JSON.parse(await readFile(STATS_FILE, "utf-8"));
-        if (raw?.byTier) {
-            const base = emptyTiers();
-            for (const t of Object.keys(base)) {
-                if (raw.byTier[t]) Object.assign(base[t], raw.byTier[t]);
-            }
-            byTier = base;
+    const raw = await backing.read();
+    if (raw?.byTier) {
+        const base = emptyTiers();
+        for (const t of Object.keys(base)) {
+            if (raw.byTier[t]) Object.assign(base[t], raw.byTier[t]);
         }
-        if (typeof raw?.since === "string") since = raw.since;
-    } catch {
-        // 파일 없음/손상 시 초기값으로 시작
+        byTier = base;
     }
+    if (typeof raw?.since === "string") since = raw.since;
 }
 
 function scheduleSave() {
-    if (saveTimer) return;
-    saveTimer = setTimeout(async () => {
-        saveTimer = null;
-        try {
-            await mkdir(DATA_DIR, { recursive: true });
-            await writeFile(
-                STATS_FILE,
-                JSON.stringify({ since, byTier }),
-                "utf-8",
-            );
-        } catch {
-            // best-effort
-        }
-    }, 3000);
-    if (saveTimer.unref) saveTimer.unref();
+    backing.save({ since, byTier });
 }
 
 /** 채팅 1건 완료 기록 (라우터 분류 호출은 집계하지 않음) */

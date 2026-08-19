@@ -1,6 +1,7 @@
 import express from "express";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import {
@@ -31,6 +32,7 @@ import {
 } from "./workflow.js";
 import {
     needsLongPipeline,
+    needsLongForPlan,
     runLongContent,
     chunkText,
     chunkCode,
@@ -38,7 +40,11 @@ import {
     estimateTokens,
     isContextOverflowError,
 } from "./longContent.js";
-import { appendHistory, readHistory, clearHistory } from "./history.js";
+import {
+    appendHistory as _appendHistory,
+    readHistory,
+    clearHistory,
+} from "./history.js";
 import { selectHistoryTurns, formatHistorySnippet } from "./historyContext.js";
 import { getMetrics } from "./metrics.js";
 import { logger, getLogs, listLogDates, logDayKey, logFileStats } from "./logger.js";
@@ -51,6 +57,7 @@ import * as rag from "./rag.js";
 import * as sessionMemory from "./sessionMemory.js";
 import * as memoryStore from "./memoryStore.js";
 import * as loadSession from "./loadSession.js";
+import { looksDegenerate, looksLanguageDrift } from "./textHealth.js";
 import { describeImageForRag } from "./ragVision.js";
 import {
     isRagRequest,
@@ -144,6 +151,7 @@ import {
     acquire,
     release,
     clearRate,
+    rateUsage,
 } from "./rateLimit.js";
 import {
     listRules,
@@ -165,6 +173,7 @@ import {
     parseCallerRule,
 } from "./jsonRule.js";
 import { fillDateFields } from "./koreanDate.js";
+import * as storage from "./storage/index.js";
 import multer from "multer";
 
 /** 보안 게이트 이벤트 (파이프라인 step 과 분리) */
@@ -205,10 +214,15 @@ async function withSecurityPreFinal(q, draft, opts = {}) {
     };
 }
 
-/** 파이프라인 steps 에서 보안 노드 제외 (배지·통계용) */
+/** 파이프라인 steps 에서 게이트 노드(보안·품질) 제외 (배지·통계용) */
 function pipelineStepsOnly(steps) {
     return (Array.isArray(steps) ? steps : []).filter(
-        (s) => s && s.role !== "security" && s.tier !== "security",
+        (s) =>
+            s &&
+            s.role !== "security" &&
+            s.tier !== "security" &&
+            s.role !== "quality" &&
+            s.tier !== "quality",
     );
 }
 
@@ -247,6 +261,16 @@ function normalizeMemoryIds(body) {
         delete body.s_id;
     }
     return { uid, sid };
+}
+
+/**
+ * 대화기록(history) 저장 채널. S_ID 있으면 세션 단위(sess:<sid>)로 묶어,
+ * 같은 세션의 모든 탭 대화가 한곳에 누적되고 새로고침 시 전체를 복원할 수 있게 한다.
+ * S_ID 없으면 undefined → 기본 "console"(로컬 전용/익명).
+ */
+function chatHistoryChannel(body) {
+    const { sid } = memoryIds(body);
+    return sid ? `sess:${sid}` : undefined;
 }
 
 /** S_ID 있으면 서버 세션 turns 로 HISTORY 교체 (클라이언트 HISTORY 무시) */
@@ -297,7 +321,13 @@ async function persistChatMemory(body, question, answer) {
     if (!q && !a) return;
     if (sid) {
         if (q) sessionMemory.append(sid, { role: "user", content: q });
-        if (a) sessionMemory.append(sid, { role: "assistant", content: a });
+        // 불량 응답(붕괴·언어이탈)은 히스토리에 넣지 않는다 → 다음 턴 오염(고착) 방지.
+        // large 재생성이 성공했으면 a 는 이미 정상본이라 통과한다.
+        if (a && !looksDegenerate(a) && !looksLanguageDrift(a, q)) {
+            sessionMemory.append(sid, { role: "assistant", content: a });
+        } else if (a) {
+            logger.warn(`불량 응답(붕괴/언어이탈) → 단기기억 저장 스킵 (sid=${sid}, len=${a.length})`);
+        }
     }
     if (uid && q && shouldRememberUserUtterance(q)) {
         try {
@@ -315,15 +345,8 @@ function shouldRememberUserUtterance(text) {
     // 긴 코드/문서 붙여넣기는 개인 사실이 아니다. 통째 저장하면
     // 다음 요청 시스템 프롬프트가 ctx(4096)를 넘긴다.
     if (t.length > 800) return false;
-    // 순수 인사/감사만이면 저장하지 않음
-    if (
-        isSmallTalk(t) ||
-        /^(안녕|안녕하세요|하이|헬로|hello|hi|ㅎㅎ+|ㅋ+|네|아니요|ㅇㅇ|ㄱㅅ|고마워|감사)[\s!.~]*$/i.test(
-            t,
-        )
-    ) {
-        return false;
-    }
+    // 순수 인사/감사만이면 저장하지 않음 (판정은 ragContext.isSmallTalk 단일 소스)
+    if (isSmallTalk(t)) return false;
     return true;
 }
 
@@ -420,6 +443,35 @@ async function writeResult(id, data) {
 
 const app = express();
 app.use(express.json({ limit: config.jsonBodyLimit }));
+
+// 대화기록 저장 채널을 요청 단위로 주입한다(호출부 수정 없이 중앙화).
+// 채팅 라우트 진입 시 body 의 S_ID 로 세션 채널(sess:<sid>)을 계산해 ALS 에 담고,
+// appendHistory 래퍼가 채널 미지정 기록에 그 값을 채운다. → 같은 세션의 모든 탭 대화가
+// 한 채널에 누적되어 새로고침 시 전체를 복원할 수 있다.
+const chatChannelALS = new AsyncLocalStorage();
+function appendHistory(entry) {
+    if (entry && typeof entry === "object") {
+        const store = chatChannelALS.getStore();
+        if (store) {
+            // channel/uid/sid 를 요청 컨텍스트에서 중앙 주입(호출부가 명시하면 그 값 우선).
+            // uid/sid 를 남겨야 나중에 외부 시스템과 요청 데이터를 대조·검증할 수 있다.
+            if (entry.channel == null && store.channel)
+                entry = { ...entry, channel: store.channel };
+            if (entry.uid == null && store.uid)
+                entry = { ...entry, uid: store.uid };
+            if (entry.sid == null && store.sid)
+                entry = { ...entry, sid: store.sid };
+        }
+    }
+    return _appendHistory(entry);
+}
+app.use(["/api/chat", "/api/rag"], (req, res, next) => {
+    const body = req.body || {};
+    const { uid, sid } = memoryIds(body);
+    const ch = chatHistoryChannel(body);
+    if (ch || uid || sid) chatChannelALS.run({ channel: ch, uid, sid }, next);
+    else next();
+});
 
 /** SSE 전송. 클라이언트가 끊겨도 EPIPE 로 프로세스가 죽지 않게 한다. */
 function sseSend(res) {
@@ -544,8 +596,11 @@ async function buildMessages(body, promptCharBudget = Infinity) {
         sysParts.push(
             "Prior conversation turns are background only. " +
                 "Answer the LATEST user message. Do NOT continue the previous topic unless the latest message is about it. " +
+                "Do NOT repeat or re-state a previous answer: if the latest message is a new question or topic, answer THAT; " +
+                "if it is a short acknowledgement (그래/응/ok) or a call (야/저기), reply naturally to it instead of resending the last answer. " +
                 "If the latest message is a greeting or small talk, reply to that briefly. " +
-                "Do NOT say you cannot remember previous messages.",
+                "Do NOT say you cannot remember previous messages. " +
+                "지금 마지막 사용자 메시지에만 답하고, 직전 답변을 그대로 반복하지 마세요.",
         );
     }
     if (memoryCtx) {
@@ -575,12 +630,11 @@ async function buildMessages(body, promptCharBudget = Infinity) {
         messages.push({ role: turn.role, content: turn.content });
     }
 
-    // 약한 모델(0.5B/3B)은 시스템 지시만으론 언어가 흔들리므로,
-    // 질문이 한국어면 사용자 메시지 끝에 한국어 강제 문구를 덧붙인다(생성 직전 recency).
-    const userText =
-        user +
-        koreanReminder(user) +
-        "\n\n(Do not copy or repeat the user's text. Give your own helpful reply.)";
+    // 사용자 턴은 원문 그대로 둔다(llama-server 직접 대화와 동일). 예전엔 언어·"복사금지"
+    // 지시문을 사용자 메시지 끝에 덧붙였는데, "야"·"그래" 같은 짧은 입력에선 그 지시문이
+    // 실제 메시지를 파묻어, 모델이 입력 대신 히스토리(직전 답변)를 반복하는 원인이 됐다.
+    // 언어 강제·반복 금지는 위 시스템 프롬프트로만 건다.
+    const userText = user;
 
     const hasImage =
         content !== undefined && content !== null && content !== "";
@@ -702,10 +756,6 @@ async function chatWithEchoGuard({
     };
 }
 
-// 한국어 질문이면 답변 언어를 못박는 짧은 리마인더 (약한 모델의 중국어 드리프트 방지)
-function koreanReminder(text) {
-    return replyLanguageReminder(text);
-}
 
 app.get("/health", (_req, res) => {
     const s = pool.status();
@@ -1001,54 +1051,55 @@ app.post("/api/workflow/plan", async (req, res) => {
         skillOptions: pool.skillOptions(),
     };
 
-    // 실제 요청은 createPlan 앞에서 긴 입력 파이프라인으로 갈라진다 — 미리보기도 동일하게.
-    if (needsLongPipeline(body)) {
-        const split = splitAskAndBody(q);
-        const chunks = split.isCode
-            ? chunkCode(split.body)
-            : chunkText(split.body);
-        const mapRole = split.isCode ? "review" : "extract";
-        const steps = [
-            ...chunks.map((_, i) => ({
-                tier: config.longMapTier,
-                role: mapRole,
-                instruction: `조각 ${i + 1}/${chunks.length} ${split.isCode ? "코드 리뷰" : "핵심 추출"}`,
-            })),
-            {
-                tier: config.longReduceTier,
-                role: "synthesize",
-                instruction: split.isCode
-                    ? "리뷰 메모 종합 → 최종 리뷰"
-                    : "부분 결과 종합 → 최종 답",
-            },
-        ];
-        return res.json({
-            ...base,
-            ms: 0,
-            pipeline: "long",
-            mode: "workflow",
-            tier: config.longReduceTier,
-            difficulty: 100,
-            reason: `긴 입력 ${base.inputChars}자/~${estimateTokens(q)}tok → ${chunks.length}청크 ${split.isCode ? "코드 리뷰" : "맵리듀스"}`,
-            router: null,
-            long: {
-                chunks: chunks.length,
-                chunkChars: split.isCode
-                    ? config.longCodeChunkChars
-                    : config.longChunkChars,
-                overlap: config.longChunkOverlap,
-                mapTier: config.longMapTier,
-                reduceTier: config.longReduceTier,
-                mapConcurrency: config.longMapConcurrency,
-                kind: split.isCode ? "code" : "doc",
-            },
-            steps,
-        });
-    }
-
+    // 라우터가 특기를 고른 뒤, 그 역할 ctx에 안 들어가면 맵리듀스 미리보기.
     const started = Date.now();
     try {
         const plan = await createPlan(body);
+        const gate = needsLongForPlan(body, plan);
+        if (gate.long) {
+            const split = splitAskAndBody(q);
+            const chunks = split.isCode
+                ? chunkCode(split.body)
+                : chunkText(split.body);
+            const mapRole = split.isCode ? "review" : "extract";
+            const steps = [
+                ...chunks.map((_, i) => ({
+                    tier: config.longMapTier,
+                    role: mapRole,
+                    instruction: `조각 ${i + 1}/${chunks.length} ${split.isCode ? "코드 리뷰" : "핵심 추출"}`,
+                })),
+                {
+                    tier: config.longReduceTier,
+                    role: "synthesize",
+                    instruction: split.isCode
+                        ? "리뷰 메모 종합 → 최종 리뷰"
+                        : "부분 결과 종합 → 최종 답",
+                },
+            ];
+            return res.json({
+                ...base,
+                ms: Date.now() - started,
+                pipeline: "long",
+                mode: "workflow",
+                tier: plan.tier,
+                skill: plan.skill ?? null,
+                difficulty: plan.difficulty,
+                reason: `라우터 skill=${plan.skill ?? "-"} ctx=${gate.ctx} — 긴 입력 ${base.inputChars}자/~${estimateTokens(q)}tok → ${chunks.length}청크 ${split.isCode ? "코드 리뷰" : "맵리듀스"}`,
+                router: planRouterMeta(plan),
+                long: {
+                    chunks: chunks.length,
+                    chunkChars: split.isCode
+                        ? config.longCodeChunkChars
+                        : config.longChunkChars,
+                    overlap: config.longChunkOverlap,
+                    mapTier: config.longMapTier,
+                    reduceTier: config.longReduceTier,
+                    mapConcurrency: config.longMapConcurrency,
+                    kind: split.isCode ? "code" : "doc",
+                },
+                steps,
+            });
+        }
         res.json({
             ...base,
             ms: Date.now() - started,
@@ -1289,6 +1340,10 @@ app.post("/api/roles", async (req, res) => {
         const role = await createRole({
             name: req.body?.name,
             description: req.body?.description,
+            instruction: req.body?.instruction,
+            outputSchema: req.body?.outputSchema,
+            examples: req.body?.examples,
+            params: req.body?.params,
         });
         logger.info(`공통 역할 추가 ＋ "${role.name}" (${role.id})`);
         res.json({ ok: true, role });
@@ -1304,10 +1359,15 @@ app.patch("/api/roles/:id", async (req, res) => {
             Object.prototype.hasOwnProperty.call(req.body ?? {}, k);
         if (has("name")) patch.name = req.body.name;
         if (has("description")) patch.description = req.body.description;
+        if (has("instruction")) patch.instruction = req.body.instruction;
+        if (has("outputSchema")) patch.outputSchema = req.body.outputSchema;
+        if (has("examples")) patch.examples = req.body.examples;
+        if (has("params")) patch.params = req.body.params;
         if (!Object.keys(patch).length) {
-            return res
-                .status(400)
-                .json({ error: "수정할 필드가 없습니다. (name, description)" });
+            return res.status(400).json({
+                error:
+                    "수정할 필드가 없습니다. (name, description, instruction, outputSchema, examples, params)",
+            });
         }
         const role = await updateRole(req.params.id, patch);
         if (!role) {
@@ -1467,6 +1527,9 @@ async function resyncAllPoolSecurity() {
         });
         if (def.security === true) {
             pool.setRoleEnabled(url, "security", true);
+        }
+        if (def.quality === true) {
+            pool.setRoleEnabled(url, "quality", true);
         }
     }
 }
@@ -1727,6 +1790,7 @@ app.post("/api/servers", async (req, res) => {
                 planner: def.planner === true,
                 embedding: def.embedding === true,
                 security: def.security === true,
+                quality: def.quality === true,
                 securityIds: secAssign.securityIds,
                 securityPolicy: secAssign.securityPolicyText,
                 ctx: Number(def.ctx) > 0 ? Number(def.ctx) : config.llamaDefaultCtx,
@@ -2789,6 +2853,7 @@ async function finishAskChat(id, body, ref, keyCtx, started, out, ragMeta = null
         ref,
         question: body.ROLE_USER,
         answer: out.answer,
+        quality: out.quality ?? null,
         reasoning: out.reasoning || undefined,
         model: out.model ?? config.modelName,
         tier: out.tier,
@@ -2835,12 +2900,12 @@ async function finishAskChat(id, body, ref, keyCtx, started, out, ragMeta = null
     return data;
 }
 
-async function runAskLongContent(id, body, temperature) {
+async function runAskLongContent(id, body, temperature, skill) {
     const qAsk = String(body.ROLE_USER ?? "");
     logger.info(
-        `긴 입력 감지 [ask #${id}] ${qAsk.length}자 → 맵리듀스 파이프라인`,
+        `긴 입력 감지 [ask #${id}] ${qAsk.length}자 skill=${skill ?? "-"} → 맵리듀스 파이프라인`,
     );
-    const out = await runLongContent({ body, temperature });
+    const out = await runLongContent({ body, temperature, skill });
     return {
         answer: out.answer,
         reasoning: out.reasoning,
@@ -2893,13 +2958,6 @@ async function processAsk(id, body, ref, keyCtx = {}) {
             ? rawTempEarly
             : config.defaultTemperature;
 
-        // 콘솔 API(/api/ask)도 채팅과 같이 긴 입력을 청크 맵리듀스로 처리한다.
-        // (이전에는 chat 경로만 분할해서, API 키 모드 코드리뷰가 ctx 4096을 그대로 넘겼다)
-        if (needsLongPipeline(body)) {
-            const out = await runAskLongContent(id, body, askTemperature);
-            return await finishAskChat(id, body, ref, keyCtx, started, out);
-        }
-
         // 키에 기초지식(지식셋)이 바인딩돼 있으면 해당 컬렉션으로 스코프 검색해
         // RAG 근거를 자동 주입한다. (호출자가 RAG 파라미터를 몰라도 동작)
         const kn = keyCtx.knowledge;
@@ -2910,13 +2968,69 @@ async function processAsk(id, body, ref, keyCtx = {}) {
         const useKnowledge = knIds.length > 0;
         const skipKnowledgeRag = useKnowledge && isSmallTalk(qAsk);
 
+        if (!useKnowledge || skipKnowledgeRag) {
+            if (skipKnowledgeRag) {
+                logger.info(`기초지식 skip [ask #${id}] 잡담/인사 — 현재 질문 우선`);
+            }
+            const plan = await createPlan(body);
+            if (keyCtx.forceTier && plan.tier !== keyCtx.forceTier) {
+                logger.info(
+                    `토큰 한도 강등 [ask #${id}] ${plan.tier} → ${keyCtx.forceTier}`,
+                );
+                plan.tier = keyCtx.forceTier;
+            }
+            if (keyCtx.allowedTiers) {
+                const clamped = clampTier(plan.tier, keyCtx.allowedTiers);
+                if (clamped !== plan.tier) {
+                    logger.info(
+                        `티어 제한 [ask #${id}] ${plan.tier} → ${clamped} (키 허용: ${keyCtx.allowedTiers.join("/")})`,
+                    );
+                    plan.tier = clamped;
+                }
+            }
+            const gate = needsLongForPlan(body, plan);
+            if (gate.long) {
+                logger.info(
+                    `긴 입력 [ask #${id}] ${qAsk.length}자 ctx=${gate.ctx} skill=${plan.skill ?? "-"} → 맵리듀스`,
+                );
+                const out = await runAskLongContent(
+                    id,
+                    body,
+                    askTemperature,
+                    plan.skill,
+                );
+                return await finishAskChat(id, body, ref, keyCtx, started, out);
+            }
+            logger.info(
+                `라우팅 [ask #${id}] skill=${plan.skill ?? "-"} tier=${plan.tier} ctx=${gate.ctx}${plan.reason ? ` (${plan.reason})` : ""}`,
+            );
+            try {
+                const out = await runWorkflow({
+                    plan,
+                    body,
+                    temperature: askTemperature,
+                    enableThinking: false,
+                });
+                return await finishAskChat(id, body, ref, keyCtx, started, out);
+            } catch (err) {
+                if (!isContextOverflowError(err)) throw err;
+                logger.warn(
+                    `ask 컨텍스트 초과 → 맵리듀스 재시도 [ask #${id}]: ${err.message}`,
+                );
+                const out = await runAskLongContent(
+                    id,
+                    body,
+                    askTemperature,
+                    plan.skill,
+                );
+                return await finishAskChat(id, body, ref, keyCtx, started, out);
+            }
+        }
+
         let route;
         let messages;
         let ragMeta = null;
-        if (skipKnowledgeRag) {
-            logger.info(`기초지식 skip [ask #${id}] 잡담/인사 — 현재 질문 우선`);
-            route = await chooseRoute(body);
-        } else if (useKnowledge) {
+        {
             const q = qAsk;
             const strict = kn.mode !== "augment";
             await rag.load();
@@ -2969,8 +3083,6 @@ async function processAsk(id, body, ref, keyCtx = {}) {
                 history: body.HISTORY,
                 memoryContext: body._memory?.context,
             });
-        } else {
-            route = await chooseRoute(body);
         }
 
         // 토큰 한도 초과 강등: 최저 허용 티어로 고정
@@ -3267,11 +3379,23 @@ const askHandler = async (req, res) => {
         maxTokens: apiKey.limits?.maxTokens || null,
     };
 
+    // 이 외부 API 호출의 U_ID/S_ID 를 요청 컨텍스트에 실어 DB(request_log)에 남긴다.
+    // → 나중에 외부 시스템과 요청 데이터를 대조·검증할 수 있다. (ALS 는 백그라운드
+    //   처리까지 전파되므로 WAIT=N 비동기 기록에도 uid/sid 가 붙는다.)
+    const { uid: askUid, sid: askSid } = memoryIds(body);
+    const askStore = {
+        channel: keyCtx.keyId ? `ask:${apiKey.id}` : "ask",
+        uid: askUid,
+        sid: askSid,
+    };
+
     // WAIT=Y: 완료까지 기다렸다가 결과를 바로 반환
     if (wait) {
         logger.info(`ask 접수 #${id} ref=${ref ?? "-"} (WAIT=Y, 동기 대기): "${q.slice(0, 50)}"`);
         try {
-            const data = await processAsk(id, body, ref, keyCtx);
+            const data = await chatChannelALS.run(askStore, () =>
+                processAsk(id, body, ref, keyCtx),
+            );
             return res
                 .status(data.status === "error" ? 502 : 200)
                 .json({ ...data, resultUrl });
@@ -3282,7 +3406,9 @@ const askHandler = async (req, res) => {
 
     // WAIT=N(기본): 즉시 "생성중" 응답 + 결과 URL, 답변은 백그라운드로 파일에 기록
     logger.info(`ask 접수 #${id} ref=${ref ?? "-"} (WAIT=N, 비동기): "${q.slice(0, 50)}"`);
-    processAsk(id, body, ref, keyCtx).finally(releaseSlot);
+    chatChannelALS.run(askStore, () =>
+        processAsk(id, body, ref, keyCtx).finally(releaseSlot),
+    );
     res.json({
         status: "generating",
         message: "답변을 생성중입니다",
@@ -3300,6 +3426,57 @@ app.post("/api/ask", (req, res) => {
     return askHandler(view, res);
 });
 
+// 외부 API: 자기 키의 할당 정보·사용량 조회 (키 인증만, 사용량 집계·rate 카운트 없음).
+// GET /api/key/info (별칭 /api/usage) — 토큰 한도/사용량/남은량, 요청수(RPM/RPD) 현황,
+// 허용 티어, 동시요청·최대토큰 한도, 자동초기화 스케줄 등을 반환한다.
+function keyInfoHandler(req, res) {
+    const secret = req.query.key || req.headers["x-api-key"];
+    const apiKey = findBySecret(secret); // 조회 시 자동초기화(reset) 반영됨
+    if (!apiKey || !apiKey.enabled) {
+        return res.status(401).json({ error: "유효하지 않은 API KEY 입니다." });
+    }
+    const s = apiKey.key || "";
+    const keyMasked =
+        s.length > 12 ? `${s.slice(0, 7)}…${s.slice(-4)}` : `${s.slice(0, 4)}…`;
+    const limit = apiKey.tokenLimit; // null = 무한대
+    const used = apiKey.tokenUsed;
+    const remaining = limit == null ? null : Math.max(0, limit - used);
+    const lim = apiKey.limits || {};
+    const r = rateUsage(apiKey.id);
+    const rem = (max, u) => (max ? Math.max(0, max - u) : null);
+    res.json({
+        id: apiKey.id,
+        name: apiKey.name,
+        keyMasked,
+        enabled: apiKey.enabled,
+        allowedTiers: apiKey.allowedTiers,
+        allowCustomJson: apiKey.rules?.allowCustom === true,
+        token: {
+            limit, // null = unlimited
+            used,
+            remaining, // null = unlimited
+            overLimit: isOverLimit(apiKey),
+        },
+        limits: {
+            rpm: lim.rpm ?? null,
+            rpd: lim.rpd ?? null,
+            concurrency: lim.concurrency ?? null,
+            maxTokens: lim.maxTokens ?? null,
+            overAction: lim.overAction ?? "reject",
+        },
+        rate: {
+            rpm: { used: r.rpmUsed, remaining: rem(lim.rpm, r.rpmUsed), resetInSec: r.rpmResetInSec },
+            rpd: { used: r.rpdUsed, remaining: rem(lim.rpd, r.rpdUsed), resetInSec: r.rpdResetInSec },
+            inflight: r.inflight,
+        },
+        reset: apiKey.reset,
+        createdAt: apiKey.createdAt,
+        lastUsedAt: apiKey.lastUsedAt,
+    });
+}
+app.get("/api/key/info", keyInfoHandler);
+app.get("/api/usage", keyInfoHandler); // 별칭
+
 // 스트리밍(SSE) 채팅: 토큰을 실시간 전송하고, 마지막에 TTFT/tokens-per-sec 지표를 보낸다.
 // WORKFLOW_MODE=auto/on 이면 라우터가 파이프라인을 짜고 모델끼리 결과를 넘긴다.
 app.post("/api/chat/stream", async (req, res) => {
@@ -3311,6 +3488,7 @@ app.post("/api/chat/stream", async (req, res) => {
     const send = sseSend(res);
 
     let interactiveId = null;
+    let plan;
     try {
         const body = req.body ?? {};
         const q = resolveUserQuestion(body);
@@ -3364,14 +3542,17 @@ app.post("/api/chat/stream", async (req, res) => {
             });
         }
 
-        // 긴 입력(컨텍스트 초과) → 청크 맵리듀스 (RAG 요청은 검색 컨텍스트만 쓰므로 스킵)
-        if (!ragPrep.active && needsLongPipeline(body)) {
+        // 라우터가 특기를 고른 뒤, 그 ctx에 안 들어가면 맵리듀스 (RAG 는 검색 컨텍스트만 사용)
+        plan = await createPlan(body);
+        const streamGate = needsLongForPlan(body, plan);
+        if (!ragPrep.active && streamGate.long) {
             logger.info(
-                `긴 입력 감지 [chat/stream] ${q.length}자 → 맵리듀스 파이프라인`,
+                `긴 입력 [chat/stream] ${q.length}자 skill=${plan.skill ?? "-"} ctx=${streamGate.ctx} → 맵리듀스`,
             );
             const out = await runLongContent({
                 body,
                 temperature,
+                skill: plan.skill,
                 onEvent: (ev) => {
                     if (ev.type === "plan") {
                         send("meta", {
@@ -3462,7 +3643,6 @@ app.post("/api/chat/stream", async (req, res) => {
             return res.end();
         }
 
-        const plan = await createPlan(body);
         const useWorkflow = plan.mode === "workflow" && plan.steps?.length > 1;
         // 보안 게이트가 켜져 있으면 검사 통과 전까지 답을 감춘다(작성 중/점검 중만 표시)
         const securityHold =
@@ -3515,6 +3695,8 @@ app.post("/api/chat/stream", async (req, res) => {
                     else if (ev.type === "token") send("token", { text: ev.text });
                     else if (ev.type === "security_start" || ev.type === "security_done")
                         send("security", ev);
+                    else if (ev.type === "quality_start" || ev.type === "quality_done")
+                        send("quality", ev);
                 },
             });
 
@@ -3530,6 +3712,7 @@ app.post("/api/chat/stream", async (req, res) => {
 
             send("done", {
                 answer: out.answer,
+                quality: out.quality ?? null,
                 reasoning: out.reasoning || undefined,
                 model: out.model ?? config.modelName,
                 tier: out.tier,
@@ -4065,6 +4248,7 @@ app.post("/api/chat/stream", async (req, res) => {
                 const out = await runLongContent({
                     body,
                     temperature,
+                    skill: plan?.skill,
                     onEvent: (ev) => {
                         if (ev.type === "plan") {
                             send("workflow", ev);
@@ -4381,6 +4565,7 @@ app.post("/api/chat/stress", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
     const started = Date.now();
     let interactiveId = null;
+    let plan;
     try {
         const body = req.body ?? {};
         const q = resolveUserQuestion(body);
@@ -4416,10 +4601,14 @@ app.post("/api/chat", async (req, res) => {
             return res.json(payload);
         }
 
-        // 긴 입력(컨텍스트 초과) → 청크 맵리듀스 (RAG 는 검색 컨텍스트만 사용)
-        if (!ragPrep.active && needsLongPipeline(body)) {
-            logger.info(`긴 입력 감지 [chat] ${q.length}자 → 맵리듀스 파이프라인`);
-            const out = await runLongContent({ body, temperature });
+        // 라우터가 특기를 고른 뒤, 그 ctx에 안 들어가면 맵리듀스 (RAG 는 검색 컨텍스트만 사용)
+        plan = await createPlan(body);
+        const chatGate = needsLongForPlan(body, plan);
+        if (!ragPrep.active && chatGate.long) {
+            logger.info(
+                `긴 입력 [chat] ${q.length}자 skill=${plan.skill ?? "-"} ctx=${chatGate.ctx} → 맵리듀스`,
+            );
+            const out = await runLongContent({ body, temperature, skill: plan.skill });
             const sec = await withSecurityPreFinal(q, out.answer, {
                 stepIndex: Array.isArray(out.steps) ? out.steps.length : 0,
             });
@@ -4481,7 +4670,6 @@ app.post("/api/chat", async (req, res) => {
             });
         }
 
-        const plan = await createPlan(body);
         const useWorkflow = plan.mode === "workflow" && plan.steps?.length > 1;
 
         if (useWorkflow) {
@@ -4545,6 +4733,7 @@ app.post("/api/chat", async (req, res) => {
                 id: entry.id,
                 ts: entry.ts,
                 answer: out.answer,
+                quality: out.quality ?? null,
                 reasoning: out.reasoning || undefined,
                 model: entry.model,
                 tier: out.tier,
@@ -4889,7 +5078,7 @@ app.post("/api/chat", async (req, res) => {
                 logger.warn(
                     `chat 컨텍스트 초과 → 맵리듀스 재시도: ${err.message}`,
                 );
-                const out = await runLongContent({ body, temperature });
+                const out = await runLongContent({ body, temperature, skill: plan?.skill });
                 const sec = await withSecurityPreFinal(q, out.answer, {
                     stepIndex: Array.isArray(out.steps) ? out.steps.length : 0,
                 });
@@ -5900,6 +6089,10 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: err?.message || "internal error" });
 });
 
+// 저장소 계층 초기화(postgres 백엔드면 연결 확인 + 동기 접근 저장소 하이드레이션).
+// 요청을 받기 전에 반드시 완료해야 해 app.listen 전에 await 한다. file 백엔드는 no-op.
+await storage.init();
+
 loadStats();
 pool.startHealthChecks();
 startAgentPolling();
@@ -5947,8 +6140,16 @@ const resetSweepTimer = setInterval(() => {
 }, 60 * 1000);
 if (resetSweepTimer.unref) resetSweepTimer.unref();
 
-function onShutdownSignal(sig) {
+async function onShutdownSignal(sig) {
     logger.info(`관리서버 종료 신호 ${sig}`);
+    // 대기 중인 DB write-through 를 반영하고 연결을 닫는다(최대 3초 후 강제 종료).
+    const timer = setTimeout(() => process.exit(0), 3000);
+    if (timer.unref) timer.unref();
+    try {
+        await storage.shutdown();
+    } catch {
+        // best-effort
+    }
     process.exit(0);
 }
 process.on("SIGINT", onShutdownSignal);

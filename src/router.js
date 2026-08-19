@@ -4,13 +4,8 @@ import { pool } from "./pool.js";
 
 const VALID_TIERS = new Set(["small", "medium", "large"]);
 
-// 복잡한 작업을 시사하는 키워드(휴리스틱 폴백용)
-const COMPLEX_KEYWORDS = [
-  "분석", "비교", "요약", "작성", "설계", "추론", "증명", "코드", "디버그", "리팩터",
-  "알고리즘", "수식", "계산", "단계별", "왜", "근거", "전략", "기획", "번역",
-  "analyze", "compare", "summari", "explain why", "step by step", "reasoning",
-  "code", "debug", "refactor", "algorithm", "prove", "translate", "design",
-];
+// 복잡한 작업을 시사하는 키워드(휴리스틱 폴백용) — config(.env)로 외부화.
+// LLM 라우터가 있으면 그쪽이 역할 설명 기준으로 판단하고, 이 목록은 폴백에만 쓴다.
 
 /**
  * 명시 지정·이미지·THINKING 등 LLM 라우터를 건너뛰는 하드 규칙.
@@ -46,7 +41,9 @@ export function chooseTierHeuristic(body) {
 
   const lower = (text + " " + sys).toLowerCase();
   const hasCode = /```|\bfunction\b|=>|;\s*$|\bclass\b|def |#include/i.test(text);
-  const hasKeyword = COMPLEX_KEYWORDS.some((k) => lower.includes(k.toLowerCase()));
+  const hasKeyword = config.complexKeywords.some((k) =>
+    lower.includes(k.toLowerCase()),
+  );
 
   if (hasCode || hasKeyword || len > config.largeMinChars) {
     const why = [

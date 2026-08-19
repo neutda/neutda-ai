@@ -26,6 +26,7 @@ function resolveForPool(def) {
             planner: def.planner === true,
             embedding: def.embedding === true,
             security: def.security === true,
+            quality: def.quality === true,
             securityIds: sec.securityIds,
             securityPolicy: sec.securityPolicyText,
             ctx: Number(def.ctx) > 0 ? Number(def.ctx) : config.llamaDefaultCtx,
@@ -57,7 +58,7 @@ export function upsertBackendFromDef(def) {
             commonSkills: r.resolved.commonSkills,
             skills: r.resolved.skills,
         });
-        for (const role of ["solve", "router", "planner", "embedding", "security"]) {
+        for (const role of ["solve", "router", "planner", "embedding", "security", "quality"]) {
             pool.setRoleEnabled(r.url, role, r.fixed[role]);
         }
         if (r.fixed.security) {

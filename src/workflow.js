@@ -17,6 +17,7 @@ import {
   formatClusterSlotsHint,
 } from "./routerShared.js";
 import { scoreDifficulty, chooseTierHeuristic } from "./router.js";
+import { looksLanguageDrift } from "./textHealth.js";
 import {
   replyLanguageReminder,
   replyLanguageSystemLine,
@@ -32,6 +33,13 @@ import {
 import { isContextOverflowError } from "./longContent.js";
 import { isSecurityEnabledSync } from "./securityPolicies.js";
 import { formatHistoryBlock, formatHistorySnippet } from "./historyContext.js";
+import { roleBehaviorFor } from "./roles.js";
+import {
+  schemaKeys,
+  parseRuleOutput,
+  isBlankRuleData,
+} from "./jsonRule.js";
+import { fillDateFields, isDateKey, seoulToday } from "./koreanDate.js";
 
 const VALID_TIERS = new Set(["small", "medium", "large"]);
 /** 세분 협업 파이프라인: 역할별로 입력을 골라 받는 단계 수 상한 */
@@ -265,8 +273,9 @@ function splitUserAskAndContent(userText) {
 }
 
 function looksLikeReviewAsk(ask) {
-  // 구조적 신호만 — 붙여넣은 코드/문서 리뷰 요청 여부 (단어 목록 최소화)
-  return /\breview\b|리뷰|검토|개선점|피드백/i.test(String(ask || ""));
+  // 붙여넣은 코드/문서 리뷰 요청 여부 — 단어목록은 config(.env)로 외부화.
+  const s = String(ask || "").toLowerCase();
+  return config.reviewKeywords.some((k) => s.includes(String(k).toLowerCase()));
 }
 
 /**
@@ -1058,6 +1067,49 @@ export async function createPlan(body) {
   );
 }
 
+function roleSchemaKeys(rb) {
+  return schemaKeys(rb?.schema);
+}
+
+/**
+ * 역할(특기)의 행동 정의를 생성 시스템 프롬프트 블록으로. (P1 고도화)
+ * 라우팅으로 고른 특기가 catalog 역할이면 그 지시/출력스키마/예시를 답변 생성에 주입한다.
+ */
+function roleBehaviorSystemBlock(rb) {
+  if (!rb) return "";
+  const lines = [];
+  if (rb.instruction && rb.instruction.trim()) {
+    lines.push(`역할 지시(반드시 최우선 준수): ${rb.instruction.trim()}`);
+    lines.push(
+      "내부(라우터·특기·파이프라인·모델)를 설명하거나, 자료를 다시 보내 달라는 안내를 하지 마라. 산출물만 출력하라.",
+    );
+  }
+  const keys = roleSchemaKeys(rb);
+  if (keys.length) {
+    const fields = keys
+      .map((k) => `- ${k}${rb.schema[k] ? `: ${rb.schema[k]}` : ""}`)
+      .join("\n");
+    const dateKeys = keys.filter(isDateKey);
+    const dateRule = dateKeys.length
+      ? `\n오늘(Asia/Seoul): ${seoulToday().ymd}. 날짜 필드(${dateKeys.join(", ")})는 YYYY-MM-DD 로 채워라.`
+      : "";
+    lines.push(
+      "출력은 아래 스키마 키만 갖는 JSON 객체 하나로만 하라. 설명·인사·마크다운·코드블록 없이 첫 글자는 { 이어야 한다.\n" +
+        `스키마 필드:\n${fields}${dateRule}`,
+    );
+  }
+  if (Array.isArray(rb.examples) && rb.examples.length) {
+    const ex = rb.examples
+      .map(
+        (e, i) =>
+          `예시${i + 1})\n입력: ${e.input || ""}\n출력: ${e.output || ""}`,
+      )
+      .join("\n");
+    lines.push(`아래 예시의 형식·톤을 그대로 따르라:\n${ex}`);
+  }
+  return lines.join("\n");
+}
+
 function buildStepMessages({
   body,
   step,
@@ -1065,7 +1117,9 @@ function buildStepMessages({
   totalSteps,
   prior,
   isLast,
+  roleBehavior = null,
 }) {
+  const behaviorBlock = roleBehaviorSystemBlock(roleBehavior);
   const userQ = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
   const sysUser =
     typeof body?.ROLE_SYSTEM === "string" && body.ROLE_SYSTEM.trim()
@@ -1093,10 +1147,13 @@ function buildStepMessages({
   // polish: 0.5B small 은 프롬프트를 베끼므로 호출 생략(직전 초안 사용).
   if (isPolish && prior.length > 0 && !step.reads) {
     const draft = truncate(prior[prior.length - 1].output, budget.draft);
-    const langLine = replyLanguageSystemLine(userQ);
+    const forcedLang = roleBehavior?.params?.language || null;
+    const langLine = replyLanguageSystemLine(userQ, { forcedLang });
     const system = [
       "문장 다듬기만 한다. 새 사실·새 문단을 만들지 마라.",
-      "초안의 의미는 유지하되, 출력 언어는 반드시 사용자 질문과 같게 하라.",
+      forcedLang
+        ? "초안의 의미는 유지하되, 출력 언어는 역할이 지정한 언어로 맞춰라."
+        : "초안의 의미는 유지하되, 출력 언어는 반드시 사용자 질문과 같게 하라.",
       hasRag
         ? ragSystemAddon(ragState.strict !== false, hasVision, userQ)
         : "",
@@ -1104,14 +1161,16 @@ function buildStepMessages({
         ? "개인 기억 블록에 과거 사용자 사실이 있으면 관련될 때 활용하라. 목록에 없는 기억을 지어내지 마라."
         : "",
       langLine,
-      "초안 언어가 질문과 다르면 질문 언어로 번역·다듬어 출력하라.",
+      forcedLang
+        ? "초안 언어가 지정 언어와 다르면 지정 언어로 번역·다듬어 출력하라."
+        : "초안 언어가 질문과 다르면 질문 언어로 번역·다듬어 출력하라.",
       "최종 답 본문만 출력. 라벨·번호·메타·질문 인용 금지.",
     ]
       .filter(Boolean)
       .join("\n");
     const user =
       `초안:\n${draft}\n\n다듬은 답만:` +
-      replyLanguageReminder(userQ, { pipeline: true });
+      replyLanguageReminder(userQ, { pipeline: true, forcedLang });
     return [
       { role: "system", content: system },
       { role: "user", content: user },
@@ -1176,7 +1235,8 @@ function buildStepMessages({
       })
     : { block: "" };
 
-  const langLine = replyLanguageSystemLine(userQ);
+  const forcedLang = roleBehavior?.params?.language || null;
+  const langLine = replyLanguageSystemLine(userQ, { forcedLang });
   // 단일 답변(파이프라인 아님): 협업 프레이밍을 빼고 언어 지시를 앞에 둔다.
   // 소형 모델이 무거운 파이프라인 프롬프트에 눌려 헛토큰(타 언어)을 내는 것을 막음.
   const isLoneDirect =
@@ -1185,16 +1245,21 @@ function buildStepMessages({
     isLoneDirect
       ? [
           langLine,
+          behaviorBlock,
           "너는 사용자 질문에 직접 답하는 어시스턴트다.",
           sysUser ? `사용자 지시: ${step.instruction}` : `지시: ${step.instruction}`,
           historyBlock
-            ? "지금 사용자 질문이 과제다. 이전 대화는 참고만 하라. 지금 질문이 이전 주제와 무관하면 이전 주제를 이어가지 마라. 인사·잡담이면 짧게 그에 답하라."
+            ? roleBehavior
+              ? "이전 대화의 사용자 메시지가 원문·자료면 그걸로 지금 요청을 수행하라. 원문을 다시 보내 달라고 하지 마라."
+              : "지금 사용자 질문이 과제다. 이전 대화는 참고만 하라. 지금 질문이 이전 주제와 무관하면 이전 주제를 이어가지 마라. 인사·잡담이면 짧게 그에 답하라."
             : "",
           hasRag ? ragSystemAddon(ragState.strict !== false, hasVision, userQ) : "",
           hasMemory
             ? "개인 기억 블록에 과거 사용자 사실이 있으면 관련될 때 활용하라. 목록에 없는 기억을 지어내지 마라."
             : "",
-          "답변 전체를 사용자 질문과 같은 언어로만 작성하라. 완성된 답 본문만 출력하고, 라벨·메타 설명·다짐 문장은 쓰지 마라.",
+          forcedLang
+            ? "완성된 답 본문만 출력하고, 라벨·메타 설명·다짐 문장은 쓰지 마라."
+            : "답변 전체를 사용자 질문과 같은 언어로만 작성하라. 완성된 답 본문만 출력하고, 라벨·메타 설명·다짐 문장은 쓰지 마라.",
           config.enforceLanguage && !langLine ? config.langDirective : "",
         ]
       : [
@@ -1203,19 +1268,26 @@ function buildStepMessages({
             (step.skill ? ` · 특기=${step.skill}` : ""),
           step.produces ? `이번 산출물: ${step.produces}` : "",
           `이 단계 지시: ${step.instruction}`,
+          behaviorBlock,
           prior.length > 0
             ? "동료가 보낸 메시지와 사용자 요청을 보고, 네 역할에 해당하는 몫만 수행하라."
             : "",
-          "목표는 원본 사용자 요청에 답하는 것이다. 질문에 붙은 코드/문서는 분석·리뷰 대상일 뿐, 그 함수/로직을 실행하거나 JSON 결과를 흉내 내지 마라.",
+          roleSchemaKeys(roleBehavior).length
+            ? "목표는 원본 사용자 요청에 답하는 것이다. 질문에 붙은 코드/문서는 분석 대상일 뿐 실행하지 마라."
+            : "목표는 원본 사용자 요청에 답하는 것이다. 질문에 붙은 코드/문서는 분석·리뷰 대상일 뿐, 그 함수/로직을 실행하거나 JSON 결과를 흉내 내지 마라.",
           historyBlock
-            ? "지금 사용자 질문이 과제다. 이전 대화는 참고만 하라. 지금 질문이 이전 주제와 무관하면 이전 주제를 이어가지 마라."
+            ? roleBehavior
+              ? "이전 대화의 사용자 메시지가 원문·자료면 그걸로 지금 요청을 수행하라. 원문을 다시 보내 달라고 하지 마라."
+              : "지금 사용자 질문이 과제다. 이전 대화는 참고만 하라. 지금 질문이 이전 주제와 무관하면 이전 주제를 이어가지 마라."
             : "",
           hasRag ? ragSystemAddon(ragState.strict !== false, hasVision, userQ) : "",
           hasMemory
             ? "개인 기억 블록에 과거 사용자 사실이 있으면 관련될 때 활용하라. 목록에 없는 기억을 지어내지 마라."
             : "",
           langLine,
-          "중간·최종 산출 모두 사용자 질문과 같은 언어. 동료가 다른 언어로 줘도 질문 언어로 바꿔 이어라.",
+          forcedLang
+            ? "중간·최종 산출 모두 역할이 지정한 언어로. 동료가 다른 언어로 줘도 바꿔 이어라."
+            : "중간·최종 산출 모두 사용자 질문과 같은 언어. 동료가 다른 언어로 줘도 질문 언어로 바꿔 이어라.",
           isCritique
             ? "비판만 짧게. 최종 본문을 다시 쓰지 마라."
             : isLast
@@ -1227,8 +1299,30 @@ function buildStepMessages({
     .filter(Boolean)
     .join("\n");
 
+  // 단일 직접 답변: 히스토리를 별도 turn(role 메시지)으로 준다 — llama-server 직접 대화와 동일.
+  // 사용자 턴엔 지금 질문만 넣어, "야"·"그래" 같은 짧은 입력이 히스토리 텍스트에 파묻혀
+  // 직전 답변을 반복하던 문제를 없앤다. 문맥(시스템지시·기억·문서)은 시스템에 싣는다.
+  if (isLoneDirect && !hasVision) {
+    let sys = system;
+    if (sysUser) sys += `\n\n사용자 시스템 지시:\n${sysUser}`;
+    if (hasMemory && memoryBlock) sys += `\n\n${memoryBlock}`;
+    if (hasRag && ragBlock) sys += `\n\n${ragBlock}`;
+    const msgs = [{ role: "system", content: sys }];
+    const hist = Array.isArray(body?.HISTORY) ? body.HISTORY : [];
+    for (const t of hist.slice(-12)) {
+      const role = t?.role === "assistant" ? "assistant" : "user";
+      const c = truncate(String(t?.content ?? ""), 800);
+      if (c) msgs.push({ role, content: c });
+    }
+    msgs.push({ role: "user", content: truncate(userQ, budget.userQ) });
+    return msgs;
+  }
+
   // 매 단계 생성 직전에 언어 리마인더 (중간 단계 중국어 → 후속 전파 차단)
-  const langHint = replyLanguageReminder(userQ, { pipeline: true });
+  const langHint = replyLanguageReminder(userQ, {
+    pipeline: true,
+    forcedLang,
+  });
   const user = [
     sysUser ? `사용자 시스템 지시:\n${sysUser}` : "",
     historyBlock,
@@ -1264,6 +1358,14 @@ export function hasSecurityWorkflow() {
   return pool.backends.some(
     (b) => b.securityEnabled && String(b.securityPolicy || "").trim(),
   );
+}
+
+/**
+ * 답변품질검증 게이트 사용 여부. 품질검증 역할이 켜진 백엔드가 하나라도 있으면 ON.
+ * (보안검증과 달리 별도 정책 본문이 필요 없는 순수 토글)
+ */
+export function hasQualityWorkflow() {
+  return pool.backends.some((b) => b.qualityEnabled);
 }
 
 function securityRefuseMessage(reason) {
@@ -1374,6 +1476,12 @@ export async function runWorkflow({
     ? plan.steps
     : [{ tier: plan.tier || "small", role: "answer", instruction: "답변" }];
 
+  // direct 플랜은 라우터가 고른 특기가 plan.skill 에만 있으므로, 답변 step 에 실어
+  // 역할 행동(지시/스키마/예시/파라미터) 주입이 발동되게 한다. (파이프라인은 step별 skill 사용)
+  if (plan.skill && steps.length === 1 && steps[0] && steps[0].skill == null) {
+    steps[0] = { ...steps[0], skill: plan.skill };
+  }
+
   const userQ = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
   // 보안 게이트가 켜져 있으면 검사 통과 전까지 최종 답을 스트리밍하지 않는다
   // (내용이 보였다가 '금지'로 바뀌는 것 방지 — 마지막 단계는 논스트림 생성).
@@ -1422,6 +1530,8 @@ export async function runWorkflow({
 
   const trace = [];
   let ragPack = null;
+  // 답변품질검증 결과(경고 표시용). null = 검증 안 함.
+  let qualityResult = null;
 
   // 0a. 라우터 분류 (핸드오프) — 있으면 먼저
   if (plan.routerBackend || plan.routerAlias) {
@@ -1574,10 +1684,27 @@ export async function runWorkflow({
     const step = steps[i];
     const uiI = i + stepOffset;
     const isLast = i === steps.length - 1;
-    // 마지막 단계 토큰 스트리밍 — 단, 보안 게이트가 켜져 있으면 억제(통과 후 공개)
-    const emitTokensNow = isLast && Boolean(onEvent) && !securityHold;
     const isLarge = step.tier === "large";
     const maxTokens = isLarge ? config.defaultMaxTokens : config.maxTokensSmall;
+
+    // P1: 이 단계 특기가 catalog 역할이면 행동 정의 + 생성 파라미터 오버라이드
+    const roleBehavior = step.skill ? roleBehaviorFor(step.skill) : null;
+    const rbParams = roleBehavior?.params || {};
+    const hasRoleSchema = roleSchemaKeys(roleBehavior).length > 0;
+    // JSON 스키마가 있으면 스트리밍하지 않고 파싱·재시도 후 확정본만 공개 (형식 이탈 방지)
+    const schemaHold = hasRoleSchema;
+    const emitTokensNow =
+      isLast && Boolean(onEvent) && !securityHold && !schemaHold;
+    const effTemperature =
+      rbParams.temperature != null
+        ? rbParams.temperature
+        : hasRoleSchema
+          ? 0
+          : temperature;
+    const effMaxTokens =
+      rbParams.maxTokens != null ? rbParams.maxTokens : maxTokens;
+    const effThinking =
+      rbParams.thinking != null ? rbParams.thinking : enableThinking;
 
     const readIdx = step.reads
       ? step.reads.filter((r) => r.type === "step").map((r) => r.i)
@@ -1714,6 +1841,7 @@ export async function runWorkflow({
       totalSteps: steps.length,
       prior,
       isLast,
+      roleBehavior,
     });
 
     if (body?.content && step.tier === "large") {
@@ -1734,17 +1862,31 @@ export async function runWorkflow({
     }
 
     const started = Date.now();
-    const runStepOnce = async (msgs) => {
-      if (emitTokensNow) {
+    const skillLocked = Boolean(step.skill);
+    const largeTimeoutMs = Math.max(config.requestTimeoutMs, 300000);
+    const runStepOnce = async (msgs, opts = {}) => {
+      // opts.tier: 티어 강제(언어이탈 재생성 시 large). opts.stream: 스트림 여부 강제.
+      // opts.forceTierOnly: 다른 티어 폴백 금지(재생성이 medium 으로 되돌아가지 않게).
+      const useTier = opts.tier || step.tier;
+      const useLarge = useTier === "large";
+      const stream = opts.stream ?? emitTokensNow;
+      const allowOther = opts.forceTierOnly
+        ? false
+        : skillLocked
+          ? false
+          : config.escalateTier;
+      if (stream) {
         const out = await pool.chatStream({
           messages: msgs,
-          temperature,
-          maxTokens,
-          enableThinking: isLarge ? enableThinking : false,
-          preferredTier: step.tier,
+          temperature: effTemperature,
+          maxTokens: effMaxTokens,
+          enableThinking: useLarge ? effThinking : false,
+          preferredTier: useTier,
           preferredDevice: null,
           preferredSkill: step.skill ?? null,
-          allowOtherTiers: config.escalateTier,
+          // 특기 전용 서버가 타임아웃 나면 원문을 못 담는 medium 으로 내리지 않는다
+          allowOtherTiers: allowOther,
+          timeoutMs: useLarge ? largeTimeoutMs : undefined,
           onMeta: (m) => onEvent({ type: "step_meta", i: uiI, ...m }),
           onToken: (t) => onEvent({ type: "token", text: t, i: uiI }),
         });
@@ -1766,13 +1908,14 @@ export async function runWorkflow({
       const { result, backendUrl, tier, device, alias, skill } =
         await pool.chat({
           messages: msgs,
-          temperature: Math.min(temperature ?? 0.7, 0.5),
-          maxTokens: isLast ? maxTokens : Math.min(maxTokens, 1024),
-          enableThinking: isLast && isLarge ? enableThinking : false,
-          preferredTier: step.tier,
+          temperature: Math.min(effTemperature ?? 0.7, 0.5),
+          maxTokens: isLast ? effMaxTokens : Math.min(effMaxTokens, 1024),
+          enableThinking: isLast && useLarge ? effThinking : false,
+          preferredTier: useTier,
           preferredDevice: null,
           preferredSkill: step.skill ?? null,
-          allowOtherTiers: config.escalateTier,
+          allowOtherTiers: allowOther,
+          timeoutMs: useLarge ? largeTimeoutMs : undefined,
         });
       return {
         content: result.content,
@@ -1815,6 +1958,7 @@ export async function runWorkflow({
           totalSteps: steps.length,
           prior,
           isLast,
+          roleBehavior,
         });
         last = await runStepOnce(stepMessages);
       } else {
@@ -1885,6 +2029,79 @@ export async function runWorkflow({
       stepRec.fallbackFrom = best?.role || "prior";
     }
 
+    // 언어 이탈 감지 + 재생성: 한국어 질문인데 답이 중국어로 새어나갔고, 지금
+    // 티어가 large 미만이면 더 강한 large 로 1회 재작성한다. (입력을 키워드로
+    // 예측하지 않고, 실제 출력에서 이탈을 관측해 대응 — 표현/언어 무관.)
+    // 스트리밍으로 이미 나간 토큰은 최종 done.answer(=last.content)로 교정된다.
+    if (
+      isLast &&
+      !hasRoleSchema &&
+      !skillLocked &&
+      last.tier !== "large" &&
+      looksLanguageDrift(last.content, userQ)
+    ) {
+      const largeCap = pool.slotSnapshot()?.byTier?.large?.cap || 0;
+      if (largeCap > 0) {
+        logger.warn(`언어 이탈 감지 (tier=${last.tier}) → large 재생성`);
+        onEvent?.({ type: "step_meta", i: uiI, langDriftRetry: true });
+        try {
+          const regen = await runStepOnce(stepMessages, {
+            tier: "large",
+            stream: false,
+            forceTierOnly: true,
+          });
+          if (regen?.content && !looksLanguageDrift(regen.content, userQ)) {
+            last = regen;
+            stepRec.output = last.content;
+            stepRec.tier = last.tier;
+            stepRec.device = last.device;
+            stepRec.alias = last.alias;
+            stepRec.backend = last.backendUrl;
+            stepRec.model = last.model;
+            stepRec.langDriftFixed = true;
+          } else {
+            logger.warn("large 재생성도 이탈/실패 → 원본 유지");
+          }
+        } catch (e) {
+          logger.warn(`언어 이탈 재생성 실패: ${e.message}`);
+        }
+      } else {
+        logger.warn("언어 이탈 감지했으나 large 백엔드 없음 → 원본 유지");
+      }
+    }
+
+    // P1: 역할 출력 스키마 → JSON 파싱·키 강제. 실패 시 한 번 재시도.
+    if (hasRoleSchema) {
+      const schema = roleBehavior.schema;
+      let parsed = parseRuleOutput(last.content, schema);
+      const needRetry =
+        !parsed.ok ||
+        (isBlankRuleData(parsed.data) && String(userQ || "").trim().length >= 2);
+      if (needRetry) {
+        logger.info(
+          `역할 스키마 재시도 skill="${step.skill}" (${parsed.ok ? "공란" : "파싱실패"})`,
+        );
+        const retryMsgs = [
+          ...stepMessages,
+          {
+            role: "user",
+            content:
+              `이전 출력이 스키마 JSON이 아니다. 설명·마크다운 없이 스키마 키만 갖는 JSON 객체 하나만 다시 출력하라.\n` +
+              `이전 출력:\n${String(last.content || "").slice(0, 800)}`,
+          },
+        ];
+        last = await runStepOnce(retryMsgs);
+        parsed = parseRuleOutput(last.content, schema);
+      }
+      parsed = {
+        ...parsed,
+        data: fillDateFields(parsed.data, userQ, schema),
+      };
+      last.content = JSON.stringify(parsed.data);
+      stepRec.output = last.content;
+      stepRec.schemaOk = parsed.ok;
+    }
+
     prior.push({
       tier: last.tier,
       role: step.role,
@@ -1902,6 +2119,100 @@ export async function runWorkflow({
       isLast,
     });
     trace.push(stepRec);
+
+    // 답변품질검증 게이트: 켜져 있으면 최종 답 직전, 질문과 답의 맥락 일치를 판정.
+    // 불일치면(config.quality.regenerate) large 로 1회 재작성. 보안검증과 독립.
+    if (isLast && !hasRoleSchema && hasQualityWorkflow()) {
+      const qStarted = Date.now();
+      onEvent?.({
+        type: "quality_start",
+        i: uiI,
+        role: "quality",
+        instruction: "답변 품질검증",
+      });
+      const verdict = await pool.runQualityCheck(userQ, last.content);
+      let fixed = false;
+      if (
+        verdict.coherent === false &&
+        config.quality.regenerate &&
+        !skillLocked &&
+        last.tier !== "large"
+      ) {
+        const largeCap = pool.slotSnapshot()?.byTier?.large?.cap || 0;
+        if (largeCap > 0) {
+          logger.warn(`품질검증 불일치(${verdict.reason}) → large 재생성`);
+          try {
+            const regen = await runStepOnce(stepMessages, {
+              tier: "large",
+              stream: false,
+              forceTierOnly: true,
+            });
+            if (regen?.content) {
+              last = regen;
+              stepRec.output = last.content;
+              stepRec.tier = last.tier;
+              stepRec.device = last.device;
+              stepRec.alias = last.alias;
+              stepRec.backend = last.backendUrl;
+              stepRec.model = last.model;
+              fixed = true;
+            }
+          } catch (e) {
+            logger.warn(`품질 재생성 실패: ${e.message}`);
+          }
+        } else {
+          logger.warn("품질검증 불일치이나 large 백엔드 없음 → 원본 유지");
+        }
+      }
+      const qMs = verdict.ms ?? Date.now() - qStarted;
+      const ok = verdict.coherent !== false;
+      // 결과 JSON 에 실릴 품질 경고. ok=false 면 초기 답이 미통과(경고 대상).
+      qualityResult = {
+        checked: true,
+        ok,
+        regenerated: fixed,
+        reason: verdict.reason || null,
+        skipped: Boolean(verdict.skipped),
+      };
+      trace.push({
+        kind: "quality",
+        title: "답변품질검증",
+        i: null,
+        role: "quality",
+        instruction: "질문·답변 맥락 일치 판정",
+        tier: "quality",
+        device: null,
+        alias: verdict.alias || null,
+        backend: verdict.backendUrl || null,
+        model: null,
+        ms: qMs,
+        allow: ok,
+        regenerated: fixed,
+        reason: verdict.reason,
+        skipped: Boolean(verdict.skipped),
+        output: ok
+          ? `일치 · ${verdict.reason || "ok"}`
+          : fixed
+            ? `불일치→재작성 · ${verdict.reason || ""}`
+            : `불일치 · ${verdict.reason || ""}`,
+        isLast: false,
+      });
+      onEvent?.({
+        type: "quality_done",
+        ok,
+        fixed,
+        reason: verdict.reason,
+        alias: verdict.alias || null,
+        ms: qMs,
+      });
+      logger.info(
+        `품질검증 ${ok ? "일치" : fixed ? "불일치→재작성" : "불일치"} @ ${verdict.alias || verdict.backendUrl || "-"}: ${verdict.reason} (${qMs}ms)`,
+      );
+    }
+
+    if (schemaHold && isLast && onEvent) {
+      onEvent({ type: "token", text: last.content, i: uiI });
+    }
 
     onEvent?.({
       type: "step_done",
@@ -1961,6 +2272,7 @@ export async function runWorkflow({
     steps: prior,
     trace,
     plan,
+    quality: qualityResult,
     rag: Boolean(ragPack),
     sources: ragPack?.sources ?? [],
     strict: ragPack?.strict,

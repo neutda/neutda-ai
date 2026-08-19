@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { pool } from "./pool.js";
+import { roleBehaviorFor } from "./roles.js";
 import {
   replyLanguageReminder,
   replyLanguageSystemLine,
@@ -42,16 +43,50 @@ export function estimateTokens(text) {
   return Math.ceil(hangul * est.hangul + han * est.han + other * est.other);
 }
 
-/** 텍스트 길이·추정 토큰으로 긴 입력 여부 판정. 이미지 요청은 제외. */
-export function needsLongPipeline(body) {
+/** 텍스트 길이·추정 토큰으로 긴 입력 여부 판정. 이미지 요청은 제외.
+ *  opts.ctx 가 있으면 그 컨텍스트 예산 기준으로 판정 (large 8192 이면 월간보고 5천자는 분할 안 함).
+ */
+export function promptTokenBudget(ctx, maxTokens = 1024) {
+  const c = Number(ctx) > 0 ? Number(ctx) : 4096;
+  const out = Math.min(
+    Math.max(256, Number(maxTokens) || 1024),
+    Math.floor(c * 0.25),
+  );
+  return Math.max(512, c - out - 256);
+}
+
+export function needsLongPipeline(body, opts = {}) {
   const hasImage =
     body?.content !== undefined && body?.content !== null && body?.content !== "";
   if (hasImage) return false;
   const user = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
   const sys = typeof body?.ROLE_SYSTEM === "string" ? body.ROLE_SYSTEM : "";
   const combined = user + "\n" + sys;
+  const ctx = Number(opts.ctx) > 0 ? Number(opts.ctx) : 0;
+  if (ctx) {
+    return estimateTokens(combined) > promptTokenBudget(ctx, opts.maxTokens ?? 1024);
+  }
   if (combined.length > config.longTriggerChars) return true;
   return estimateTokens(combined) > config.longTriggerTokens;
+}
+
+export function ctxForRoutedSkill(skill, tier) {
+  return (
+    (skill && pool.maxCtxForSkill(skill)) ||
+    pool.maxCtxForTier(tier) ||
+    pool.maxCtxForTier("large") ||
+    pool.maxCtxForTier("medium") ||
+    4096
+  );
+}
+
+/** 라우터가 고른 특기/티어 ctx 기준으로 맵리듀스가 필요한지. */
+export function needsLongForPlan(body, plan) {
+  const ctx = ctxForRoutedSkill(plan?.skill, plan?.tier);
+  return {
+    ctx,
+    long: needsLongPipeline(body, { ctx, maxTokens: 1024 }),
+  };
 }
 
 export function isContextOverflowError(err) {
@@ -219,9 +254,10 @@ export function splitAskAndBody(userQ) {
   if (cut > 8) {
     const head = full.slice(0, cut).trim();
     const body = full.slice(cut).trim();
-    const looksAsk = /리뷰|검토|review|개선|분석|품질|버그|피드백/i.test(head);
+    // 코드 앞에 사용자가 쓴 요청 문장이 있으면 그대로 살린다(단어 매칭 없이 존재 여부만).
+    const hasAsk = head.length >= 4;
     return {
-      ask: looksAsk ? `${head}\n${CODE_REVIEW_ASK}` : CODE_REVIEW_ASK,
+      ask: hasAsk ? `${head}\n${CODE_REVIEW_ASK}` : CODE_REVIEW_ASK,
       body: body || full,
       isCode: true,
     };
@@ -238,6 +274,21 @@ const MAP_SYSTEM_DOC = [
   "관련 사실이 전혀 없을 때에만 정확히 '(핵심 없음)' 이라고만 답하라.",
 ].join("\n");
 
+function roleExtractHint(rb) {
+  const instr = String(rb?.instruction || "").trim();
+  if (!instr) return "";
+  return `최종 산출 형식 — 이 조각에서 해당 항목의 재료를 모아라:\n${instr}`;
+}
+
+function roleFinalHint(rb) {
+  const instr = String(rb?.instruction || "").trim();
+  if (!instr) return "";
+  return [
+    `역할 지시(반드시 최우선 준수): ${instr}`,
+    "라우터·특기·파이프라인·모델을 설명하지 마라. 원문을 다시 보내 달라는 안내도 쓰지 마라. 산출물만 출력하라.",
+  ].join("\n");
+}
+
 const MAP_SYSTEM_CODE = [
   "너는 코드 리뷰 파이프라인의 '조각 검토' 단계다. 이 파일의 일부만 본다.",
   "이 조각에서 발견한 문제만 적어라: 버그, 예외 누락, 레이스/동시성, 자원 누수, 잘못된 분기, 보안, API 오용.",
@@ -247,9 +298,10 @@ const MAP_SYSTEM_CODE = [
   "파일 전체 결론·칭찬·일반론은 쓰지 마라(다음 단계가 종합).",
 ].join("\n");
 
-function buildMapUser({ ask, sysText, chunk, idx, total, isCode }) {
+function buildMapUser({ ask, sysText, chunk, idx, total, isCode, roleHint = "" }) {
   return [
     sysText ? `사용자 시스템 지시:\n${truncate(sysText, 400)}` : "",
+    roleHint,
     `사용자 요청:\n${truncate(ask, 500)}`,
     `${isCode ? "코드" : "문서"} 조각 ${idx + 1}/${total}:\n${chunk}`,
     isCode
@@ -261,7 +313,14 @@ function buildMapUser({ ask, sysText, chunk, idx, total, isCode }) {
     .join("\n\n");
 }
 
-function buildReduceMessages({ ask, sysText, partials, isFinal, isCode }) {
+function buildReduceMessages({
+  ask,
+  sysText,
+  partials,
+  isFinal,
+  isCode,
+  roleHint = "",
+}) {
   const joined = partials
     .map((p, i) => `--- 조각 ${p.i ?? i + 1} ${isCode ? "리뷰" : "추출"} ---\n${p.text}`)
     .join("\n\n");
@@ -275,6 +334,7 @@ function buildReduceMessages({ ask, sysText, partials, isFinal, isCode }) {
           "파일 구조에 대한 짧은 평가 뒤에, 실행 가능한 지적만 남겨라.",
           "일반론·빈 칭찬·조각 번호는 쓰지 마라.",
           sysText ? `사용자 시스템 지시: ${sysText}` : "",
+          roleHint,
           langLine,
         ]
           .filter(Boolean)
@@ -283,6 +343,7 @@ function buildReduceMessages({ ask, sysText, partials, isFinal, isCode }) {
           "너는 긴 문서 파이프라인의 '종합' 단계다.",
           "아래는 문서 각 부분에서 뽑은 내용이다. 이를 근거로 사용자 요청에 대한 최종 답을 작성하라.",
           sysText ? `사용자 시스템 지시도 반드시 반영: ${sysText}` : "",
+          roleHint,
           "중복은 합치고 누락 없이 종합하되, 조각 라벨·메타는 답에 쓰지 마라. 완성된 답 본문만 출력하라.",
           langLine,
           "부분 추출 언어가 달라도 최종 답은 사용자 질문과 같은 언어로.",
@@ -434,6 +495,7 @@ async function runMapPhase({
   temperature,
   isCode,
   onEvent,
+  roleBehavior = null,
 }) {
   const stepRecs = new Array(chunks.length);
   let cursor = 0;
@@ -441,6 +503,7 @@ async function runMapPhase({
   const mapRole = isCode ? "review" : "extract";
   const mapInstr = isCode ? "조각 코드 리뷰" : "추출";
 
+  const extractHint = isCode ? "" : roleExtractHint(roleBehavior);
   async function mapWorker() {
     while (true) {
       const i = cursor++;
@@ -464,7 +527,9 @@ async function runMapPhase({
             {
               role: "system",
               content: [
-                isCode ? MAP_SYSTEM_CODE : MAP_SYSTEM_DOC,
+                isCode
+                  ? MAP_SYSTEM_CODE
+                  : [MAP_SYSTEM_DOC, extractHint].filter(Boolean).join("\n"),
                 replyLanguageSystemLine(ask),
                 isCode
                   ? "리뷰 메모도 사용자 질문과 같은 언어로."
@@ -482,6 +547,7 @@ async function runMapPhase({
                 idx: i,
                 total: chunks.length,
                 isCode,
+                roleHint: extractHint,
               }),
             },
           ],
@@ -585,7 +651,14 @@ function collectPartials(stepRecs, chunks, trace, fallbackText, isCode) {
   return partials;
 }
 
-async function runReducePhase({ ask, sysText, partials, reduceTier, isCode }) {
+async function runReducePhase({
+  ask,
+  sysText,
+  partials,
+  reduceTier,
+  isCode,
+  roleBehavior = null,
+}) {
   const maxChars = isCode
     ? config.longCodeReduceInputChars
     : config.longReduceInputChars;
@@ -610,6 +683,7 @@ async function runReducePhase({ ask, sysText, partials, reduceTier, isCode }) {
           partials: groups[g],
           isFinal: false,
           isCode,
+          roleHint: "",
         }),
         temperature: 0.3,
         maxTokens: config.defaultMaxTokens,
@@ -635,10 +709,12 @@ async function runFinalSynthesis({
   sysText,
   level,
   reduceTier,
+  fallbackTier,
   temperature,
   stepsPlan,
   isCode,
   onEvent,
+  roleBehavior = null,
 }) {
   const cap = isCode ? 3500 : config.longReduceInputChars;
   let notes = level;
@@ -651,12 +727,14 @@ async function runFinalSynthesis({
     );
   }
 
+  const roleHint = isCode ? "" : roleFinalHint(roleBehavior);
   const reduceMessages = buildReduceMessages({
     ask,
     sysText,
     partials: notes,
     isFinal: true,
     isCode,
+    roleHint,
   });
   const finalIdx = stepsPlan.length - 1;
   onEvent?.({
@@ -672,6 +750,7 @@ async function runFinalSynthesis({
   });
 
   const t0 = Date.now();
+  const fbTier = fallbackTier && fallbackTier !== reduceTier ? fallbackTier : null;
   const common = {
     messages: reduceMessages,
     temperature: Math.min(temperature ?? 0.5, 0.5),
@@ -679,14 +758,19 @@ async function runFinalSynthesis({
     enableThinking: false,
     preferredTier: reduceTier,
     allowOtherTiers: false,
-    timeoutMs: 180000,
+    timeoutMs: reduceTier === "large" ? 60000 : 120000,
   };
 
-  async function runOnce(msgs) {
+  async function runOnce(msgs, tier = reduceTier, timeoutMs = common.timeoutMs) {
+    const params = {
+      ...common,
+      messages: msgs,
+      preferredTier: tier,
+      timeoutMs,
+    };
     if (onEvent) {
       const out = await pool.chatStream({
-        ...common,
-        messages: msgs,
+        ...params,
         onMeta: (m) => onEvent({ type: "step_meta", i: finalIdx, ...m }),
         onToken: (t) => onEvent({ type: "token", text: t, i: finalIdx }),
       });
@@ -704,14 +788,13 @@ async function runFinalSynthesis({
         tokenCount: out.tokenCount,
       };
     }
-    const { result, backendUrl, tier, device, alias } = await pool.chat({
-      ...common,
-      messages: msgs,
-    });
+    const { result, backendUrl, tier: usedTier, device, alias } = await pool.chat(
+      params,
+    );
     return {
       content: result.content,
       reasoning: result.reasoning,
-      tier,
+      tier: usedTier,
       device,
       alias,
       backend: backendUrl,
@@ -723,9 +806,12 @@ async function runFinalSynthesis({
 
   let last;
   try {
-    last = await runOnce(reduceMessages);
+    last = await runOnce(reduceMessages, reduceTier);
   } catch (err) {
-    logger.warn(`긴 입력 최종 @${reduceTier} 실패 → 입력 축소 재시도: ${err.message}`);
+    const retryTier = fbTier || reduceTier;
+    logger.warn(
+      `긴 입력 최종 @${reduceTier} 실패 → @${retryTier} 재시도: ${err.message}`,
+    );
     const tighter = notes.map((p) => ({ ...p, text: truncate(p.text, 400) }));
     last = await runOnce(
       buildReduceMessages({
@@ -734,7 +820,10 @@ async function runFinalSynthesis({
         partials: tighter,
         isFinal: true,
         isCode,
+        roleHint,
       }),
+      retryTier,
+      120000,
     );
   }
 
@@ -746,18 +835,40 @@ async function runFinalSynthesis({
  * @param onEvent (ev) => void  — runWorkflow 와 호환되는 plan/step_start/step_done/token 이벤트
  * @returns runWorkflow 와 유사한 { answer, model, tier, device, alias, backend, steps, trace, plan }
  */
-export async function runLongContent({ body, temperature, onEvent }) {
+export async function runLongContent({ body, temperature, onEvent, skill: skillArg }) {
   const started = Date.now();
   const userQ = typeof body?.ROLE_USER === "string" ? body.ROLE_USER : "";
   const sysText =
     typeof body?.ROLE_SYSTEM === "string" && body.ROLE_SYSTEM.trim()
       ? body.ROLE_SYSTEM.trim()
       : "";
-  const { ask, body: bodyText, isCode } = splitAskAndBody(userQ);
+  const { ask, body: bodyText, isCode: isCodeRaw } = splitAskAndBody(userQ);
+  const skill = skillArg || null;
+  const roleBehavior = skill ? roleBehaviorFor(skill) : null;
+  // 역할(행동 정의)이 선택되면 입력이 코드처럼 보여도 하드코딩 코드리뷰 분기 대신
+  // 역할 지시를 따른다. (사용자가 만든 역할이 코드 감지에 덮이지 않도록)
+  const isCode = isCodeRaw && !roleBehavior;
+  if (skill) {
+    logger.info(
+      `긴 입력 라우터 skill="${skill}"${roleBehavior ? " (행동 주입 — 역할 우선)" : ""}`,
+    );
+  }
   const mapWanted = config.longMapTier;
-  const reduceWanted = config.longReduceTier;
+  const skillTier = skill ? pool.tierForSkill(skill) : null;
+  // MAP 은 medium 고정. 최종은 라우터가 고른 역할의 티어를 쓰고,
+  // large 타임아웃 시 medium 으로 내린다. 역할 없으면 문서 종합도 medium.
+  const reduceWanted = isCode
+    ? config.longReduceTier
+    : skillTier || mapWanted;
   const mapTier = pool.resolveSolveTier(mapWanted);
   const reduceTier = pool.resolveSolveTier(reduceWanted);
+  const fallbackTier =
+    reduceTier !== mapTier ? mapTier : isCode ? mapTier : null;
+  if (skill && skillTier) {
+    logger.info(
+      `긴 입력 종합 티어 ${reduceTier} (역할 "${skill}" 배정 티어=${skillTier}, 실패 시 ${fallbackTier || "-"})`,
+    );
+  }
   if (mapTier !== mapWanted) {
     logger.info(
       `긴 입력 맵 티어 ${mapWanted} → ${mapTier} (해결 풀: ${pool.solvePoolLabel()})`,
@@ -787,6 +898,7 @@ export async function runLongContent({ body, temperature, onEvent }) {
     temperature,
     isCode,
     onEvent,
+    roleBehavior,
   });
   const partials = collectPartials(
     stepRecs,
@@ -802,6 +914,7 @@ export async function runLongContent({ body, temperature, onEvent }) {
     partials,
     reduceTier,
     isCode,
+    roleBehavior,
   });
 
   const { last, finalIdx, notes } = await runFinalSynthesis({
@@ -809,10 +922,12 @@ export async function runLongContent({ body, temperature, onEvent }) {
     sysText,
     level,
     reduceTier,
+    fallbackTier,
     temperature,
     stepsPlan,
     isCode,
     onEvent,
+    roleBehavior,
   });
 
   const finalRec = {

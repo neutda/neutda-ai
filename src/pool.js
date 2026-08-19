@@ -158,6 +158,8 @@ class Backend {
             ? [...f.securityIds]
             : [];
         this.securityPolicy = String(f.securityPolicy ?? "").trim();
+        // 답변품질검증: 최종 답 직전 질문·답 맥락 일치 판정. 정책 없는 순수 토글.
+        this.qualityEnabled = Boolean(f.quality);
         this.ctx = Number(f.ctx) > 0 ? Number(f.ctx) : config.llamaDefaultCtx;
         this.parallel =
             Number(f.parallel) > 0
@@ -174,6 +176,7 @@ class Backend {
         this.routerRequests = 0;
         this.plannerRequests = 0;
         this.securityRequests = 0;
+        this.qualityRequests = 0;
         this.chatRequests = 0;
         this.totalErrors = 0;
         this.totalLatencyMs = 0;
@@ -229,6 +232,7 @@ class Backend {
                 planner: this.plannerEnabled,
                 embedding: this.embeddingEnabled,
                 security: this.securityEnabled,
+                quality: this.qualityEnabled,
             },
             solveEnabled: this.solveEnabled,
             chatEnabled: this.solveEnabled, // 구호환
@@ -236,6 +240,7 @@ class Backend {
             plannerEnabled: this.plannerEnabled,
             embeddingEnabled: this.embeddingEnabled,
             securityEnabled: this.securityEnabled,
+            qualityEnabled: this.qualityEnabled,
             securityIds: this.securityIds,
             securityPolicy: this.securityPolicy,
             healthy: this.healthy,
@@ -277,6 +282,7 @@ class Pool {
                         planner: s.planner === true,
                         embedding: s.embedding === true,
                         security: s.security === true,
+                        quality: s.quality === true,
                         securityIds: s.securityIds ?? [],
                         securityPolicy: s.securityPolicy ?? "",
                         ctx:
@@ -1292,6 +1298,7 @@ class Pool {
             b.plannerEnabled = f.planner;
             b.embeddingEnabled = f.embedding;
             b.securityEnabled = f.security;
+            b.qualityEnabled = f.quality;
         }
         // 보안 정책 배정(securityIds) → 검사 본문 복원
         for (const d of defs) {
@@ -1455,7 +1462,9 @@ class Pool {
                       ? b.embeddingEnabled
                       : key === "security"
                         ? b.securityEnabled
-                        : null;
+                        : key === "quality"
+                          ? b.qualityEnabled
+                          : null;
         if (prev === on) return true; // heartbeat 재등록 시 노이즈 로그 방지
         if (key === "solve") {
             b.solveEnabled = on;
@@ -1469,7 +1478,8 @@ class Pool {
                 b.securityIds = [];
                 b.securityPolicy = "";
             }
-        } else return false;
+        } else if (key === "quality") b.qualityEnabled = on;
+        else return false;
         logger.info(
             `백엔드 ${key} ${on ? "ON" : "OFF"} → ${b.tier} @ ${b.url}${b.alias ? ` (${b.alias})` : ""}`,
         );
@@ -1500,6 +1510,8 @@ class Pool {
             return this.backends.some((b) => b.embeddingEnabled);
         if (key === "security")
             return this.backends.some((b) => b.securityEnabled);
+        if (key === "quality")
+            return this.backends.some((b) => b.qualityEnabled);
         if (key === "solve") return this.backends.some((b) => b.canChat);
         return false;
     }
@@ -1520,7 +1532,9 @@ class Pool {
                     ? "embeddingEnabled"
                     : key === "security"
                       ? "securityEnabled"
-                      : null;
+                      : key === "quality"
+                        ? "qualityEnabled"
+                        : null;
         if (!flag) return null;
         let candidates = this.backends.filter(
             (b) =>
@@ -1867,27 +1881,28 @@ class Pool {
         });
     }
 
-    /**
-     * 키워드로 등록된 특기 이름 찾기 (예: 인사 → "간단한 인사").
-     * healthy·canChat 백엔드에 실제로 배정된 특기만.
-     */
-    matchSkillByKeywords(keywords = []) {
-        const keys = (Array.isArray(keywords) ? keywords : [keywords])
-            .map((k) => String(k ?? "").trim())
-            .filter(Boolean);
-        if (!keys.length) return null;
-        const opts = this.skillOptions();
-        for (const o of opts) {
-            const name = o.skill;
-            if (
-                keys.some(
-                    (k) => name.includes(k) || new RegExp(k, "i").test(name),
-                )
-            ) {
-                return name;
-            }
+    /** 특기가 올라간 healthy 백엔드의 최대 ctx (맵리듀스 여부 판단용) */
+    maxCtxForSkill(skill) {
+        if (!skill) return 0;
+        let max = 0;
+        for (const b of this.backends) {
+            if (!b.healthy || !b.canServeSkill || !b.skills.includes(skill))
+                continue;
+            const c = Number(b.ctx) || 0;
+            if (c > max) max = c;
         }
-        return null;
+        return max;
+    }
+
+    /** 티어 healthy 해결 백엔드의 최대 ctx */
+    maxCtxForTier(tier) {
+        let max = 0;
+        for (const b of this.backends) {
+            if (!b.healthy || !b.canChat || b.tier !== tier) continue;
+            const c = Number(b.ctx) || 0;
+            if (c > max) max = c;
+        }
+        return max;
     }
 
     /** 특기가 올라간 백엔드들의 대표 티어 (가장 가벼운 티어 우선) */
@@ -2675,6 +2690,109 @@ ${policy.slice(0, config.security.policyBodyMaxChars)}`;
             allow: true,
             skipped: true,
             reason: lastErr?.message || "보안검증 실패 → 허용",
+        };
+    }
+
+    /**
+     * 답변품질검증 (최종 답 직전). 품질검증 역할 백엔드에서 질문과 답변을 함께
+     * 보고 "답이 질문에 맥락상 맞는지" 판정한다. 정책 없는 순수 판정 —
+     * 애매하거나 실패하면 통과(fail-open)해 사용자 흐름을 막지 않는다.
+     * @returns {{coherent:boolean, reason:string, skipped?:boolean, backendUrl?:string, alias?:string, ms?:number}}
+     */
+    async runQualityCheck(userQ, answer) {
+        if (!this.hasActiveRole("quality")) {
+            return { coherent: true, skipped: true, reason: "품질검증 역할 없음" };
+        }
+        const q = String(userQ ?? "").slice(0, config.quality.questionMaxChars);
+        const a = String(answer ?? "").slice(0, config.quality.answerMaxChars);
+        if (!a.trim()) {
+            return { coherent: true, skipped: true, reason: "빈 답변 → 생략" };
+        }
+        const system = `You are an answer-quality gate. Judge ONLY whether the ANSWER is a coherent, on-context reply to the QUESTION.
+Output ONE JSON object, nothing else.
+
+Coherent (default):
+{"coherent":true,"reason":"ok"}
+
+Not coherent (answer is off-topic, in the wrong language, contradicts itself, is garbled, or ignores the question):
+{"coherent":false,"reason":"<short Korean reason>"}
+
+Do NOT judge factual correctness or style — only question↔answer context match and readability.
+If unsure → {"coherent":true,"reason":"ok"}.`;
+        const tried = new Set();
+        let lastErr = null;
+        for (let i = 0; i < this.backends.length; i++) {
+            const backend = await this.acquireBackendSlot(
+                (skip = new Set()) =>
+                    this.pickFixed("quality", this._mergeExclude(tried, skip)),
+                { priority: SLOT_PRI_INFRA },
+            );
+            if (!backend) break;
+            tried.add(backend.url);
+            backend.totalRequests++;
+            backend.qualityRequests++;
+            const started = Date.now();
+            try {
+                const result = await chatCompletion({
+                    baseUrl: backend.url,
+                    messages: [
+                        { role: "system", content: system },
+                        {
+                            role: "user",
+                            content: `【QUESTION】\n${q}\n\n【ANSWER】\n${a}`,
+                        },
+                    ],
+                    temperature: 0,
+                    maxTokens: config.quality.judgeMaxTokens,
+                    enableThinking: false,
+                });
+                backend.lastLatencyMs = Date.now() - started;
+                backend.totalLatencyMs += backend.lastLatencyMs;
+                const raw = String(result.content || result.reasoning || "");
+                const m = raw.match(/\{[\s\S]*\}/);
+                let coherent = true;
+                let reason = "ok";
+                if (m) {
+                    try {
+                        const v = JSON.parse(m[0]);
+                        if (v && typeof v === "object" && "coherent" in v) {
+                            coherent = v.coherent !== false;
+                            reason = String(v.reason || (coherent ? "ok" : "불일치"));
+                        }
+                    } catch {
+                        /* 파싱 실패 → fail-open */
+                    }
+                }
+                if (!coherent) {
+                    logger.info(
+                        `품질검증 불일치 @ ${backend.alias || backend.url}: ${reason}`,
+                    );
+                }
+                return {
+                    coherent,
+                    reason,
+                    backendUrl: backend.url,
+                    alias: backend.alias,
+                    ms: backend.lastLatencyMs,
+                };
+            } catch (err) {
+                backend.totalErrors++;
+                backend.lastError = err.message;
+                lastErr = err;
+                this._emitError("quality", backend, err);
+                if (!err.retryable) break;
+                if (err.backendDown) backend.healthy = false;
+            } finally {
+                this.releaseBackendSlot(backend);
+            }
+        }
+        logger.warn(
+            `품질검증 실패 → 통과 폴백: ${lastErr?.message || "백엔드 없음"}`,
+        );
+        return {
+            coherent: true,
+            skipped: true,
+            reason: lastErr?.message || "품질검증 실패 → 통과",
         };
     }
 

@@ -12,16 +12,14 @@
 // 저장소는 인메모리 활성 세션 1개 + JSON 파일 영속. 나중 TSDB 로 교체 가능하게
 // start/stop/active/list/get/remove 만 공개한다.
 
-import { readFile, writeFile, mkdir, readdir, unlink } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { pool } from "./pool.js";
 import { getStats } from "./stats.js";
 import { loadServerDefs } from "./serverManager.js";
 import { getMetrics } from "./metrics.js";
+import { keyedDocStore } from "./storage/index.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIR = path.join(__dirname, "..", "data", "loadsessions");
+// 영속: id 로 키된 다중 문서(세션당 파일). 파일→DB 이행은 storage 계층에서 처리.
+const store = keyedDocStore("loadsessions");
 
 /** @type {null | object} 현재 recording 중인 세션 (동시 1개) */
 let current = null;
@@ -38,19 +36,9 @@ function genId(d = new Date()) {
     );
 }
 
-async function ensureDir() {
-    await mkdir(DIR, { recursive: true });
-}
-
-function fileFor(id) {
-    // id 는 genId 로 생성되지만 방어적으로 정규화(경로 이탈 차단)
-    const safe = String(id).replace(/[^a-zA-Z0-9._-]/g, "");
-    return path.join(DIR, `${safe}.json`);
-}
-
 async function writeSession(sess) {
-    await ensureDir();
-    await writeFile(fileFor(sess.id), JSON.stringify(sess, null, 2), "utf-8");
+    // keyedDocStore 가 디렉터리 생성·id 정규화(경로 이탈 차단)·원자적 쓰기를 담당
+    await store.put(sess.id, sess);
 }
 
 // ---- 캡처 --------------------------------------------------------------
@@ -802,44 +790,25 @@ export async function stop() {
 
 /** 저장된 세션 목록(요약, 최신순). */
 export async function list() {
-    try {
-        await ensureDir();
-        const files = (await readdir(DIR)).filter((f) => f.endsWith(".json"));
-        const out = [];
-        for (const f of files) {
-            try {
-                const s = JSON.parse(await readFile(path.join(DIR, f), "utf-8"));
-                out.push({
-                    id: s.id,
-                    label: s.label,
-                    state: s.state,
-                    startedAt: s.startedAt,
-                    endedAt: s.endedAt,
-                    durationMs: s.durationMs,
-                    totals: s.delta?.totals ?? null,
-                });
-            } catch {
-                // 손상 파일 skip
-            }
-        }
-        out.sort((a, b) =>
-            String(b.startedAt).localeCompare(String(a.startedAt)),
-        );
-        return out;
-    } catch {
-        return [];
-    }
+    const sessions = await store.list();
+    const out = sessions.map((s) => ({
+        id: s.id,
+        label: s.label,
+        state: s.state,
+        startedAt: s.startedAt,
+        endedAt: s.endedAt,
+        durationMs: s.durationMs,
+        totals: s.delta?.totals ?? null,
+    }));
+    out.sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
+    return out;
 }
 
 /** 세션 리포트 전체. 없으면 null. */
 export async function get(id) {
     // recording 중인 세션은 아직 파일에 delta 가 없으니 인메모리 우선
     if (current && current.id === id) return current;
-    try {
-        return JSON.parse(await readFile(fileFor(id), "utf-8"));
-    } catch {
-        return null;
-    }
+    return store.get(id);
 }
 
 /** 세션 삭제. 활성 세션은 삭제 불가. */
@@ -851,10 +820,6 @@ export async function remove(id) {
         err.code = "session-active";
         throw err;
     }
-    try {
-        await unlink(fileFor(id));
-        return { ok: true, removed: id };
-    } catch {
-        return { ok: false, removed: null };
-    }
+    const ok = await store.remove(id);
+    return ok ? { ok: true, removed: id } : { ok: false, removed: null };
 }

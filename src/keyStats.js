@@ -4,50 +4,27 @@
  * - 에러는 코드별 카운트 + 최근 샘플을 보관한다.
  * 실제 대화 원문은 history.js(channel=ask:<keyId>)에 있으므로 여기선 수치만.
  */
-import { writeFile, mkdir } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "data");
-const FILE = path.join(DATA_DIR, "keyStats.json");
+import { docStore } from "./storage/index.js";
 
 const HOUR_MS = 3600 * 1000;
 const KEEP_HOURS = 24 * 14; // 최근 14일치 시간 버킷만 유지
 const RECENT_ERRORS = 20;
 const TIERS = ["small", "medium", "large"];
 
+// 영속: 단일 문서 저장소 (파일→DB 이행은 storage 계층에서 처리)
+const backing = docStore("keyStats.json", { debounceMs: 2000 });
+
 let store = null; // { keys: { [keyId]: {...} } }
-let saveTimer = null;
 
 function load() {
     if (store) return store;
-    let parsed = { keys: {} };
-    if (existsSync(FILE)) {
-        try {
-            const raw = JSON.parse(readFileSync(FILE, "utf-8"));
-            if (raw && typeof raw.keys === "object") parsed = raw;
-        } catch {
-            parsed = { keys: {} };
-        }
-    }
-    store = parsed;
+    const raw = backing.readSync();
+    store = raw && typeof raw.keys === "object" ? raw : { keys: {} };
     return store;
 }
 
 function scheduleSave() {
-    if (saveTimer) return;
-    saveTimer = setTimeout(() => {
-        saveTimer = null;
-        saveNow().catch(() => {});
-    }, 2000);
-    if (saveTimer.unref) saveTimer.unref();
-}
-
-async function saveNow() {
-    await mkdir(DATA_DIR, { recursive: true });
-    await writeFile(FILE, JSON.stringify(store ?? { keys: {} }), "utf-8");
+    backing.save(store ?? { keys: {} });
 }
 
 function emptyRec() {

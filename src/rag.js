@@ -5,11 +5,16 @@ import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
+import { docStore } from "./storage/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data", "rag");
-const INDEX_FILE = path.join(DATA_DIR, "index.json");
 const IMAGES_DIR = path.join(DATA_DIR, "images");
+
+// 인덱스({docs, chunks}) 영속 — file: data/rag/index.json / postgres: rag_document+rag_chunk.
+// 이미지 바이너리는 아래 IMAGES_DIR 파일로 유지(참조 image_file 만 인덱스에 저장).
+// 비동기 전용이라 lazy(부팅 하이드레이션 생략) + 즉시 쓰기(debounce 0).
+const index = docStore("rag/index.json", { debounceMs: 0, lazy: true });
 
 export const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 
@@ -131,7 +136,6 @@ function rebuildStats() {
 }
 
 async function persist() {
-    await ensureDir();
     // tokens/len 등 파생 데이터는 저장하지 않고, 로드시 재계산한다.
     const data = {
         docs,
@@ -147,7 +151,8 @@ async function persist() {
             embedding: Array.isArray(c.embedding) ? c.embedding : undefined,
         })),
     };
-    await writeFile(INDEX_FILE, JSON.stringify(data), "utf-8");
+    index.save(data);
+    await index.flush();
 }
 
 function cosine(a, b) {
@@ -199,21 +204,14 @@ export async function warmEmbeddings() {
 
 export async function load() {
     if (loaded) return;
-    try {
-        const raw = await readFile(INDEX_FILE, "utf-8");
-        const data = JSON.parse(raw);
-        docs = Array.isArray(data.docs) ? data.docs : [];
-        chunks = Array.isArray(data.chunks)
-            ? data.chunks.map((c) => ({
-                  ...c,
-                  embedding: Array.isArray(c.embedding) ? c.embedding : undefined,
-              }))
-            : [];
-    } catch (err) {
-        if (err.code !== "ENOENT") throw err;
-        docs = [];
-        chunks = [];
-    }
+    const data = (await index.read()) || {};
+    docs = Array.isArray(data.docs) ? data.docs : [];
+    chunks = Array.isArray(data.chunks)
+        ? data.chunks.map((c) => ({
+              ...c,
+              embedding: Array.isArray(c.embedding) ? c.embedding : undefined,
+          }))
+        : [];
     rebuildStats();
     loaded = true;
 }

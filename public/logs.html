@@ -391,6 +391,15 @@
                 color: var(--muted);
                 font-variant-numeric: tabular-nums;
             }
+            .head-right {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .btn-dl {
+                padding: 2px 8px;
+                font-size: 11px;
+            }
             .logs {
                 flex: 1;
                 overflow-y: auto;
@@ -603,8 +612,10 @@
                 <div class="grid">
                     <div class="col">
                         <div class="col-head">
-                            <span>전체 로그 <span class="count" id="fileAllHint" style="font-weight:400"></span></span
-                            ><span class="count" id="cAll">0건</span>
+                            <span>전체 로그 <span class="count" id="fileAllHint" style="font-weight:400"></span></span>
+                            <span class="head-right"
+                                ><button type="button" class="btn btn-dl" id="btnDlAll" title="현재 필터의 전체 로그를 .log 파일로 저장">⭳ .log</button
+                                ><span class="count" id="cAll">0건</span></span>
                         </div>
                         <div class="logs" id="allLogs">
                             <div class="empty">로그 대기 중…</div>
@@ -612,8 +623,10 @@
                     </div>
                     <div class="col">
                         <div class="col-head err">
-                            <span>오류 로그 <span class="count" id="fileErrHint" style="font-weight:400;color:var(--muted)"></span></span
-                            ><span class="count" id="cErr">0건</span>
+                            <span>오류 로그 <span class="count" id="fileErrHint" style="font-weight:400;color:var(--muted)"></span></span>
+                            <span class="head-right"
+                                ><button type="button" class="btn btn-dl" id="btnDlErr" title="현재 필터의 오류 로그를 .log 파일로 저장">⭳ .log</button
+                                ><span class="count" id="cErr">0건</span></span>
                         </div>
                         <div class="logs" id="errLogs">
                             <div class="empty">오류 없음</div>
@@ -879,6 +892,53 @@
                 $("cErr").textContent =
                     render($("errLogs"), lastErr, "조건에 맞는 오류 없음", f) +
                     (active ? "건(필터)" : "건");
+            }
+
+            // 현재 필터(passes)를 통과한 항목을 사람이 읽는 로그 텍스트로.
+            function toLogText(items, f) {
+                return items
+                    .filter((e) => passes(e, f))
+                    .map((e) => {
+                        const ts = e.ts || "";
+                        const src = shortSource(e);
+                        const lv = String(e.level || "info").toUpperCase();
+                        return [ts, src, lv, e.message ?? ""]
+                            .filter((x) => x !== "")
+                            .join("\t");
+                    })
+                    .join("\n");
+            }
+
+            // 현재 화면에 보이는(필터 적용된) 로그를 .log 파일로 저장.
+            // kind: "all"=전체 로그, "err"=오류 로그.
+            function downloadLog(kind) {
+                const f = currentFilter();
+                const items = kind === "err" ? lastErr : lastAll;
+                const text = toLogText(items, f);
+                if (!text) {
+                    $("updated").textContent =
+                        (kind === "err" ? "오류" : "전체") +
+                        " 로그: 저장할 내용이 없습니다";
+                    return;
+                }
+                const srcTag =
+                    selected === "all"
+                        ? "all-servers"
+                        : String(selected).replace(/[^a-zA-Z0-9._-]+/g, "-");
+                const name = `${kind === "err" ? "error" : "all"}_${srcTag}_${selectedDate()}.log`;
+                const blob = new Blob([text + "\n"], {
+                    type: "text/plain;charset=utf-8",
+                });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = name;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                const n = text.split("\n").length;
+                $("updated").textContent = `${name} 저장 (${n}줄)`;
             }
 
             function fmtBytes(n) {
@@ -1211,6 +1271,9 @@
                 $("fText").value = "";
                 applyRender();
             });
+
+            $("btnDlAll").addEventListener("click", () => downloadLog("all"));
+            $("btnDlErr").addEventListener("click", () => downloadLog("err"));
 
             $("btnTestError").addEventListener("click", async () => {
                 try {

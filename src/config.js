@@ -17,6 +17,17 @@ function num(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** 쉼표 구분 문자열 → 트림된 배열. 미지정·빈값이면 fallback 배열 사용. */
+function list(value, fallback) {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return fallback;
+  }
+  return String(value)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function normalizeUrl(u) {
   return u.trim().replace(/\/+$/, "");
 }
@@ -283,6 +294,19 @@ export const config = {
     process.env.REPLY_LANGUAGE_DIRECTIVE ||
     "Reply in the same language as the user's question. Do not switch languages. Korean question → Korean only (not Chinese). English question → English only. Chinese question → Chinese only.",
   defaultMaxTokens: num(process.env.DEFAULT_MAX_TOKENS, 2048),
+  // 반복 붕괴(같은 구절 무한 반복) 방지 샘플링. llama.cpp /v1/chat/completions 가
+  // OpenAI 파라미터와 함께 그대로 받는다. 미지정 시 서버 기본은 repeat_penalty=1.0(사실상 꺼짐)
+  // 이라 약한/양자화 모델이 "카/MPLD…" 처럼 무한 반복에 빠질 수 있다.
+  repeatPenalty: num(process.env.REPEAT_PENALTY, 1.1),
+  repeatLastN: num(process.env.REPEAT_LAST_N, 256),
+  frequencyPenalty: num(process.env.FREQUENCY_PENALTY, 0),
+  presencePenalty: num(process.env.PRESENCE_PENALTY, 0),
+  // 저확률 "헛토큰"(깨진 글자·이상한 식별자) 억제 샘플러. 명시하지 않으면 llama.cpp
+  // 빌드별 기본값에 의존하므로 값을 고정해 일관성을 준다. 헛토큰이 보이면 MIN_P 를
+  // 0.1~0.2 로 올리거나 요청 TEMPERATURE 를 낮추면 더 강하게 잘린다.
+  topK: num(process.env.TOP_K, 40),
+  topP: num(process.env.TOP_P, 0.95),
+  minP: num(process.env.MIN_P, 0.05),
   // 컨텍스트 초과 방지: 티어별 max_tokens 와 프롬프트(시스템+히스토리+질문) 글자수 상한
   // small/medium 은 ctx 4096 가정 → 보수적으로 제한, large 는 ctx 8192 가정
   maxTokensSmall: num(process.env.MAX_TOKENS_SMALL, 1024),
@@ -310,6 +334,23 @@ export const config = {
   // 휴리스틱 임계값(글자수): smallMaxChars 이하=small, 그 사이=medium, largeMinChars 초과=large
   smallMaxChars: num(process.env.SMALL_MAX_CHARS, 200),
   largeMinChars: num(process.env.LARGE_MIN_CHARS, 600),
+  // 휴리스틱 폴백(LLM 라우터 없을 때)용 단어목록·패턴 — 소스에 박지 않고 .env 로 튜닝.
+  // 역할(특기) 선택은 LLM 라우터가 역할 설명으로 판단하므로 이 목록은 폴백 분류에만 쓴다.
+  // 복잡한 작업을 시사하는 키워드(휴리스틱 티어 판정)
+  complexKeywords: list(process.env.COMPLEX_KEYWORDS, [
+    "분석", "비교", "요약", "작성", "설계", "추론", "증명", "코드", "디버그", "리팩터",
+    "알고리즘", "수식", "계산", "단계별", "왜", "근거", "전략", "기획", "번역",
+    "analyze", "compare", "summari", "explain why", "step by step", "reasoning",
+    "code", "debug", "refactor", "algorithm", "prove", "translate", "design",
+  ]),
+  // 리뷰/검토 요청을 시사하는 단어(파이프라인 폴백 구성용)
+  reviewKeywords: list(process.env.REVIEW_KEYWORDS, [
+    "review", "리뷰", "검토", "개선점", "피드백",
+  ]),
+  // 문서검색·장기기억이 필요 없는 인사·잡담 판정 패턴(정규식 본문, 앵커는 코드가 부여)
+  smallTalkPattern:
+    process.env.SMALL_TALK_PATTERN ||
+    "안녕(하세요|하신가|히\\s*가세요)?|하이|헬로|hello|hi|hey|ㅎㅇ|ㅎㅎ+|ㅋ+|네+|아니요|아니|응+|ㅇㅇ|ㄱㅅ|고마워|감사합니다?|고맙습니다|수고(하세요|했어)?|잘\\s*가|바이|bye",
   // 난이도 점수(0~100)가 이 값 이상이면 같은 티어 내에서 GPU 백엔드 선호
   gpuMinDifficulty: num(process.env.GPU_MIN_DIFFICULTY, 50),
   // 긴 입력(컨텍스트 초과) 처리: medium ctx 4096 기준으로 보수적 분할
@@ -439,6 +480,18 @@ export const config = {
     // 근거 인용(quote) 허용 길이 (오탐/누락 방지 경계)
     quoteMin: num(process.env.SECURITY_QUOTE_MIN, 2),
     quoteMax: num(process.env.SECURITY_QUOTE_MAX, 24),
+  },
+
+  // ===== 답변품질검증 게이트(judge) =====
+  quality: {
+    // judge 에 넣는 질문·답변 스니펫 최대 길이
+    questionMaxChars: num(process.env.QUALITY_QUESTION_MAX_CHARS, 1500),
+    answerMaxChars: num(process.env.QUALITY_ANSWER_MAX_CHARS, 3000),
+    // judge 응답 최대 토큰 (JSON 한 줄)
+    judgeMaxTokens: num(process.env.QUALITY_JUDGE_MAX_TOKENS, 120),
+    // 불일치 판정 시 large 로 1회 재작성할지 (끄면 판정만 기록하고 원본 유지)
+    regenerate:
+      String(process.env.QUALITY_REGENERATE ?? "true").toLowerCase() === "true",
   },
 
   // ===== 긴 입력 토큰 추정 계수 (한글/한자/기타 문자당 토큰) =====

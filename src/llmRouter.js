@@ -11,6 +11,7 @@ import {
   clamp,
   truncate,
   skillMenu,
+  isShortFormSkill,
 } from "./routerShared.js";
 
 // 하위 호환: 기존 import 경로 유지
@@ -80,8 +81,13 @@ export async function classifyWithLlm(body) {
     let skill = resolveSkillChoice(parsed.skill, skillOptions);
     const qLen = String(body?.ROLE_USER ?? "").trim().length;
     const hasCodeFence = /```/.test(String(body?.ROLE_USER ?? ""));
-    // 현재 질문이 길거나 코드면 단문 특기 오매칭 차단 (HISTORY 길이로 막지 않음)
-    if (skill && (qLen >= config.smallMaxChars || hasCodeFence)) {
+    // 인사 같은 단문 전용 특기만 긴 질문·코드에서 차단.
+    // 그 외 특기는 역할 설명 기준으로 라우터가 고른 값을 유지한다.
+    if (
+      skill &&
+      (qLen >= config.smallMaxChars || hasCodeFence) &&
+      isShortFormSkill(skill, skillOptions)
+    ) {
       logger.info(
         `라우터 특기 무시(현재질문 구조): skill="${skill}" qLen=${qLen}`,
       );

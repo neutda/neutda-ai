@@ -6,6 +6,7 @@
  * - planner: 파이프라인 설계 (workflow 단계 구성) — 라우터와 분리
  * - embedding: RAG 임베딩
  * - security: 보안검증 (켜면 securityPolicy 텍스트로 입력 검사)
+ * - quality: 답변품질검증 (켜면 최종 답 직전, 질문과 답의 맥락 일치를 판정)
  *
  * 요약·추출 등은 역할 관리(카탈로그)에서 만든다.
  * 예전 "chat" → solve. "guardrail" 은 제거됨.
@@ -16,6 +17,7 @@ export const FIXED_ROLES = [
     "planner",
     "embedding",
     "security",
+    "quality",
 ];
 
 /**
@@ -32,6 +34,8 @@ export function normalizeFixedRole(role) {
     if (key === "pipeline" || key === "design" || key === "파이프라인")
         return "planner";
     if (key === "보안검증" || key === "seccheck") return "security";
+    if (key === "답변품질검증" || key === "품질검증" || key === "qualitycheck")
+        return "quality";
     return key;
 }
 
@@ -61,5 +65,6 @@ export function readFixedFlags(def = {}) {
         planner: flag("planner") || flag("pipeline"),
         embedding: flag("embedding"),
         security: flag("security"),
+        quality: flag("quality"),
     };
 }

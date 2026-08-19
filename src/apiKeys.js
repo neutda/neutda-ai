@@ -3,22 +3,23 @@
  * 키별로 사용 여부·허용 티어(모델)·토큰 한도(무한대 가능)·누적 사용량을 관리한다.
  * roles.js 와 동일하게 파일에 영속하며, 잦은 usage 누적은 디바운스 저장한다.
  */
-import { writeFile, mkdir } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { config } from "./config.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "data");
-const KEYS_FILE = path.join(DATA_DIR, "apiKeys.json");
+import { collectionStore } from "./storage/index.js";
 
 export const TIERS = ["small", "medium", "large"];
 const NAME_MAX = 40;
 
-let keys = null; // 인메모리 캐시
-let saveTimer = null;
+// 영속: 레코드 컬렉션 저장소 (파일→DB 이행은 storage 계층에서 처리).
+// 로드 시 sanitizeKey 로 디스크 방어. (sanitizeKey 는 함수 선언이라 호이스팅됨)
+const repo = collectionStore("apiKeys.json", {
+    rootKey: "keys",
+    idField: "id",
+    sanitize: sanitizeKey,
+    pretty: true,
+    debounceMs: 1500,
+});
+let seededOnce = false;
 
 function newId() {
     return "k_" + Date.now().toString(36) + randomBytes(3).toString("hex");
@@ -202,50 +203,28 @@ function sanitizeKey(raw) {
     };
 }
 
+/**
+ * 키 목록을 로드해 반환한다. 최초 1회 로드 시점에 스토어가 비어 있으면
+ * 레거시 단일 키(config.apiKey)를 무한대·전체티어로 시드한다.
+ * (원 구현과 동일하게 프로세스당 최초 로드에서만 시드 — 이후 전부 삭제해도 재시드 안 함)
+ */
 function load() {
-    if (keys) return keys;
-    let parsed = [];
-    if (existsSync(KEYS_FILE)) {
-        try {
-            const raw = JSON.parse(readFileSync(KEYS_FILE, "utf-8"));
-            if (Array.isArray(raw?.keys)) parsed = raw.keys;
-        } catch {
-            parsed = [];
+    const arr = repo.all();
+    if (!seededOnce) {
+        seededOnce = true;
+        if (!arr.length && config.apiKey) {
+            repo.upsert(
+                sanitizeKey({
+                    key: config.apiKey,
+                    name: "기본 키 (레거시)",
+                    enabled: true,
+                    allowedTiers: [...TIERS],
+                    tokenLimit: null,
+                }),
+            );
         }
     }
-    keys = parsed.map(sanitizeKey).filter(Boolean);
-    // 하위호환: 스토어가 비어 있으면 레거시 단일 키를 무한대·전체티어로 시드
-    if (!keys.length && config.apiKey) {
-        keys.push(
-            sanitizeKey({
-                key: config.apiKey,
-                name: "기본 키 (레거시)",
-                enabled: true,
-                allowedTiers: [...TIERS],
-                tokenLimit: null,
-            }),
-        );
-        scheduleSave();
-    }
-    return keys;
-}
-
-function scheduleSave() {
-    if (saveTimer) return;
-    saveTimer = setTimeout(() => {
-        saveTimer = null;
-        saveNow().catch(() => {});
-    }, 1500);
-    if (saveTimer.unref) saveTimer.unref();
-}
-
-async function saveNow() {
-    await mkdir(DATA_DIR, { recursive: true });
-    await writeFile(
-        KEYS_FILE,
-        JSON.stringify({ keys: keys ?? [] }, null, 2),
-        "utf-8",
-    );
+    return repo.all();
 }
 
 /** 외부 노출용 뷰 — 시크릿은 마스킹된 프리뷰도 함께 제공(원본도 포함: 내부 관리용). */
@@ -274,10 +253,10 @@ function publicView(k) {
 
 /** 관리 UI용 전체 목록 (조회 시점에 예정된 자동 초기화를 먼저 적용) */
 export function listKeys() {
-    load();
+    const keys = load();
     let changed = false;
     for (const rec of keys) if (applyDueReset(rec)) changed = true;
-    if (changed) scheduleSave();
+    if (changed) repo.persist();
     return keys.map(publicView);
 }
 
@@ -285,21 +264,21 @@ export function listKeys() {
 export function findBySecret(secret) {
     if (typeof secret !== "string" || !secret) return null;
     const rec = load().find((k) => k.key === secret) || null;
-    if (rec && applyDueReset(rec)) scheduleSave();
+    if (rec && applyDueReset(rec)) repo.persist();
     return rec;
 }
 
 /** 모든 키의 예정된 자동 초기화를 적용한다(주기 스윕용). 초기화된 키 수 반환. */
 export function sweepResets() {
-    load();
+    const keys = load();
     let n = 0;
     for (const rec of keys) if (applyDueReset(rec)) n++;
-    if (n) scheduleSave();
+    if (n) repo.persist();
     return n;
 }
 
 export function createKey(input = {}) {
-    load();
+    const keys = load();
     const rec = sanitizeKey({
         key: input.key, // 없으면 sanitizeKey 가 자동발급
         name: input.name,
@@ -316,14 +295,13 @@ export function createKey(input = {}) {
     if (keys.some((k) => k.key === rec.key)) {
         throw new Error("이미 존재하는 키 값입니다.");
     }
-    keys.push(rec);
-    scheduleSave();
+    repo.upsert(rec);
     return publicView(rec);
 }
 
 export function updateKey(id, patch = {}) {
     load();
-    const rec = keys.find((k) => k.id === id);
+    const rec = repo.get(id);
     if (!rec) return null;
     const has = (key) => Object.prototype.hasOwnProperty.call(patch, key);
     if (has("name")) rec.name = normalizeName(patch.name);
@@ -335,17 +313,13 @@ export function updateKey(id, patch = {}) {
     if (has("limits")) rec.limits = normalizeLimits({ ...rec.limits, ...patch.limits });
     if (has("reset")) rec.reset = buildReset(patch.reset, rec.reset);
     rec.updatedAt = new Date().toISOString();
-    scheduleSave();
+    repo.upsert(rec);
     return publicView(rec);
 }
 
 export function deleteKey(id) {
     load();
-    const i = keys.findIndex((k) => k.id === id);
-    if (i === -1) return false;
-    keys.splice(i, 1);
-    scheduleSave();
-    return true;
+    return repo.remove(id);
 }
 
 /** 완료된 요청의 토큰 사용량을 키에 누적 (id 기준). */
@@ -354,17 +328,17 @@ export function addUsage(id, tokens) {
     const n = Number(tokens);
     if (!Number.isFinite(n) || n <= 0) return;
     load();
-    const rec = keys.find((k) => k.id === id);
+    const rec = repo.get(id);
     if (!rec) return;
     rec.tokenUsed += Math.floor(n);
     rec.lastUsedAt = new Date().toISOString();
-    scheduleSave();
+    repo.upsert(rec);
 }
 
 /** 지식셋 삭제 시 모든 키 바인딩에서 해당 id 를 제거한다. */
 export function unbindCollection(collectionId) {
     if (!collectionId) return 0;
-    load();
+    const keys = load();
     let n = 0;
     for (const rec of keys) {
         const ids = rec.knowledge?.collectionIds;
@@ -376,14 +350,14 @@ export function unbindCollection(collectionId) {
         rec.updatedAt = new Date().toISOString();
         n++;
     }
-    if (n) scheduleSave();
+    if (n) repo.persist();
     return n;
 }
 
 /** 법칙 삭제 시 모든 키 바인딩에서 해당 id 를 제거한다. */
 export function unbindRule(ruleId) {
     if (!ruleId) return 0;
-    load();
+    const keys = load();
     let n = 0;
     for (const rec of keys) {
         const ids = rec.rules?.ruleIds;
@@ -395,13 +369,13 @@ export function unbindRule(ruleId) {
         rec.updatedAt = new Date().toISOString();
         n++;
     }
-    if (n) scheduleSave();
+    if (n) repo.persist();
     return n;
 }
 
 export function resetUsage(id) {
     load();
-    const rec = keys.find((k) => k.id === id);
+    const rec = repo.get(id);
     if (!rec) return null;
     rec.tokenUsed = 0;
     const nowIso = new Date().toISOString();
@@ -415,7 +389,7 @@ export function resetUsage(id) {
             rec.reset.every,
         );
     }
-    scheduleSave();
+    repo.upsert(rec);
     return publicView(rec);
 }
 

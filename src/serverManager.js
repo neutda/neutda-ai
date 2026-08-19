@@ -28,6 +28,7 @@ import {
     resolveServerSecurity,
     securityPoliciesById,
 } from "./securityPolicies.js";
+import { docStore } from "./storage/index.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,7 +36,8 @@ const ROOT = path.join(__dirname, "..");
 const SERVERS_FILE = path.join(ROOT, "servers.json");
 const MODEL_CONFIG_FILE = path.join(ROOT, "modelconfig.json");
 const LOG_DIR = path.join(ROOT, "llama", "logs");
-const STATUS_FILE = path.join(ROOT, "data", "server-status.json");
+// 기동 실패 사유 맵. 영속: 단일 문서 저장소 (즉시 쓰기 = debounce 0).
+const statusStore = docStore("server-status.json", { debounceMs: 0, pretty: true });
 
 const TIER_RANK = { large: 0, medium: 1, small: 2 };
 
@@ -137,18 +139,13 @@ export function sortDefsByPriority(defs) {
 
 /** 기동 실패 사유 (name → { error, at }) */
 async function loadStatusMap() {
-    try {
-        const raw = await readFile(STATUS_FILE, "utf-8");
-        const data = JSON.parse(raw);
-        return data && typeof data === "object" ? data : {};
-    } catch {
-        return {};
-    }
+    const data = await statusStore.read();
+    return data && typeof data === "object" ? data : {};
 }
 
 async function saveStatusMap(map) {
-    await mkdir(path.dirname(STATUS_FILE), { recursive: true });
-    await writeFile(STATUS_FILE, JSON.stringify(map, null, 2) + "\n", "utf-8");
+    statusStore.save(map);
+    await statusStore.flush();
 }
 
 export async function setStartError(name, error) {
@@ -533,6 +530,7 @@ export function enrichServerWithRoles(def) {
         securityPolicies: sec.policies,
         securityPolicyText: sec.securityPolicyText,
         security: def.security === true,
+        quality: def.quality === true,
     };
 }
 
@@ -545,12 +543,15 @@ export async function persistFixedRole(urlOrPort, role, enabled) {
     if (key === "chat") key = "solve";
     if (key === "pipeline" || key === "design") key = "planner";
     if (key === "보안검증" || key === "seccheck") key = "security";
+    if (key === "답변품질검증" || key === "품질검증" || key === "qualitycheck")
+        key = "quality";
     const allowed = new Set([
         "solve",
         "router",
         "planner",
         "embedding",
         "security",
+        "quality",
     ]);
     if (!allowed.has(key)) {
         throw new Error(`알 수 없는 고정 역할: ${role}`);
@@ -1236,6 +1237,7 @@ export async function serverStatus(defs) {
                 skills: r.skills,
                 skill: r.skills[0] ?? null,
                 security: d.security === true,
+                quality: d.quality === true,
                 securityIds: sec.securityIds,
                 securityPolicies: sec.policies,
                 securityPolicyText: sec.securityPolicyText,

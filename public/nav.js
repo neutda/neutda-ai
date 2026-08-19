@@ -334,3 +334,51 @@
         window.addEventListener("beforeunload", persistRailHist);
     }
 })();
+
+// ===== 해결(solve) 모델 서버 없음 경고 — 모든 페이지 공통, 우하단 고정 =====
+// 답변 가능한(solve) 백엔드가 하나도 없으면 닫을 수 없는 토스트를 띄운다.
+// 모델 서버가 올라오면 자동으로 사라진다.
+// /health 의 healthyBackends = healthy 이면서 solve(답변) 가능한 채팅 백엔드 수.
+(function () {
+    var css =
+        ".solve-toast{position:fixed;right:18px;bottom:18px;z-index:2147483647;" +
+        "max-width:340px;display:none;gap:10px;align-items:flex-start;padding:12px 14px;" +
+        "border-radius:10px;background:#b91c1c;color:#fff;box-shadow:0 6px 22px rgba(0,0,0,.28);" +
+        "font:13px/1.45 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}" +
+        ".solve-toast.show{display:flex}.solve-toast b{font-size:13px}" +
+        ".solve-toast .d{width:8px;height:8px;border-radius:50%;background:#fff;margin-top:5px;" +
+        "flex:0 0 auto;animation:solveBlink 1.2s ease-in-out infinite}" +
+        "@keyframes solveBlink{0%,100%{opacity:1}50%{opacity:.3}}";
+    var st = document.createElement("style");
+    st.textContent = css;
+    (document.head || document.documentElement).appendChild(st);
+
+    var toast = null;
+    function ensureToast() {
+        if (toast) return toast;
+        toast = document.createElement("div");
+        toast.className = "solve-toast";
+        toast.setAttribute("role", "alert");
+        toast.setAttribute("aria-live", "assertive");
+        toast.innerHTML =
+            '<span class="d"></span><div><b>해결 서버가 없습니다</b><br>' +
+            "<span>답변 가능한 모델 서버가 없어 대화를 처리할 수 없습니다. 모델 서버를 기동하세요.</span></div>";
+        (document.body || document.documentElement).appendChild(toast);
+        return toast;
+    }
+    function setVisible(v) {
+        if (v) ensureToast().classList.add("show");
+        else if (toast) toast.classList.remove("show");
+    }
+    async function check() {
+        try {
+            var r = await fetch("/health", { cache: "no-store" });
+            var d = await r.json();
+            setVisible(Number(d && d.healthyBackends) <= 0);
+        } catch (e) {
+            setVisible(true); // 게이트웨이 무응답 → 대화 불가 상태로 간주
+        }
+    }
+    check();
+    setInterval(check, 5000);
+})();

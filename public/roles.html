@@ -264,7 +264,9 @@
                 display: flex;
             }
             .modal {
-                width: min(440px, 100%);
+                width: min(560px, 100%);
+                max-height: calc(100vh - 40px);
+                overflow-y: auto;
                 background: #12151d;
                 border: 1px solid var(--border);
                 border-radius: 14px;
@@ -286,7 +288,8 @@
                 margin-bottom: 12px;
             }
             .modal input,
-            .modal textarea {
+            .modal textarea,
+            .modal select {
                 background: #0d0f15;
                 border: 1px solid var(--border);
                 border-radius: 7px;
@@ -296,13 +299,69 @@
                 font-family: inherit;
             }
             .modal textarea {
-                min-height: 80px;
+                min-height: 64px;
                 resize: vertical;
             }
             .modal input:focus,
-            .modal textarea:focus {
+            .modal textarea:focus,
+            .modal select:focus {
                 outline: none;
                 border-color: var(--accent);
+            }
+            .modal .param-row {
+                display: grid;
+                grid-template-columns: 1fr 1fr auto;
+                gap: 10px;
+                align-items: end;
+            }
+            .modal .param-row.langs {
+                grid-template-columns: 1fr;
+            }
+            .modal .param-row label {
+                margin-bottom: 12px;
+            }
+            .modal .param-row label.chk {
+                flex-direction: row;
+                align-items: center;
+                gap: 6px;
+                white-space: nowrap;
+            }
+            .modal .param-row label.chk input {
+                width: 15px;
+                height: 15px;
+            }
+            .role-item .tags {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                margin-top: 4px;
+            }
+            .role-item .tag {
+                font-size: 10px;
+                font-weight: 700;
+                padding: 1px 6px;
+                border-radius: 999px;
+                border: 1px solid var(--border);
+                color: var(--muted);
+            }
+            .role-item .tag.on {
+                color: var(--accent);
+                border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+            }
+            .modal textarea.code-ta {
+                min-height: 54px;
+                font-family: ui-monospace, Consolas, monospace;
+                font-size: 12px;
+            }
+            .modal .fld-hint {
+                font-weight: 400;
+                color: var(--muted);
+            }
+            .modal .form-err {
+                color: var(--err, #f85149);
+                font-size: 11px;
+                margin: -6px 0 10px;
+                min-height: 13px;
             }
             .modal-actions {
                 display: flex;
@@ -326,10 +385,11 @@
             </header>
             <div class="app-main">
             <p class="muted lead">
-                역할은 모델이 잘 맡는 작업 유형입니다 (예: 요약·번역·보고서).
+                역할은 모델이 잘 맡는 작업 유형입니다 (예: 요약·번역·일정등록).
+                <b>설명</b>은 라우터가 “이 요청이 이 역할인가”를 고를 힌트이고,
+                <b>행동 지시·스키마·예시·파라미터</b>는 실제로 답변 방식(형식·온도·언어)을 바꿉니다.
                 공통 역할을 만들어 모델에 입히면 라우터·파이프라인이 그 특기로
-                요청을 나눕니다. 라우터·파이프라인 설계·임베딩·보안검증 같은
-                인프라 기능은 서버/모델관리의 고정 기능에서 켭니다.
+                요청을 나눕니다.
             </p>
 
             <div class="layout">
@@ -392,13 +452,62 @@
                     />
                 </label>
                 <label>
-                    설명 (선택)
+                    설명 <span class="fld-hint">— 라우터가 "이 요청이 이 역할인가" 판단하는 힌트</span>
                     <textarea
                         id="roleDesc"
                         maxlength="200"
                         placeholder="예: 회의록·문서 압축, 불릿 5줄 이내"
                     ></textarea>
                 </label>
+                <label>
+                    행동 지시 <span class="fld-hint">— 이 역할로 답할 때 모델에 주입되는 시스템 지시</span>
+                    <textarea
+                        id="roleInstruction"
+                        maxlength="2000"
+                        placeholder="예: 회의록을 불릿 5줄 이내로 요약하라. 사견·인사·군말 금지."
+                    ></textarea>
+                </label>
+                <div class="param-row">
+                    <label>
+                        온도(temperature)
+                        <input id="roleTemp" type="number" step="0.1" min="0" max="2" placeholder="기본" />
+                    </label>
+                    <label>
+                        최대 토큰
+                        <input id="roleMaxTokens" type="number" min="1" max="32768" placeholder="기본" />
+                    </label>
+                    <label class="chk">
+                        <input id="roleThinking" type="checkbox" /> 추론(thinking)
+                    </label>
+                </div>
+                <div class="param-row langs">
+                    <label>
+                        출력 언어
+                        <select id="roleLang">
+                            <option value="">기본 (질문 언어)</option>
+                            <option value="ko">한국어</option>
+                            <option value="en">English</option>
+                            <option value="zh">中文</option>
+                        </select>
+                    </label>
+                </div>
+                <label>
+                    출력 JSON 스키마 <span class="fld-hint">— 선택 · 영문 키만, 예: { "title": "일정 제목" }</span>
+                    <textarea
+                        id="roleSchema"
+                        class="code-ta"
+                        placeholder='예: { "title": "일정 제목", "desc": "설명" }'
+                    ></textarea>
+                </label>
+                <label>
+                    예시 (few-shot) <span class="fld-hint">— 선택 · [{ "input": "...", "output": "..." }]</span>
+                    <textarea
+                        id="roleExamples"
+                        class="code-ta"
+                        placeholder='예: [{ "input": "내일 3시 회의", "output": "{\"title\":\"회의\",\"desc\":\"내일 15:00\"}" }]'
+                    ></textarea>
+                </label>
+                <div class="form-err" id="formErr"></div>
                 <div class="modal-actions">
                     <button
                         id="btnDelete"
@@ -432,10 +541,36 @@
             let servers = [];
             let selectedId = null;
 
-            function openModal({ id = "", name = "", description = "" } = {}) {
+            function openModal(role = {}) {
+                const {
+                    id = "",
+                    name = "",
+                    description = "",
+                    instruction = "",
+                    outputSchema = {},
+                    examples = [],
+                    params = {},
+                } = role || {};
                 $("editId").value = id;
                 $("roleName").value = name;
-                $("roleDesc").value = description;
+                $("roleDesc").value = description || "";
+                $("roleInstruction").value = instruction || "";
+                $("roleTemp").value =
+                    params && params.temperature != null ? params.temperature : "";
+                $("roleMaxTokens").value =
+                    params && params.maxTokens != null ? params.maxTokens : "";
+                $("roleThinking").checked = !!(params && params.thinking === true);
+                $("roleLang").value =
+                    params && params.language ? params.language : "";
+                $("roleSchema").value =
+                    outputSchema && Object.keys(outputSchema).length
+                        ? JSON.stringify(outputSchema, null, 2)
+                        : "";
+                $("roleExamples").value =
+                    Array.isArray(examples) && examples.length
+                        ? JSON.stringify(examples, null, 2)
+                        : "";
+                $("formErr").textContent = "";
                 if (id) {
                     $("formTitle").textContent = `역할 수정 · ${name}`;
                     $("btnDelete").hidden = false;
@@ -489,11 +624,29 @@
                         const n = servers.filter((s) =>
                             (s.roleIds || []).includes(r.id),
                         ).length;
+                        const tags = [];
+                        if (r.instruction) tags.push("지시");
+                        if (r.outputSchema && Object.keys(r.outputSchema).length)
+                            tags.push("JSON");
+                        if (Array.isArray(r.examples) && r.examples.length)
+                            tags.push("예시");
+                        const p = r.params || {};
+                        if (
+                            p.temperature != null ||
+                            p.maxTokens != null ||
+                            p.thinking != null ||
+                            p.language
+                        )
+                            tags.push("파라미터");
+                        const tagHtml = tags.length
+                            ? `<div class="tags">${tags.map((t) => `<span class="tag on">${t}</span>`).join("")}</div>`
+                            : "";
                         return `
         <div class="role-item ${r.id === selectedId ? "active" : ""}" data-id="${esc(r.id)}">
           <div>
             <div class="name">${esc(r.name)}</div>
             <div class="desc">${esc(r.description || "(설명 없음)")}</div>
+            ${tagHtml}
             <div class="meta">배정 ${n}대</div>
           </div>
           <div class="actions">
@@ -593,11 +746,7 @@
                     e.stopPropagation();
                     const role = roles.find((r) => r.id === edit.dataset.id);
                     if (!role) return;
-                    openModal({
-                        id: role.id,
-                        name: role.name,
-                        description: role.description || "",
-                    });
+                    openModal(role);
                     return;
                 }
                 const item = e.target.closest(".role-item");
@@ -618,13 +767,63 @@
 
             $("btnSave").addEventListener("click", async () => {
                 const name = $("roleName").value.trim();
+                const errEl = $("formErr");
+                errEl.textContent = "";
                 if (!name) {
                     $("roleName").focus();
                     return;
                 }
+                const tempRaw = $("roleTemp").value.trim();
+                const maxRaw = $("roleMaxTokens").value.trim();
+                const params = {
+                    temperature: tempRaw === "" ? null : Number(tempRaw),
+                    maxTokens: maxRaw === "" ? null : Number(maxRaw),
+                    thinking: $("roleThinking").checked ? true : null,
+                    language: $("roleLang").value || null,
+                };
+                let outputSchema = {};
+                const schemaRaw = $("roleSchema").value.trim();
+                if (schemaRaw) {
+                    try {
+                        outputSchema = JSON.parse(schemaRaw);
+                        if (
+                            !outputSchema ||
+                            typeof outputSchema !== "object" ||
+                            Array.isArray(outputSchema)
+                        )
+                            throw new Error();
+                        const bad = Object.keys(outputSchema).filter(
+                            (k) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(k)),
+                        );
+                        if (bad.length)
+                            throw new Error("keys");
+                    } catch (e) {
+                        errEl.textContent =
+                            e && e.message === "keys"
+                                ? '스키마 키는 영문 식별자만 됩니다. 예: { "title": "제목", "desc": "설명" }'
+                                : '출력 스키마가 올바른 JSON 객체가 아닙니다. 예: { "title": "제목" }';
+                        return;
+                    }
+                }
+                let examples = [];
+                const exRaw = $("roleExamples").value.trim();
+                if (exRaw) {
+                    try {
+                        examples = JSON.parse(exRaw);
+                        if (!Array.isArray(examples)) throw new Error();
+                    } catch {
+                        errEl.textContent =
+                            '예시가 올바른 JSON 배열이 아닙니다. 예: [{ "input": "..", "output": ".." }]';
+                        return;
+                    }
+                }
                 const body = {
                     name,
                     description: $("roleDesc").value.trim(),
+                    instruction: $("roleInstruction").value.trim(),
+                    outputSchema,
+                    examples,
+                    params,
                 };
                 const id = $("editId").value;
                 const btn = $("btnSave");

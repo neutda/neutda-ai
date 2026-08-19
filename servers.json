@@ -1,34 +1,38 @@
 {
     "llmServers": [
         {
-            "name": "large",
-            "alias": "비전 대형 (27B)",
+            "name": "large-2",
+            "alias": "Qwen3.8 대형 (27B, 텍스트)",
             "tier": "large",
-            "port": 8080,
-            "model": "models/Qwen3.6-27B-Q4_K_M.gguf",
-            "mmproj": "models/mmproj-Qwen3.6-27B-BF16.gguf",
+            "port": 8082,
+            "model": "models/Qwen3.8-27B-Q4_K_M.gguf",
             "ctx": 8192,
             "parallel": 4,
             "ngl": 99,
             "gpu": "0",
-            "embedding": true,
             "planner": true,
-            "router": true,
-            "security": true
+            "embedding": true,
+            "quality": true,
+            "roleIds": [
+                "r_ms5efylr85h28d"
+            ],
+            "router": true
         },
         {
             "name": "medium-1",
             "alias": "Qwen2.5 7B Instruct (GPU)",
             "tier": "medium",
-            "port": 8081,
+            "port": 8080,
             "model": "models/qwen2.5-7b-instruct-q4_k_m.gguf",
             "ctx": 4096,
-            "ngl": 30,
+            "ngl": 15,
             "parallel": 8,
             "gpu": "0",
             "layers": 28,
-            "router": true,
-            "security": true
+            "security": true,
+            "roleIds": [
+                "r_ms5emhdfsj7jcf"
+            ]
         }
     ]
 }

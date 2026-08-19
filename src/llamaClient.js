@@ -1,5 +1,23 @@
 import { config } from "./config.js";
 
+/**
+ * 반복 억제 등 공통 샘플링 파라미터. llama.cpp 의 OpenAI 호환 엔드포인트는
+ * 이 네이티브 파라미터들을 함께 받아 적용한다. (repeat_penalty 미전달 시 서버 기본이
+ * 사실상 반복 억제를 끄기 때문에 무한 반복이 생길 수 있어 명시적으로 실어 보낸다.)
+ */
+function samplingParams() {
+  const p = {
+    repeat_penalty: config.repeatPenalty,
+    repeat_last_n: config.repeatLastN,
+    top_k: config.topK,
+    top_p: config.topP,
+    min_p: config.minP,
+  };
+  if (config.frequencyPenalty) p.frequency_penalty = config.frequencyPenalty;
+  if (config.presencePenalty) p.presence_penalty = config.presencePenalty;
+  return p;
+}
+
 class LlamaError extends Error {
   constructor(
     message,
@@ -45,6 +63,7 @@ export async function chatCompletion({ baseUrl, messages, temperature, maxTokens
         messages,
         temperature,
         max_tokens: maxTokens ?? config.defaultMaxTokens,
+        ...samplingParams(),
         stream: false,
         // Qwen 채팅 템플릿의 추론 모드 토글 (llama-server 가 그대로 전달)
         chat_template_kwargs: { enable_thinking: enableThinking ?? config.enableThinking },
@@ -114,6 +133,7 @@ export async function chatCompletionStream({ baseUrl, messages, temperature, max
         messages,
         temperature,
         max_tokens: maxTokens ?? config.defaultMaxTokens,
+        ...samplingParams(),
         stream: true,
         stream_options: { include_usage: true },
         chat_template_kwargs: { enable_thinking: enableThinking ?? config.enableThinking },

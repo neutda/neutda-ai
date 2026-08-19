@@ -7,13 +7,11 @@
  * - recall 점수 하한(임계값) — 미달이면 주입 안 함
  * - 엔트리 최근 N개 cap — remember 시 오래된 것 폐기
  */
-import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
+import { keyedDocStore } from "./storage/index.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "data", "memory");
+// uid 당 개인기억 {entries} 영속 — file: data/memory/<uid>.json / postgres: memory_entry.
+const store = keyedDocStore("memory");
 
 /** @type {null | ((texts: string[]) => Promise<number[][]|null>)} */
 let embedBatch = null;
@@ -61,9 +59,6 @@ function safeUid(uid) {
     .slice(0, 120);
 }
 
-function filePath(uid) {
-  return path.join(DATA_DIR, `${safeUid(uid)}.json`);
-}
 
 function tokenize(text) {
   const out = [];
@@ -105,10 +100,6 @@ function cosine(a, b) {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-async function ensureDir() {
-  await mkdir(DATA_DIR, { recursive: true });
-}
-
 /**
  * 구버전 Q:/A: 통째 저장 → 사용자 발화만 추출.
  * 이미 사용자 원문이면 그대로.
@@ -145,14 +136,8 @@ async function loadUser(uid) {
   if (!key) return { entries: [] };
   if (cache.has(key)) return cache.get(key);
 
-  let entries = [];
-  try {
-    const raw = await readFile(filePath(key), "utf-8");
-    const data = JSON.parse(raw);
-    entries = Array.isArray(data.entries) ? data.entries : [];
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
-  }
+  const data = await store.get(key);
+  let entries = Array.isArray(data?.entries) ? data.entries : [];
 
   let migrated = false;
   const cleaned = [];
@@ -182,7 +167,6 @@ async function loadUser(uid) {
 async function persistUser(uid, state) {
   const key = safeUid(uid);
   if (!key) return;
-  await ensureDir();
   const data = {
     entries: state.entries.map((e) => ({
       id: e.id,
@@ -192,7 +176,7 @@ async function persistUser(uid, state) {
       embedding: Array.isArray(e.embedding) ? e.embedding : undefined,
     })),
   };
-  await writeFile(filePath(key), JSON.stringify(data), "utf-8");
+  await store.put(key, data);
   cache.set(key, state);
 }
 
@@ -391,13 +375,8 @@ export async function forget(uid) {
   const key = safeUid(uid);
   if (!key) return { ok: false, removed: false };
   cache.delete(key);
-  try {
-    await unlink(filePath(key));
-    return { ok: true, removed: true };
-  } catch (err) {
-    if (err.code === "ENOENT") return { ok: true, removed: false };
-    throw err;
-  }
+  const removed = await store.remove(key);
+  return { ok: true, removed };
 }
 
 /** 테스트용 캐시 비우기 */
